@@ -21,6 +21,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 
+/// Agent identifier type.
+pub type AgentId = Arc<str>;
+
 /// Channel identifier type.
 pub type ChannelId = Arc<str>;
 
@@ -76,51 +79,75 @@ impl std::fmt::Display for ProcessType {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ProcessEvent {
     BranchResult {
+        agent_id: AgentId,
         branch_id: BranchId,
         channel_id: ChannelId,
         conclusion: String,
     },
     WorkerStatus {
+        agent_id: AgentId,
         worker_id: WorkerId,
         channel_id: Option<ChannelId>,
         status: String,
     },
     WorkerComplete {
+        agent_id: AgentId,
         worker_id: WorkerId,
         channel_id: Option<ChannelId>,
         result: String,
         notify: bool,
     },
     ToolStarted {
+        agent_id: AgentId,
         process_id: ProcessId,
         tool_name: String,
     },
     ToolCompleted {
+        agent_id: AgentId,
         process_id: ProcessId,
         tool_name: String,
         result: String,
     },
     MemorySaved {
+        agent_id: AgentId,
         memory_id: String,
         channel_id: Option<ChannelId>,
     },
     CompactionTriggered {
+        agent_id: AgentId,
         channel_id: ChannelId,
         threshold_reached: f32,
     },
     StatusUpdate {
+        agent_id: AgentId,
         process_id: ProcessId,
         status: String,
     },
 }
 
-/// Shared dependency bundle for agents.
+/// Shared dependency bundle for agent processes.
 #[derive(Clone)]
 pub struct AgentDeps {
+    pub agent_id: AgentId,
     pub memory_search: Arc<memory::MemorySearch>,
     pub llm_manager: Arc<llm::LlmManager>,
     pub tool_server: rig::tool::server::ToolServerHandle,
     pub event_tx: tokio::sync::mpsc::Sender<ProcessEvent>,
+}
+
+impl AgentDeps {
+    pub fn memory_search(&self) -> &Arc<memory::MemorySearch> { &self.memory_search }
+    pub fn llm_manager(&self) -> &Arc<llm::LlmManager> { &self.llm_manager }
+}
+
+/// A running agent instance with all its isolated resources.
+pub struct Agent {
+    pub id: AgentId,
+    pub config: config::ResolvedAgentConfig,
+    pub db: db::Db,
+    pub deps: AgentDeps,
+    pub prompts: identity::Prompts,
+    pub identity: identity::Identity,
 }
 
 /// Inbound message from any messaging platform.
@@ -130,6 +157,8 @@ pub struct InboundMessage {
     pub source: String,
     pub conversation_id: String,
     pub sender_id: String,
+    /// Set by the router after binding resolution. None until routed.
+    pub agent_id: Option<AgentId>,
     pub content: MessageContent,
     pub timestamp: chrono::DateTime<chrono::Utc>,
     pub metadata: HashMap<String, serde_json::Value>,

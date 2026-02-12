@@ -2,55 +2,51 @@
 
 use crate::error::Result;
 use anyhow::Context as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-/// Load a prompt file from the prompts directory.
-pub async fn load_prompt(name: &str) -> Result<String> {
-    let path = PathBuf::from("prompts").join(format!("{}.md", name));
-    
-    tokio::fs::read_to_string(&path)
-        .await
-        .with_context(|| format!("failed to load prompt file: {}", path.display()))
-        .map_err(Into::into)
+/// Loaded identity files for an agent.
+#[derive(Clone, Debug, Default)]
+pub struct Identity {
+    pub soul: Option<String>,
+    pub identity: Option<String>,
+    pub user: Option<String>,
 }
 
-/// Load the channel system prompt.
-pub async fn channel_prompt() -> Result<String> {
-    load_prompt("CHANNEL").await
+impl Identity {
+    /// Load identity files from an agent's workspace directory.
+    pub async fn load(workspace: &Path) -> Self {
+        Self {
+            soul: load_optional_file(&workspace.join("SOUL.md")).await,
+            identity: load_optional_file(&workspace.join("IDENTITY.md")).await,
+            user: load_optional_file(&workspace.join("USER.md")).await,
+        }
+    }
+
+    /// Render identity context for injection into system prompts.
+    pub fn render(&self) -> String {
+        let mut output = String::new();
+
+        if let Some(soul) = &self.soul {
+            output.push_str("## Soul\n\n");
+            output.push_str(soul);
+            output.push_str("\n\n");
+        }
+        if let Some(identity) = &self.identity {
+            output.push_str("## Identity\n\n");
+            output.push_str(identity);
+            output.push_str("\n\n");
+        }
+        if let Some(user) = &self.user {
+            output.push_str("## User\n\n");
+            output.push_str(user);
+            output.push_str("\n\n");
+        }
+
+        output
+    }
 }
 
-/// Load the branch system prompt.
-pub async fn branch_prompt() -> Result<String> {
-    load_prompt("BRANCH").await
-}
-
-/// Load the worker system prompt.
-pub async fn worker_prompt() -> Result<String> {
-    load_prompt("WORKER").await
-}
-
-/// Load the cortex system prompt.
-pub async fn cortex_prompt() -> Result<String> {
-    load_prompt("CORTEX").await
-}
-
-/// Load the compactor system prompt.
-pub async fn compactor_prompt() -> Result<String> {
-    load_prompt("COMPACTOR").await
-}
-
-/// Load all prompts at startup.
-pub async fn load_all_prompts() -> anyhow::Result<Prompts> {
-    Ok(Prompts {
-        channel: channel_prompt().await?,
-        branch: branch_prompt().await?,
-        worker: worker_prompt().await?,
-        cortex: cortex_prompt().await?,
-        compactor: compactor_prompt().await?,
-    })
-}
-
-/// Container for all loaded prompts.
+/// Container for all loaded process-type prompts.
 #[derive(Clone, Debug)]
 pub struct Prompts {
     pub channel: String,
@@ -61,8 +57,52 @@ pub struct Prompts {
 }
 
 impl Prompts {
-    /// Load all prompts from disk.
-    pub async fn load() -> anyhow::Result<Self> {
-        load_all_prompts().await
+    /// Load prompts with agent workspace override, falling back to shared prompts dir.
+    pub async fn load(workspace: &Path, shared_prompts_dir: &Path) -> anyhow::Result<Self> {
+        Ok(Self {
+            channel: load_prompt("CHANNEL", workspace, shared_prompts_dir).await?,
+            branch: load_prompt("BRANCH", workspace, shared_prompts_dir).await?,
+            worker: load_prompt("WORKER", workspace, shared_prompts_dir).await?,
+            cortex: load_prompt("CORTEX", workspace, shared_prompts_dir).await?,
+            compactor: load_prompt("COMPACTOR", workspace, shared_prompts_dir).await?,
+        })
     }
+}
+
+/// Load a prompt file with fallback chain:
+/// 1. Agent workspace/prompts/{name}.md (override)
+/// 2. Shared prompts/{name}.md (default)
+/// 3. Relative prompts/{name}.md (dev/backward compat)
+async fn load_prompt(name: &str, workspace: &Path, shared_prompts_dir: &Path) -> Result<String> {
+    let filename = format!("{name}.md");
+
+    let agent_path = workspace.join("prompts").join(&filename);
+    if agent_path.exists() {
+        return tokio::fs::read_to_string(&agent_path)
+            .await
+            .with_context(|| format!("failed to read agent prompt override: {}", agent_path.display()))
+            .map_err(Into::into);
+    }
+
+    let shared_path = shared_prompts_dir.join(&filename);
+    if shared_path.exists() {
+        return tokio::fs::read_to_string(&shared_path)
+            .await
+            .with_context(|| format!("failed to read shared prompt: {}", shared_path.display()))
+            .map_err(Into::into);
+    }
+
+    let relative_path = PathBuf::from("prompts").join(&filename);
+    tokio::fs::read_to_string(&relative_path)
+        .await
+        .with_context(|| format!(
+            "prompt not found: tried {}, {}, {}",
+            agent_path.display(), shared_path.display(), relative_path.display()
+        ))
+        .map_err(Into::into)
+}
+
+/// Load a file if it exists, returning None if missing.
+async fn load_optional_file(path: &Path) -> Option<String> {
+    tokio::fs::read_to_string(path).await.ok()
 }

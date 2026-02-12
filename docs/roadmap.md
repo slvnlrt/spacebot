@@ -8,28 +8,27 @@ For each piece: reference IronClaw, OpenClaw, Nanobot, and Rig for inspiration, 
 
 ## Current State
 
-**What exists and compiles (zero errors, warnings only):**
+**What exists and compiles:**
 - Project structure — all modules declared, module root pattern (`src/memory.rs` not `mod.rs`)
 - Error hierarchy — thiserror domain enums (`ConfigError`, `DbError`, `LlmError`, `MemoryError`, `AgentError`, `SecretsError`) wrapped by top-level `Error` with `#[from]`
 - Config loading — env-based with compaction/channel defaults, data dir setup
 - Database connections — SQLite (sqlx) + LanceDB + redb. SQLite migrations for all tables (memories, associations, conversations, heartbeats). Migration runner in `db.rs`.
 - LLM — `SpacebotModel` implements Rig's `CompletionModel` trait (completion, make, stream stub). Routes through `LlmManager` via direct HTTP to Anthropic and OpenAI. Handles tool definitions in requests and tool calls in responses.
 - Memory — types (`Memory`, `Association`, `MemoryType`, `RelationType`), SQLite store (full CRUD + associations), LanceDB embedding storage + vector search (cosine) + FTS (Tantivy), fastembed (all-MiniLM-L6-v2, 384 dims), hybrid search (vector + FTS + graph traversal + RRF fusion), `MemorySearch` bundles store + lance + embedder. Maintenance (decay/prune stubs).
-- Agent structs — Channel (278 lines, event loop with `tokio::select!`, branch/worker spawning, status block), Branch (107 lines, history clone, recall, conclusion return), Worker (155 lines, state machine with `can_transition_to`), Compactor (141 lines, tiered thresholds), Cortex (117 lines, signal processing). Core LLM calls within agents are simulated — the surrounding infrastructure is real.
+- Agent structs — Channel, Branch, Worker, Compactor, Cortex. Core LLM calls within agents are simulated — the surrounding infrastructure is real.
 - StatusBlock — event-driven updates from `ProcessEvent`, renders to context string
-- SpacebotHook — tool start/complete events, leak detection regexes (`LazyLock`), status updates
+- SpacebotHook — implements `PromptHook<M>` with tool call/result event emission, leak detection regexes (`LazyLock`)
+- CortexHook — implements `PromptHook<M>` for system observation
 - Messaging — `Messaging` trait with RPITIT + `MessagingDyn` companion + blanket impl. `MessagingManager` with adapter registry. Discord/Telegram/Webhook adapters are empty stubs.
-- Tools — 11 tool files. Real implementations: `memory_save`, `memory_recall`, `shell`, `file` (with path guards), `exec`, `set_status`. Stubs: `reply`, `branch_tool`, `spawn_worker`, `route`, `cancel`.
-- `ToolServerHandle` wraps Rig's `ToolSet` with `register()`, but individual tools don't implement Rig's `Tool` trait yet — they're standalone async functions.
-- Core types in `lib.rs` — `InboundMessage`, `OutboundResponse`, `StatusUpdate`, `ProcessEvent`, `AgentDeps`, `ProcessId`, `ProcessType`, `ChannelId`, `WorkerId`, `BranchId`
-- `main.rs` — CLI (clap), tracing, config/DB/LLM/memory init (constructs `MemorySearch` with all components), event loop, graceful shutdown
+- Tools — 11 tools implement Rig's `Tool` trait. Structs hold dependencies (Arc<MemorySearch>, event channels, etc.). `definition()` with JSON schemas, `call(&self, args)` with `Self::Error`. Legacy wrapper functions preserved for backward compat.
+- Custom `ToolServerHandle` deleted — `AgentDeps.tool_server` uses `rig::tool::server::ToolServerHandle` directly
+- Core types in `lib.rs` — `InboundMessage`, `OutboundResponse`, `StatusUpdate`, `ProcessEvent` (with `agent_id` on all variants), `AgentDeps`, `Agent`, `AgentId`, `ProcessId`, `ProcessType`, `ChannelId`, `WorkerId`, `BranchId`
+- `main.rs` — CLI (clap), tracing, config/DB/LLM/memory init, event loop, graceful shutdown. Tool server creation deferred to Phase 4.
 
 **What's missing:**
-- Tools not registered as Rig `Tool` trait impls (no `const NAME`, no `Args`/`Output` types, no `JsonSchema`). Current tools are standalone `async fn`s that take `AgentDeps` as a parameter — fundamentally different shape from Rig's `Tool::call(&self, args)`. Each tool will need to hold its dependencies (MemorySearch, event channels, etc.) as struct fields.
-- `SpacebotHook` has standalone methods but doesn't implement Rig's `PromptHook<SpacebotModel>` trait — not wired into the agent loop
-- `ToolServerHandle` has a broken `Clone` impl (creates empty `ToolSet`, losing all registered tools)
 - No identity files (SOUL.md, IDENTITY.md, USER.md)
 - Agent LLM calls are simulated (placeholder `tokio::time::sleep` instead of real `agent.prompt()`)
+- ToolServer not yet created — tools implement `Tool` but aren't registered on a server yet (happens in Phase 4)
 - Streaming not implemented (SpacebotModel.stream() returns error)
 - Secrets and settings stores are empty stubs
 
@@ -37,6 +36,11 @@ For each piece: reference IronClaw, OpenClaw, Nanobot, and Rig for inspiration, 
 - `embedding.rs` `embed_one()` async path creates a new fastembed model per call instead of sharing via Arc (the sync `embed_one_blocking()` works correctly and is what `hybrid_search` uses)
 - Arrow version mismatch in Cargo.toml: `arrow = "54"` vs `arrow-array`/`arrow-schema` at `"57.3.0"` — should align or drop the `arrow` meta-crate
 - `lance.rs` casts `_distance`/`_score` columns as `Float64Type` — LanceDB may return `Float32`, risking a runtime panic on cast
+- `SpacebotHook` missing `agent_id` field — `ProcessEvent` variants now require `agent_id: AgentId` but the hook only has `process_id` and `process_type`. Needs `agent_id` added to the hook struct and its constructors.
+- `MemoryRecallTool::call()` relevance score mapping is wrong — after `curate_results()` reorders/filters, indexing `search_results[idx]` by curated index doesn't map to the correct original result. Should look up score by memory ID.
+- `MemorySaveTool` dropped `channel_id` — `save_fact()` takes `channel_id` but `MemorySaveArgs` has no such field, so `memory.with_channel_id()` is never called. Silently drops the association.
+- `ReplyTool` takes `Arc<InboundMessage>` at construction time, but Rig's `ToolServer` registers tools once and shares across calls. The reply tool would need per-message reconstruction, conflicting with ToolServer's model. Needs rethinking in Phase 4.
+- `definition()` on all tools hand-writes JSON schemas instead of using the `JsonSchema` derive on `Args` types. The derives are unused dead weight. Either use `schemars::schema_for!()` to generate from the derive, or drop the derive (hand-written schemas have richer descriptions but create a maintenance burden where field changes require updating two places).
 
 ---
 
@@ -51,20 +55,24 @@ For each piece: reference IronClaw, OpenClaw, Nanobot, and Rig for inspiration, 
 
 ---
 
-## Phase 2: Wire Tools to Rig
+## ~~Phase 2: Wire Tools to Rig~~ Done
 
-Individual tools need to implement Rig's `Tool` trait so they work with `AgentBuilder.tool()` and the agentic loop. The current tools are standalone `async fn`s that take `AgentDeps` — they need to become structs that hold their dependencies and implement `Tool::call(&self, args)`.
+- [x] Reshape tools as structs with dependency fields (MemorySaveTool, MemoryRecallTool hold `Arc<MemorySearch>`; BranchTool, CancelTool, RouteTool, SpawnWorkerTool hold channel_id + event_tx; SetStatusTool holds worker_id + event_tx; ReplyTool holds `Arc<InboundMessage>`; ShellTool, FileTool, ExecTool are stateless)
+- [x] Implement Rig's `Tool` trait on all 11 tools (`const NAME`, `Args`, `Output`, `definition()`, `call()`)
+- [x] Delete the custom `ToolServerHandle` wrapper — `AgentDeps.tool_server` is now `rig::tool::server::ToolServerHandle`
+- [x] Implement `PromptHook<M>` on `SpacebotHook` — tool call/result event emission, leak detection
+- [x] Implement `PromptHook<M>` on `CortexHook` — observation logging
+- [x] Added `Clone`/`Debug` impls for `MemorySearch`, `EmbeddingTable`, `MemoryStore`
+- [x] Legacy wrapper functions preserved for backward compatibility
+- [ ] Create shared ToolServer for channel/branch tools (deferred to Phase 4 — needs real agent construction)
+- [ ] Create per-worker ToolServer factory for task tools (deferred to Phase 4)
 
-- [ ] Reshape tools as structs with dependency fields (e.g., `MemorySaveTool { memory_search: Arc<MemorySearch>, event_tx: mpsc::Sender<ProcessEvent> }`)
-- [ ] Implement Rig's `Tool` trait on each struct (`const NAME`, `Args: Deserialize + JsonSchema`, `Output: Serialize`, `definition()`, `call()`)
-- [ ] Create shared ToolServer for channel/branch tools (reply, branch, spawn_worker, memory_save, route, cancel)
-- [ ] Create per-worker ToolServer factory for task tools (shell, file, exec, set_status)
-- [ ] Delete the custom `ToolServerHandle` wrapper — use Rig's `ToolServer::run()` → `ToolServerHandle` directly (channel-based, Clone works correctly)
-- [ ] Update `AgentDeps` to hold a real `rig::tool::server::ToolServerHandle`
-- [ ] Implement `PromptHook<SpacebotModel>` on `SpacebotHook` — wire the existing standalone methods into Rig's trait (on_tool_call, on_tool_result, on_completion_response, etc.)
-- [ ] Implement `PromptHook<SpacebotModel>` on `CortexHook`
-
-**Reference:** Rig's `Tool` trait: `const NAME`, `type Args`, `type Output`, `fn definition()`, `fn call()`. Doc comments on input structs serve as LLM instructions. `ToolServer::run()` consumes the server and returns a handle (channel-based, Clone is free). See `docs/research/rig-integration.md` for full `PromptHook` method signatures and `ToolCallHookAction` variants.
+**Fixups needed before Phase 4:**
+- `SpacebotHook` needs `agent_id: AgentId` field — `ProcessEvent` variants now require it but the hook doesn't have it
+- `MemoryRecallTool::call()` — relevance score uses curated index to look up `search_results`, but curation reorders/filters so the index mapping is wrong
+- `MemorySaveTool` — missing `channel_id` field on `MemorySaveArgs`, so `memory.with_channel_id()` is never called
+- `ReplyTool` — constructed per-message (`Arc<InboundMessage>`), but ToolServer registers tools once. Needs rethinking for actual channel wiring.
+- `definition()` hand-writes JSON schemas while `Args` types derive `JsonSchema` (unused). Pick one approach.
 
 ---
 

@@ -77,7 +77,7 @@ impl Cortex {
                     result_summary: result.lines().next().unwrap_or("done").into(),
                 })
             }
-            ProcessEvent::CompactionTriggered { channel_id, threshold_reached } => {
+            ProcessEvent::CompactionTriggered { channel_id, threshold_reached, .. } => {
                 Some(Signal::Compaction {
                     channel_id: channel_id.to_string(),
                     turns_compacted: (*threshold_reached * 100.0) as i64,

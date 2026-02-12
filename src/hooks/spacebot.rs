@@ -1,6 +1,6 @@
 //! SpacebotHook: Prompt hook for channels, branches, and workers.
 
-use crate::{ProcessEvent, ProcessId, ProcessType};
+use crate::{AgentId, ProcessEvent, ProcessId, ProcessType};
 use rig::agent::{HookAction, PromptHook, ToolCallHookAction};
 use rig::completion::{CompletionModel, CompletionResponse, Message};
 use tokio::sync::mpsc;
@@ -8,6 +8,7 @@ use tokio::sync::mpsc;
 /// Hook for observing agent behavior and sending events.
 #[derive(Clone)]
 pub struct SpacebotHook {
+    agent_id: AgentId,
     process_id: ProcessId,
     process_type: ProcessType,
     event_tx: mpsc::Sender<ProcessEvent>,
@@ -16,11 +17,13 @@ pub struct SpacebotHook {
 impl SpacebotHook {
     /// Create a new hook.
     pub fn new(
+        agent_id: AgentId,
         process_id: ProcessId,
         process_type: ProcessType,
         event_tx: mpsc::Sender<ProcessEvent>,
     ) -> Self {
         Self {
+            agent_id,
             process_id,
             process_type,
             event_tx,
@@ -30,6 +33,7 @@ impl SpacebotHook {
     /// Send a status update event.
     pub fn send_status(&self, status: impl Into<String>) {
         let event = ProcessEvent::StatusUpdate {
+            agent_id: self.agent_id.clone(),
             process_id: self.process_id.clone(),
             status: status.into(),
         };
@@ -105,6 +109,7 @@ where
     ) -> ToolCallHookAction {
         // Send event without blocking
         let event = ProcessEvent::ToolStarted {
+            agent_id: self.agent_id.clone(),
             process_id: self.process_id.clone(),
             tool_name: tool_name.to_string(),
         };
@@ -139,6 +144,7 @@ where
         }
 
         let event = ProcessEvent::ToolCompleted {
+            agent_id: self.agent_id.clone(),
             process_id: self.process_id.clone(),
             tool_name: tool_name.to_string(),
             result: result.to_string(),

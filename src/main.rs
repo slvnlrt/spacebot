@@ -2,6 +2,8 @@
 
 use anyhow::Context as _;
 use clap::Parser;
+use std::collections::HashMap;
+use std::sync::Arc;
 use tracing_subscriber::EnvFilter;
 
 #[derive(Parser)]
@@ -11,7 +13,7 @@ struct Cli {
     /// Path to config file (optional)
     #[arg(short, long)]
     config: Option<std::path::PathBuf>,
-    
+
     /// Enable debug logging
     #[arg(short, long)]
     debug: bool,
@@ -19,103 +21,131 @@ struct Cli {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Parse CLI arguments
     let cli = Cli::parse();
-    
-    // Initialize logging
+
     let filter = if cli.debug {
         EnvFilter::new("debug")
     } else {
         EnvFilter::new("info")
     };
-    
+
     tracing_subscriber::fmt()
         .with_env_filter(filter)
         .init();
-    
-    tracing::info!("Starting Spacebot...");
-    
+
+    tracing::info!("starting spacebot");
+
     // Load configuration
     let config = if let Some(config_path) = cli.config {
         spacebot::config::Config::load_from_path(&config_path)
             .with_context(|| format!("failed to load config from {}", config_path.display()))?
     } else {
         spacebot::config::Config::load()
-            .with_context(|| "failed to load configuration from environment")?
+            .with_context(|| "failed to load configuration")?
     };
-    
-    tracing::info!(data_dir = %config.data_dir.display(), "Configuration loaded");
-    
-    // Initialize databases
-    let db = spacebot::db::Db::connect(&config.data_dir)
-        .await
-        .with_context(|| "failed to connect to databases")?;
-    
-    tracing::info!("Database connections established");
-    
-    // Initialize LLM manager
+
+    tracing::info!(instance_dir = %config.instance_dir.display(), "configuration loaded");
+
+    // Shared LLM manager (same API keys for all agents)
     let llm_manager = Arc::new(
         spacebot::llm::LlmManager::new(config.llm.clone())
             .await
             .with_context(|| "failed to initialize LLM manager")?
     );
-    
-    tracing::info!("LLM manager initialized");
-    
-    // Initialize memory components
-    let memory_store = spacebot::memory::MemoryStore::new(db.sqlite.clone());
-    let embedding_table = spacebot::memory::EmbeddingTable::open_or_create(&db.lance)
-        .await
-        .context("failed to initialize LanceDB embedding table")?;
-    let embedding_model = Arc::new(spacebot::memory::EmbeddingModel::new()
-        .context("failed to initialize embedding model")?);
-    
-    let memory_search = Arc::new(spacebot::memory::MemorySearch::new(
-        memory_store,
-        embedding_table,
-        embedding_model,
-    ));
-    
-    tracing::info!("Memory search initialized");
-    
-    // Create shared dependencies
-    let (event_tx, mut event_rx): (tokio::sync::mpsc::Sender<spacebot::ProcessEvent>, _) = tokio::sync::mpsc::channel(64);
-    
-    // Tool server will be created in Phase 3 when agents are implemented
-    // For now, we have successfully converted all tools to implement rig::tool::Tool
-    tracing::info!("Tools converted to Rig Tool trait successfully");
-    tracing::info!("(Tool server creation deferred to Phase 3)");
-    
-    // Placeholder deps - real AgentDeps created when tools are registered
-    let _memory_search = memory_search.clone();
-    let _event_tx = event_tx.clone();
-    
-    // Start event processing loop
-    let event_loop = tokio::spawn(async move {
-        while let Some(event) = event_rx.recv().await {
-            tracing::debug!(?event, "Process event received");
-            // Event handling will be implemented in Phase 3
-        }
-    });
-    
-    tracing::info!("Spacebot started successfully");
-    
-    // Wait for event loop to complete (or Ctrl-C)
-    tokio::select! {
-        _ = event_loop => {
-            tracing::info!("Event loop ended");
-        }
-        _ = tokio::signal::ctrl_c() => {
-            tracing::info!("Shutdown signal received");
-        }
+
+    // Shared embedding model (stateless, agent-agnostic)
+    let embedding_model = Arc::new(
+        spacebot::memory::EmbeddingModel::new()
+            .context("failed to initialize embedding model")?
+    );
+
+    tracing::info!("shared resources initialized");
+
+    // Resolve agent configs and initialize each agent
+    let resolved_agents = config.resolve_agents();
+    let mut agents: HashMap<spacebot::AgentId, spacebot::Agent> = HashMap::new();
+
+    let shared_prompts_dir = config.prompts_dir();
+
+    for agent_config in &resolved_agents {
+        tracing::info!(agent_id = %agent_config.id, "initializing agent");
+
+        // Ensure agent directories exist
+        std::fs::create_dir_all(&agent_config.workspace)
+            .with_context(|| format!("failed to create workspace: {}", agent_config.workspace.display()))?;
+        std::fs::create_dir_all(&agent_config.data_dir)
+            .with_context(|| format!("failed to create data dir: {}", agent_config.data_dir.display()))?;
+        std::fs::create_dir_all(&agent_config.archives_dir)
+            .with_context(|| format!("failed to create archives dir: {}", agent_config.archives_dir.display()))?;
+
+        // Per-agent database connections
+        let db = spacebot::db::Db::connect(&agent_config.data_dir)
+            .await
+            .with_context(|| format!("failed to connect databases for agent '{}'", agent_config.id))?;
+
+        // Per-agent memory system
+        let memory_store = spacebot::memory::MemoryStore::new(db.sqlite.clone());
+        let embedding_table = spacebot::memory::EmbeddingTable::open_or_create(&db.lance)
+            .await
+            .with_context(|| format!("failed to init embeddings for agent '{}'", agent_config.id))?;
+
+        let memory_search = Arc::new(spacebot::memory::MemorySearch::new(
+            memory_store,
+            embedding_table,
+            embedding_model.clone(),
+        ));
+
+        // Per-agent event bus
+        let (event_tx, _event_rx) = tokio::sync::mpsc::channel(64);
+
+        // Per-agent tool server (tools registered when agents are fully wired)
+        let tool_server = rig::tool::server::ToolServer::new().run();
+
+        let agent_id: spacebot::AgentId = Arc::from(agent_config.id.as_str());
+
+        let deps = spacebot::AgentDeps {
+            agent_id: agent_id.clone(),
+            memory_search,
+            llm_manager: llm_manager.clone(),
+            tool_server,
+            event_tx,
+        };
+
+        // Load identity files from agent workspace
+        let identity = spacebot::identity::Identity::load(&agent_config.workspace).await;
+
+        // Load prompts (agent overrides, then shared)
+        let prompts = spacebot::identity::Prompts::load(
+            &agent_config.workspace,
+            &shared_prompts_dir,
+        ).await.with_context(|| format!("failed to load prompts for agent '{}'", agent_config.id))?;
+
+        let agent = spacebot::Agent {
+            id: agent_id.clone(),
+            config: agent_config.clone(),
+            db,
+            deps,
+            prompts,
+            identity,
+        };
+
+        tracing::info!(agent_id = %agent_config.id, "agent initialized");
+        agents.insert(agent_id, agent);
     }
-    
+
+    tracing::info!(agent_count = agents.len(), "all agents initialized");
+
+    // Wait for shutdown signal
+    tokio::signal::ctrl_c().await?;
+
+    tracing::info!("shutdown signal received");
+
     // Graceful shutdown
-    tracing::info!("Shutting down...");
-    db.close().await;
-    
-    tracing::info!("Spacebot stopped");
+    for (agent_id, agent) in agents {
+        tracing::info!(%agent_id, "shutting down agent");
+        agent.db.close().await;
+    }
+
+    tracing::info!("spacebot stopped");
     Ok(())
 }
-
-use std::sync::Arc;

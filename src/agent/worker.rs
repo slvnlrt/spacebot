@@ -47,7 +47,7 @@ impl Worker {
     ) -> Self {
         let id = Uuid::new_v4();
         let process_id = ProcessId::Worker(id);
-        let hook = SpacebotHook::new(process_id, ProcessType::Worker, deps.event_tx.clone());
+        let hook = SpacebotHook::new(deps.agent_id.clone(), process_id, ProcessType::Worker, deps.event_tx.clone());
         let (status_tx, status_rx) = watch::channel("starting".to_string());
         
         Self {
@@ -73,7 +73,7 @@ impl Worker {
     ) -> (Self, mpsc::Sender<String>) {
         let id = Uuid::new_v4();
         let process_id = ProcessId::Worker(id);
-        let hook = SpacebotHook::new(process_id, ProcessType::Worker, deps.event_tx.clone());
+        let hook = SpacebotHook::new(deps.agent_id.clone(), process_id, ProcessType::Worker, deps.event_tx.clone());
         let (status_tx, status_rx) = watch::channel("starting".to_string());
         let (input_tx, input_rx) = mpsc::channel(32);
         

@@ -31,7 +31,7 @@ impl Branch {
     ) -> Self {
         let id = Uuid::new_v4();
         let process_id = ProcessId::Branch(id);
-        let hook = SpacebotHook::new(process_id, ProcessType::Branch, deps.event_tx.clone());
+        let hook = SpacebotHook::new(deps.agent_id.clone(), process_id, ProcessType::Branch, deps.event_tx.clone());
         
         Self {
             id,
@@ -64,6 +64,7 @@ impl Branch {
         
         // Send completion event
         let _ = self.deps.event_tx.send(crate::ProcessEvent::BranchResult {
+            agent_id: self.deps.agent_id.clone(),
             branch_id: self.id,
             channel_id: self.channel_id.clone(),
             conclusion: conclusion.clone(),

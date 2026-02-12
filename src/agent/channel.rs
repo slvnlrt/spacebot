@@ -64,7 +64,7 @@ impl Channel {
         event_rx: broadcast::Receiver<ProcessEvent>,
     ) -> (Self, mpsc::Sender<InboundMessage>) {
         let process_id = ProcessId::Channel(id.clone());
-        let hook = SpacebotHook::new(process_id, ProcessType::Channel, deps.event_tx.clone());
+        let hook = SpacebotHook::new(deps.agent_id.clone(), process_id, ProcessType::Channel, deps.event_tx.clone());
         let status_block = Arc::new(RwLock::new(StatusBlock::new()));
         let history = Arc::new(RwLock::new(Vec::new()));
         let (message_tx, message_rx) = mpsc::channel(64);
