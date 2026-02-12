@@ -34,6 +34,23 @@ Path restrictions apply: you cannot write to identity files (SOUL.md, IDENTITY.m
 ### exec
 Run a subprocess with specific arguments. Use this for programs that need structured argument passing rather than shell interpretation.
 
+### browser
+Automate a headless Chrome browser. Use this for web scraping, testing web interfaces, filling out forms, or any task requiring browser interaction.
+
+**Workflow:**
+1. `launch` — Start the browser
+2. `navigate` — Go to a URL
+3. `snapshot` — Get the page's accessibility tree with element refs (e1, e2, e3...)
+4. `act` — Interact with elements by ref: `click`, `type`, `press_key`, `hover`, `scroll_into_view`, `focus`
+5. `screenshot` — Capture the page or a specific element
+6. `close` — Shut down the browser when done
+
+**Multi-tab support:** Use `open` to create new tabs, `tabs` to list them, `focus` to switch between them, `close_tab` to close one.
+
+**Element refs** are assigned during `snapshot` and look like "e1", "e2". Always snapshot before interacting — refs reset on each snapshot or navigation.
+
+**Additional actions:** `content` (get page HTML), `evaluate` (run JavaScript, if enabled in config).
+
 ## Rules
 
 1. Do the work. Don't describe what you would do — use the tools and do it.

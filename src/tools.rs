@@ -33,6 +33,7 @@ pub mod set_status;
 pub mod shell;
 pub mod file;
 pub mod exec;
+pub mod browser;
 
 pub use reply::{ReplyTool, ReplyArgs, ReplyOutput, ReplyError};
 pub use branch_tool::{BranchTool, BranchArgs, BranchOutput, BranchError};
@@ -45,12 +46,15 @@ pub use set_status::{SetStatusTool, SetStatusArgs, SetStatusOutput, SetStatusErr
 pub use shell::{ShellTool, ShellArgs, ShellOutput, ShellError, ShellResult};
 pub use file::{FileTool, FileArgs, FileOutput, FileError, FileEntryOutput, FileEntry, FileType};
 pub use exec::{ExecTool, ExecArgs, ExecOutput, ExecError, ExecResult, EnvVar};
+pub use browser::{BrowserTool, BrowserArgs, BrowserOutput, BrowserError, BrowserAction, ActKind, ElementSummary, TabInfo};
 
 use crate::agent::channel::ChannelState;
+use crate::config::BrowserConfig;
 use crate::memory::MemorySearch;
 use crate::{AgentId, ChannelId, OutboundResponse, ProcessEvent, WorkerId};
 use rig::tool::Tool as _;
 use rig::tool::server::{ToolServer, ToolServerHandle};
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc};
 
@@ -109,19 +113,27 @@ pub async fn remove_channel_tools(
 /// Create a per-worker ToolServer with task-appropriate tools.
 ///
 /// Each worker gets its own isolated ToolServer. The `set_status` tool is bound to
-/// the specific worker's ID so status updates route correctly.
+/// the specific worker's ID so status updates route correctly. The browser tool
+/// is included when browser automation is enabled in the agent config.
 pub fn create_worker_tool_server(
     agent_id: AgentId,
     worker_id: WorkerId,
     channel_id: Option<ChannelId>,
     event_tx: broadcast::Sender<ProcessEvent>,
+    browser_config: BrowserConfig,
+    screenshot_dir: PathBuf,
 ) -> ToolServerHandle {
-    ToolServer::new()
+    let mut server = ToolServer::new()
         .tool(ShellTool::new())
         .tool(FileTool::new())
         .tool(ExecTool::new())
-        .tool(SetStatusTool::new(agent_id, worker_id, channel_id, event_tx))
-        .run()
+        .tool(SetStatusTool::new(agent_id, worker_id, channel_id, event_tx));
+
+    if browser_config.enabled {
+        server = server.tool(BrowserTool::new(browser_config, screenshot_dir));
+    }
+
+    server.run()
 }
 
 /// Create a ToolServer for the cortex process.

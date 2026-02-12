@@ -20,6 +20,8 @@ pub struct DiscordAdapter {
     /// Per-guild channel allowlist. If a guild has an entry, only those channels are processed.
     /// Guilds without an entry (or with an empty vec) allow all channels.
     channel_filter: HashMap<GuildId, Vec<ChannelId>>,
+    /// User IDs allowed to DM the bot. If empty, all DMs are ignored.
+    dm_allowed_users: Vec<UserId>,
     http: Arc<RwLock<Option<Arc<Http>>>>,
     bot_user_id: Arc<RwLock<Option<UserId>>>,
     /// Maps InboundMessage.id to the Discord MessageId being edited during streaming.
@@ -34,6 +36,7 @@ impl DiscordAdapter {
         token: impl Into<String>,
         guild_filter: Option<Vec<u64>>,
         channel_filter: HashMap<u64, Vec<u64>>,
+        dm_allowed_users: Vec<u64>,
     ) -> Self {
         Self {
             token: token.into(),
@@ -47,6 +50,7 @@ impl DiscordAdapter {
                     )
                 })
                 .collect(),
+            dm_allowed_users: dm_allowed_users.into_iter().map(UserId::new).collect(),
             http: Arc::new(RwLock::new(None)),
             bot_user_id: Arc::new(RwLock::new(None)),
             active_messages: Arc::new(RwLock::new(HashMap::new())),
@@ -90,6 +94,7 @@ impl Messaging for DiscordAdapter {
             inbound_tx,
             guild_filter: self.guild_filter.clone(),
             channel_filter: self.channel_filter.clone(),
+            dm_allowed_users: self.dm_allowed_users.clone(),
             http_slot: self.http.clone(),
             bot_user_id_slot: self.bot_user_id.clone(),
         };
@@ -354,6 +359,7 @@ struct Handler {
     inbound_tx: mpsc::Sender<InboundMessage>,
     guild_filter: Option<Vec<GuildId>>,
     channel_filter: HashMap<GuildId, Vec<ChannelId>>,
+    dm_allowed_users: Vec<UserId>,
     http_slot: Arc<RwLock<Option<Arc<Http>>>>,
     bot_user_id_slot: Arc<RwLock<Option<UserId>>>,
 }
@@ -371,6 +377,15 @@ impl EventHandler for Handler {
     async fn message(&self, ctx: Context, message: Message) {
         if message.author.bot {
             return;
+        }
+
+        // DM filter: if no guild_id, it's a DM — only allow listed users
+        if message.guild_id.is_none() {
+            if self.dm_allowed_users.is_empty()
+                || !self.dm_allowed_users.contains(&message.author.id)
+            {
+                return;
+            }
         }
 
         if let Some(filter) = &self.guild_filter {

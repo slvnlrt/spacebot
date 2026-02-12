@@ -1,12 +1,14 @@
 //! Worker: Independent task execution process.
 
 use crate::agent::compactor::{estimate_history_tokens, CompactionAction};
+use crate::config::BrowserConfig;
 use crate::error::Result;
 use crate::llm::SpacebotModel;
 use crate::{WorkerId, ChannelId, ProcessId, ProcessType, AgentDeps};
 use crate::hooks::SpacebotHook;
 use rig::agent::AgentBuilder;
 use rig::completion::{CompletionModel, Prompt};
+use std::path::PathBuf;
 use tokio::sync::{mpsc, watch};
 use uuid::Uuid;
 
@@ -41,6 +43,10 @@ pub struct Worker {
     pub system_prompt: String,
     /// Input channel for interactive workers.
     pub input_rx: Option<mpsc::Receiver<String>>,
+    /// Browser automation config.
+    pub browser_config: BrowserConfig,
+    /// Directory for browser screenshots.
+    pub screenshot_dir: PathBuf,
     /// Status updates.
     pub status_tx: watch::Sender<String>,
     pub status_rx: watch::Receiver<String>,
@@ -53,6 +59,8 @@ impl Worker {
         task: impl Into<String>,
         system_prompt: impl Into<String>,
         deps: AgentDeps,
+        browser_config: BrowserConfig,
+        screenshot_dir: PathBuf,
     ) -> Self {
         let id = Uuid::new_v4();
         let process_id = ProcessId::Worker(id);
@@ -68,6 +76,8 @@ impl Worker {
             hook,
             system_prompt: system_prompt.into(),
             input_rx: None,
+            browser_config,
+            screenshot_dir,
             status_tx,
             status_rx,
         }
@@ -79,6 +89,8 @@ impl Worker {
         task: impl Into<String>,
         system_prompt: impl Into<String>,
         deps: AgentDeps,
+        browser_config: BrowserConfig,
+        screenshot_dir: PathBuf,
     ) -> (Self, mpsc::Sender<String>) {
         let id = Uuid::new_v4();
         let process_id = ProcessId::Worker(id);
@@ -95,6 +107,8 @@ impl Worker {
             hook,
             system_prompt: system_prompt.into(),
             input_rx: Some(input_rx),
+            browser_config,
+            screenshot_dir,
             status_tx,
             status_rx,
         };
@@ -146,6 +160,8 @@ impl Worker {
             self.id,
             self.channel_id.clone(),
             self.deps.event_tx.clone(),
+            self.browser_config.clone(),
+            self.screenshot_dir.clone(),
         );
 
         let model_name = self.deps.routing.resolve(ProcessType::Worker, None).to_string();

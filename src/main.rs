@@ -195,10 +195,17 @@ async fn main() -> anyhow::Result<()> {
                 filter
             };
 
+            let dm_allowed_users: Vec<u64> = discord_config
+                .dm_allowed_users
+                .iter()
+                .filter_map(|id| id.parse::<u64>().ok())
+                .collect();
+
             let adapter = spacebot::messaging::discord::DiscordAdapter::new(
                 &discord_config.token,
                 guild_filter,
                 channel_filter,
+                dm_allowed_users,
             );
             messaging_manager.register(adapter);
         }
@@ -269,6 +276,8 @@ async fn main() -> anyhow::Result<()> {
                         &agent.prompts.compactor,
                         response_tx,
                         event_rx,
+                        agent.config.browser.clone(),
+                        agent.config.screenshot_dir(),
                     );
 
                     // Backfill recent message history from the platform

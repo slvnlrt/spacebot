@@ -60,6 +60,8 @@ pub struct ChannelState {
     pub worker_system_prompt: String,
     pub max_concurrent_branches: usize,
     pub conversation_logger: ConversationLogger,
+    pub browser_config: crate::config::BrowserConfig,
+    pub screenshot_dir: std::path::PathBuf,
 }
 
 impl std::fmt::Debug for ChannelState {
@@ -109,6 +111,8 @@ impl Channel {
         compactor_prompt: impl Into<String>,
         response_tx: mpsc::Sender<OutboundResponse>,
         event_rx: broadcast::Receiver<ProcessEvent>,
+        browser_config: crate::config::BrowserConfig,
+        screenshot_dir: std::path::PathBuf,
     ) -> (Self, mpsc::Sender<InboundMessage>) {
         let process_id = ProcessId::Channel(id.clone());
         let hook = SpacebotHook::new(deps.agent_id.clone(), process_id, ProcessType::Channel, deps.event_tx.clone());
@@ -142,6 +146,8 @@ impl Channel {
             worker_system_prompt: worker_system_prompt.into(),
             max_concurrent_branches: config.max_concurrent_branches,
             conversation_logger,
+            browser_config,
+            screenshot_dir,
         };
 
         let self_tx = message_tx.clone();
@@ -493,6 +499,8 @@ pub async fn spawn_worker_from_state(
             &task,
             &state.worker_system_prompt,
             state.deps.clone(),
+            state.browser_config.clone(),
+            state.screenshot_dir.clone(),
         );
         // TODO: Store input_tx somewhere accessible for routing follow-ups
         worker
@@ -502,6 +510,8 @@ pub async fn spawn_worker_from_state(
             &task,
             &state.worker_system_prompt,
             state.deps.clone(),
+            state.browser_config.clone(),
+            state.screenshot_dir.clone(),
         )
     };
     

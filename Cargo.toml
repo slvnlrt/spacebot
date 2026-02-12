@@ -78,6 +78,10 @@ indoc = "2"
 arrow-array = "57.3.0"
 arrow-schema = "57.3.0"
 
+# Browser automation
+chromiumoxide = { version = "0.8", features = ["tokio-runtime"], default-features = false }
+chromiumoxide_cdp = "0.8"
+
 [lints.clippy]
 dbg_macro = "forbid"
 todo = "forbid"

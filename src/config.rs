@@ -41,6 +41,7 @@ pub struct DefaultsConfig {
     pub context_window: usize,
     pub compaction: CompactionConfig,
     pub cortex: CortexConfig,
+    pub browser: BrowserConfig,
     /// Number of messages to fetch from the platform when a new channel is created.
     pub history_backfill_count: usize,
 }
@@ -54,6 +55,7 @@ impl Default for DefaultsConfig {
             context_window: 128_000,
             compaction: CompactionConfig::default(),
             cortex: CortexConfig::default(),
+            browser: BrowserConfig::default(),
             history_backfill_count: 50,
         }
     }
@@ -73,6 +75,33 @@ impl Default for CompactionConfig {
             background_threshold: 0.80,
             aggressive_threshold: 0.85,
             emergency_threshold: 0.95,
+        }
+    }
+}
+
+/// Browser automation configuration for workers.
+#[derive(Debug, Clone)]
+pub struct BrowserConfig {
+    /// Whether browser tools are available to workers.
+    pub enabled: bool,
+    /// Run Chrome in headless mode.
+    pub headless: bool,
+    /// Allow JavaScript evaluation via the browser tool.
+    pub evaluate_enabled: bool,
+    /// Custom Chrome/Chromium executable path.
+    pub executable_path: Option<String>,
+    /// Directory for storing screenshots and other browser artifacts.
+    pub screenshot_dir: Option<PathBuf>,
+}
+
+impl Default for BrowserConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            headless: true,
+            evaluate_enabled: false,
+            executable_path: None,
+            screenshot_dir: None,
         }
     }
 }
@@ -111,6 +140,7 @@ pub struct AgentConfig {
     pub context_window: Option<usize>,
     pub compaction: Option<CompactionConfig>,
     pub cortex: Option<CortexConfig>,
+    pub browser: Option<BrowserConfig>,
 }
 
 /// Fully resolved agent config (merged with defaults, paths resolved).
@@ -126,6 +156,7 @@ pub struct ResolvedAgentConfig {
     pub context_window: usize,
     pub compaction: CompactionConfig,
     pub cortex: CortexConfig,
+    pub browser: BrowserConfig,
     pub history_backfill_count: usize,
 }
 
@@ -153,6 +184,10 @@ impl AgentConfig {
             context_window: self.context_window.unwrap_or(defaults.context_window),
             compaction: self.compaction.unwrap_or(defaults.compaction),
             cortex: self.cortex.unwrap_or(defaults.cortex),
+            browser: self
+                .browser
+                .clone()
+                .unwrap_or_else(|| defaults.browser.clone()),
             history_backfill_count: defaults.history_backfill_count,
         }
     }
@@ -170,6 +205,13 @@ impl ResolvedAgentConfig {
     }
     pub fn history_backfill_count(&self) -> usize {
         self.history_backfill_count
+    }
+    /// Resolved screenshot directory, falling back to data_dir/screenshots.
+    pub fn screenshot_dir(&self) -> PathBuf {
+        self.browser
+            .screenshot_dir
+            .clone()
+            .unwrap_or_else(|| self.data_dir.join("screenshots"))
     }
 }
 
@@ -268,6 +310,8 @@ pub struct MessagingConfig {
 pub struct DiscordConfig {
     pub enabled: bool,
     pub token: String,
+    /// User IDs allowed to DM the bot. If empty, DMs are ignored entirely.
+    pub dm_allowed_users: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -308,6 +352,7 @@ struct TomlDefaultsConfig {
     context_window: Option<usize>,
     compaction: Option<TomlCompactionConfig>,
     cortex: Option<TomlCortexConfig>,
+    browser: Option<TomlBrowserConfig>,
 }
 
 #[derive(Deserialize, Default)]
@@ -340,6 +385,15 @@ struct TomlCortexConfig {
 }
 
 #[derive(Deserialize)]
+struct TomlBrowserConfig {
+    enabled: Option<bool>,
+    headless: Option<bool>,
+    evaluate_enabled: Option<bool>,
+    executable_path: Option<String>,
+    screenshot_dir: Option<String>,
+}
+
+#[derive(Deserialize)]
 struct TomlAgentConfig {
     id: String,
     #[serde(default)]
@@ -362,6 +416,8 @@ struct TomlDiscordConfig {
     #[serde(default)]
     enabled: bool,
     token: Option<String>,
+    #[serde(default)]
+    dm_allowed_users: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -493,6 +549,7 @@ impl Config {
             context_window: None,
             compaction: None,
             cortex: None,
+            browser: None,
         }];
 
         Ok(Self {
@@ -579,6 +636,23 @@ impl Config {
                         .unwrap_or(base_defaults.cortex.circuit_breaker_threshold),
                 })
                 .unwrap_or(base_defaults.cortex),
+            browser: toml
+                .defaults
+                .browser
+                .map(|b| {
+                    let base = &base_defaults.browser;
+                    BrowserConfig {
+                        enabled: b.enabled.unwrap_or(base.enabled),
+                        headless: b.headless.unwrap_or(base.headless),
+                        evaluate_enabled: b.evaluate_enabled.unwrap_or(base.evaluate_enabled),
+                        executable_path: b.executable_path.or_else(|| base.executable_path.clone()),
+                        screenshot_dir: b
+                            .screenshot_dir
+                            .map(PathBuf::from)
+                            .or_else(|| base.screenshot_dir.clone()),
+                    }
+                })
+                .unwrap_or_else(|| base_defaults.browser.clone()),
             history_backfill_count: base_defaults.history_backfill_count,
         };
 
@@ -601,6 +675,7 @@ impl Config {
                     context_window: a.context_window,
                     compaction: None,
                     cortex: None,
+                    browser: None,
                 }
             })
             .collect();
@@ -616,6 +691,7 @@ impl Config {
                 context_window: None,
                 compaction: None,
                 cortex: None,
+                browser: None,
             });
         }
 
@@ -635,6 +711,7 @@ impl Config {
                 Some(DiscordConfig {
                     enabled: d.enabled,
                     token,
+                    dm_allowed_users: d.dm_allowed_users,
                 })
             }),
             webhook: toml.messaging.webhook.map(|w| WebhookConfig {

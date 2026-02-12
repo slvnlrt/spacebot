@@ -6,7 +6,7 @@ How Spacebot gives LLM processes the ability to act.
 
 Every tool implements Rig's `Tool` trait and lives in `src/tools/`. Tools are organized by function, not by consumer. Which process gets which tools is configured via ToolServer factory functions in `src/tools.rs`.
 
-All 11 tools:
+All 12 tools:
 
 | Tool | Purpose | Consumers |
 |------|---------|-----------|
@@ -21,6 +21,7 @@ All 11 tools:
 | `shell` | Execute shell commands | Worker |
 | `file` | Read, write, and list files | Worker |
 | `exec` | Run subprocesses with specific args/env | Worker |
+| `browser` | Headless Chrome automation (navigate, click, screenshot) | Worker |
 
 ## ToolServer Topology
 
@@ -65,10 +66,11 @@ Each worker gets its own isolated ToolServer, created at spawn time via `create_
 │   file                                   │
 │   exec                                   │
 │   set_status  (agent_id, worker_id, ...) │
+│   browser     (if browser.enabled)       │
 └──────────────────────────────────────────┘
 ```
 
-`shell`, `file`, and `exec` are stateless unit structs. `set_status` is bound to a specific worker's ID so status updates route to the right place in the channel's status block.
+`shell`, `file`, and `exec` are stateless unit structs. `set_status` is bound to a specific worker's ID so status updates route to the right place in the channel's status block. `browser` is conditionally registered based on the agent's `browser.enabled` config -- see [docs/browser.md](browser.md) for details.
 
 Workers don't get memory tools or channel tools. They can't talk to the user, can't recall memories, can't spawn branches. They execute their task and report status.
 
@@ -98,8 +100,8 @@ create_channel_tool_server(memory_search) -> ToolServerHandle
 add_channel_tools(handle, channel_id, response_tx, conversation_id, event_tx)
 remove_channel_tools(handle)
 
-// Per worker spawn — creates an isolated ToolServer
-create_worker_tool_server(agent_id, worker_id, channel_id, event_tx) -> ToolServerHandle
+// Per worker spawn — creates an isolated ToolServer (browser conditionally included)
+create_worker_tool_server(agent_id, worker_id, channel_id, event_tx, browser_config, screenshot_dir) -> ToolServerHandle
 
 // Agent startup — creates the cortex ToolServer
 create_cortex_tool_server(memory_search) -> ToolServerHandle
@@ -201,3 +203,7 @@ Read, write, or list files. Protects identity/memory paths. Creates parent direc
 ### exec
 
 Runs a specific program with explicit arguments and environment variables. More precise than `shell` for running compilers, test runners, etc. Configurable timeout.
+
+### browser
+
+Headless Chrome automation via chromiumoxide. Single tool with an `action` discriminator: `launch`, `navigate`, `snapshot`, `act`, `screenshot`, `evaluate`, `content`, `close`, plus tab management (`open`, `tabs`, `focus`, `close_tab`). Uses an accessibility-tree ref system for LLM-friendly element addressing. See [docs/browser.md](browser.md).
