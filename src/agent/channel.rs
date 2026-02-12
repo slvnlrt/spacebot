@@ -62,6 +62,7 @@ pub struct ChannelState {
     pub conversation_logger: ConversationLogger,
     pub browser_config: crate::config::BrowserConfig,
     pub screenshot_dir: std::path::PathBuf,
+    pub skills: Arc<crate::skills::SkillSet>,
 }
 
 impl std::fmt::Debug for ChannelState {
@@ -113,6 +114,7 @@ impl Channel {
         event_rx: broadcast::Receiver<ProcessEvent>,
         browser_config: crate::config::BrowserConfig,
         screenshot_dir: std::path::PathBuf,
+        skills: Arc<crate::skills::SkillSet>,
     ) -> (Self, mpsc::Sender<InboundMessage>) {
         let process_id = ProcessId::Channel(id.clone());
         let hook = SpacebotHook::new(deps.agent_id.clone(), process_id, ProcessType::Channel, deps.event_tx.clone());
@@ -148,6 +150,7 @@ impl Channel {
             conversation_logger,
             browser_config,
             screenshot_dir,
+            skills,
         };
 
         let self_tx = message_tx.clone();
@@ -260,6 +263,11 @@ impl Channel {
             system_prompt.push_str("\n\n");
         }
         system_prompt.push_str(&self.system_prompt);
+        let skills_prompt = self.state.skills.render_channel_prompt();
+        if !skills_prompt.is_empty() {
+            system_prompt.push_str("\n\n");
+            system_prompt.push_str(&skills_prompt);
+        }
         if let Some(context) = &self.conversation_context {
             system_prompt.push_str("\n\n## Conversation Context\n\n");
             system_prompt.push_str(context);
@@ -490,14 +498,27 @@ pub async fn spawn_worker_from_state(
     state: &ChannelState,
     task: impl Into<String>,
     interactive: bool,
+    skill_name: Option<&str>,
 ) -> std::result::Result<WorkerId, AgentError> {
     let task = task.into();
+
+    // Build the worker system prompt, optionally prepending skill instructions
+    let system_prompt = if let Some(name) = skill_name {
+        if let Some(skill_prompt) = state.skills.render_worker_prompt(name) {
+            format!("{}\n\n{}", state.worker_system_prompt, skill_prompt)
+        } else {
+            tracing::warn!(skill = %name, "skill not found, spawning worker without skill context");
+            state.worker_system_prompt.clone()
+        }
+    } else {
+        state.worker_system_prompt.clone()
+    };
     
     let worker = if interactive {
         let (worker, _input_tx) = Worker::new_interactive(
             Some(state.channel_id.clone()),
             &task,
-            &state.worker_system_prompt,
+            &system_prompt,
             state.deps.clone(),
             state.browser_config.clone(),
             state.screenshot_dir.clone(),
@@ -508,7 +529,7 @@ pub async fn spawn_worker_from_state(
         Worker::new(
             Some(state.channel_id.clone()),
             &task,
-            &state.worker_system_prompt,
+            &system_prompt,
             state.deps.clone(),
             state.browser_config.clone(),
             state.screenshot_dir.clone(),

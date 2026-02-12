@@ -33,6 +33,10 @@ pub struct SpawnWorkerArgs {
     /// Whether this is an interactive worker (accepts follow-up messages).
     #[serde(default)]
     pub interactive: bool,
+    /// Optional skill name to load into the worker's context. The worker will
+    /// receive the full skill instructions in its system prompt.
+    #[serde(default)]
+    pub skill: Option<String>,
 }
 
 /// Output from spawn worker tool.
@@ -70,6 +74,10 @@ impl Tool for SpawnWorkerTool {
                         "type": "boolean",
                         "default": false,
                         "description": "If true, the worker stays alive and accepts follow-up messages via route_to_worker. If false (default), the worker runs once and returns."
+                    },
+                    "skill": {
+                        "type": "string",
+                        "description": "Name of a skill to load into the worker. The worker receives the full skill instructions in its system prompt. Only use skill names from <available_skills>."
                     }
                 },
                 "required": ["task"]
@@ -78,7 +86,7 @@ impl Tool for SpawnWorkerTool {
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
-        let worker_id = spawn_worker_from_state(&self.state, &args.task, args.interactive)
+        let worker_id = spawn_worker_from_state(&self.state, &args.task, args.interactive, args.skill.as_deref())
             .await
             .map_err(|e| SpawnWorkerError(format!("{e}")))?;
 

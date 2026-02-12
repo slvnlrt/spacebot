@@ -13,6 +13,7 @@ pub mod memory;
 pub mod messaging;
 pub mod secrets;
 pub mod settings;
+pub mod skills;
 pub mod tools;
 
 pub use error::{Error, Result};
@@ -150,6 +151,7 @@ pub struct Agent {
     pub deps: AgentDeps,
     pub prompts: identity::Prompts,
     pub identity: identity::Identity,
+    pub skills: Arc<skills::SkillSet>,
 }
 
 /// Inbound message from any messaging platform.

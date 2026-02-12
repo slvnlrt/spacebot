@@ -139,6 +139,12 @@ async fn main() -> anyhow::Result<()> {
             &shared_prompts_dir,
         ).await.with_context(|| format!("failed to load prompts for agent '{}'", agent_config.id))?;
 
+        // Load skills (instance-level, then workspace overrides)
+        let skills = Arc::new(spacebot::skills::SkillSet::load(
+            &config.skills_dir(),
+            &agent_config.skills_dir(),
+        ).await);
+
         let agent = spacebot::Agent {
             id: agent_id.clone(),
             config: agent_config.clone(),
@@ -146,6 +152,7 @@ async fn main() -> anyhow::Result<()> {
             deps,
             prompts,
             identity,
+            skills,
         };
 
         tracing::info!(agent_id = %agent_config.id, "agent initialized");
@@ -278,6 +285,7 @@ async fn main() -> anyhow::Result<()> {
                         event_rx,
                         agent.config.browser.clone(),
                         agent.config.screenshot_dir(),
+                        agent.skills.clone(),
                     );
 
                     // Backfill recent message history from the platform

@@ -213,6 +213,11 @@ impl ResolvedAgentConfig {
             .clone()
             .unwrap_or_else(|| self.data_dir.join("screenshots"))
     }
+
+    /// Path to agent workspace skills directory.
+    pub fn skills_dir(&self) -> PathBuf {
+        self.workspace.join("skills")
+    }
 }
 
 /// Routes a messaging platform conversation to a specific agent.
@@ -763,5 +768,10 @@ impl Config {
     /// Path to shared prompts directory.
     pub fn prompts_dir(&self) -> PathBuf {
         self.instance_dir.join("prompts")
+    }
+
+    /// Path to instance-level skills directory.
+    pub fn skills_dir(&self) -> PathBuf {
+        self.instance_dir.join("skills")
     }
 }
