@@ -3883,6 +3883,24 @@ struct GlobalSettingsResponse {
     api_port: u16,
     api_bind: String,
     worker_log_mode: String,
+    opencode: OpenCodeSettingsResponse,
+}
+
+#[derive(Serialize)]
+struct OpenCodeSettingsResponse {
+    enabled: bool,
+    path: String,
+    max_servers: usize,
+    server_startup_timeout_secs: u64,
+    max_restart_retries: u32,
+    permissions: OpenCodePermissionsResponse,
+}
+
+#[derive(Serialize)]
+struct OpenCodePermissionsResponse {
+    edit: String,
+    bash: String,
+    webfetch: String,
 }
 
 #[derive(Deserialize)]
@@ -3892,6 +3910,24 @@ struct GlobalSettingsUpdate {
     api_port: Option<u16>,
     api_bind: Option<String>,
     worker_log_mode: Option<String>,
+    opencode: Option<OpenCodeSettingsUpdate>,
+}
+
+#[derive(Deserialize)]
+struct OpenCodeSettingsUpdate {
+    enabled: Option<bool>,
+    path: Option<String>,
+    max_servers: Option<usize>,
+    server_startup_timeout_secs: Option<u64>,
+    max_restart_retries: Option<u32>,
+    permissions: Option<OpenCodePermissionsUpdate>,
+}
+
+#[derive(Deserialize)]
+struct OpenCodePermissionsUpdate {
+    edit: Option<String>,
+    bash: Option<String>,
+    webfetch: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -3906,7 +3942,7 @@ async fn get_global_settings(
 ) -> Result<Json<GlobalSettingsResponse>, StatusCode> {
     let config_path = state.config_path.read().await.clone();
     
-    let (brave_search_key, api_enabled, api_port, api_bind, worker_log_mode) = if config_path.exists() {
+    let (brave_search_key, api_enabled, api_port, api_bind, worker_log_mode, opencode) = if config_path.exists() {
         let content = tokio::fs::read_to_string(&config_path)
             .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -3954,9 +3990,66 @@ async fn get_global_settings(
             .unwrap_or("errors_only")
             .to_string();
         
-        (brave_search, api_enabled, api_port, api_bind, worker_log_mode)
+        let opencode_table = doc.get("defaults").and_then(|d| d.get("opencode"));
+        let opencode_perms = opencode_table.and_then(|o| o.get("permissions"));
+        let opencode = OpenCodeSettingsResponse {
+            enabled: opencode_table
+                .and_then(|o| o.get("enabled"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            path: opencode_table
+                .and_then(|o| o.get("path"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("opencode")
+                .to_string(),
+            max_servers: opencode_table
+                .and_then(|o| o.get("max_servers"))
+                .and_then(|v| v.as_integer())
+                .and_then(|i| usize::try_from(i).ok())
+                .unwrap_or(5),
+            server_startup_timeout_secs: opencode_table
+                .and_then(|o| o.get("server_startup_timeout_secs"))
+                .and_then(|v| v.as_integer())
+                .and_then(|i| u64::try_from(i).ok())
+                .unwrap_or(30),
+            max_restart_retries: opencode_table
+                .and_then(|o| o.get("max_restart_retries"))
+                .and_then(|v| v.as_integer())
+                .and_then(|i| u32::try_from(i).ok())
+                .unwrap_or(5),
+            permissions: OpenCodePermissionsResponse {
+                edit: opencode_perms
+                    .and_then(|p| p.get("edit"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("allow")
+                    .to_string(),
+                bash: opencode_perms
+                    .and_then(|p| p.get("bash"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("allow")
+                    .to_string(),
+                webfetch: opencode_perms
+                    .and_then(|p| p.get("webfetch"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("allow")
+                    .to_string(),
+            },
+        };
+
+        (brave_search, api_enabled, api_port, api_bind, worker_log_mode, opencode)
     } else {
-        (None, true, 19898, "127.0.0.1".to_string(), "errors_only".to_string())
+        (None, true, 19898, "127.0.0.1".to_string(), "errors_only".to_string(), OpenCodeSettingsResponse {
+            enabled: false,
+            path: "opencode".to_string(),
+            max_servers: 5,
+            server_startup_timeout_secs: 30,
+            max_restart_retries: 5,
+            permissions: OpenCodePermissionsResponse {
+                edit: "allow".to_string(),
+                bash: "allow".to_string(),
+                webfetch: "allow".to_string(),
+            },
+        })
     };
     
     Ok(Json(GlobalSettingsResponse {
@@ -3965,6 +4058,7 @@ async fn get_global_settings(
         api_port,
         api_bind,
         worker_log_mode,
+        opencode,
     }))
 }
 
@@ -4038,6 +4132,46 @@ async fn update_global_settings(
         doc["defaults"]["worker_log_mode"] = toml_edit::value(mode);
     }
     
+    // Update OpenCode settings
+    if let Some(opencode) = request.opencode {
+        if doc.get("defaults").is_none() {
+            doc["defaults"] = toml_edit::Item::Table(toml_edit::Table::new());
+        }
+        if doc["defaults"].get("opencode").is_none() {
+            doc["defaults"]["opencode"] = toml_edit::Item::Table(toml_edit::Table::new());
+        }
+        
+        if let Some(enabled) = opencode.enabled {
+            doc["defaults"]["opencode"]["enabled"] = toml_edit::value(enabled);
+        }
+        if let Some(path) = opencode.path {
+            doc["defaults"]["opencode"]["path"] = toml_edit::value(path);
+        }
+        if let Some(max_servers) = opencode.max_servers {
+            doc["defaults"]["opencode"]["max_servers"] = toml_edit::value(max_servers as i64);
+        }
+        if let Some(timeout) = opencode.server_startup_timeout_secs {
+            doc["defaults"]["opencode"]["server_startup_timeout_secs"] = toml_edit::value(timeout as i64);
+        }
+        if let Some(retries) = opencode.max_restart_retries {
+            doc["defaults"]["opencode"]["max_restart_retries"] = toml_edit::value(retries as i64);
+        }
+        if let Some(permissions) = opencode.permissions {
+            if doc["defaults"]["opencode"].get("permissions").is_none() {
+                doc["defaults"]["opencode"]["permissions"] = toml_edit::Item::Table(toml_edit::Table::new());
+            }
+            if let Some(edit) = permissions.edit {
+                doc["defaults"]["opencode"]["permissions"]["edit"] = toml_edit::value(edit);
+            }
+            if let Some(bash) = permissions.bash {
+                doc["defaults"]["opencode"]["permissions"]["bash"] = toml_edit::value(bash);
+            }
+            if let Some(webfetch) = permissions.webfetch {
+                doc["defaults"]["opencode"]["permissions"]["webfetch"] = toml_edit::value(webfetch);
+            }
+        }
+    }
+
     tokio::fs::write(&config_path, doc.to_string())
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;

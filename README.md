@@ -311,7 +311,7 @@ Read the full vision in [docs/spacedrive.md](docs/spacedrive.md).
 ### Prerequisites
 
 - **Rust** 1.85+ ([rustup](https://rustup.rs/))
-- An LLM API key (OpenRouter, Anthropic, OpenAI, Z.ai, etc.)
+- An LLM API key from any supported provider (Anthropic, OpenAI, OpenRouter, Z.ai, Groq, Together, Fireworks, DeepSeek, xAI, Mistral, or OpenCode Zen)
 
 ### Build and Run
 
@@ -326,22 +326,23 @@ cargo build --release
 Create `config.toml`:
 
 ```toml
-[providers.openrouter]
-api_key = "env:OPENROUTER_API_KEY"
+[llm]
+openrouter_key = "env:OPENROUTER_API_KEY"
 
 [defaults.routing]
-default_model = "anthropic/claude-sonnet-4"
-worker_model = "anthropic/claude-sonnet-4"
+channel = "anthropic/claude-sonnet-4"
+worker = "anthropic/claude-sonnet-4"
 
-[agents.my-agent]
+[[agents]]
+id = "my-agent"
 
 [messaging.discord]
-bot_token = "env:DISCORD_BOT_TOKEN"
+token = "env:DISCORD_BOT_TOKEN"
 
 [[bindings]]
-platform = "discord"
-channel_id = "your-discord-channel-id"
-agent = "my-agent"
+agent_id = "my-agent"
+channel = "discord"
+guild_id = "your-discord-guild-id"
 ```
 
 ```bash

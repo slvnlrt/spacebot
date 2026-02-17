@@ -773,12 +773,37 @@ export interface DeleteBindingResponse {
 
 // -- Global Settings Types --
 
+export interface OpenCodePermissions {
+	edit: string;
+	bash: string;
+	webfetch: string;
+}
+
+export interface OpenCodeSettings {
+	enabled: boolean;
+	path: string;
+	max_servers: number;
+	server_startup_timeout_secs: number;
+	max_restart_retries: number;
+	permissions: OpenCodePermissions;
+}
+
+export interface OpenCodeSettingsUpdate {
+	enabled?: boolean;
+	path?: string;
+	max_servers?: number;
+	server_startup_timeout_secs?: number;
+	max_restart_retries?: number;
+	permissions?: Partial<OpenCodePermissions>;
+}
+
 export interface GlobalSettingsResponse {
 	brave_search_key: string | null;
 	api_enabled: boolean;
 	api_port: number;
 	api_bind: string;
 	worker_log_mode: string;
+	opencode: OpenCodeSettings;
 }
 
 export interface GlobalSettingsUpdate {
@@ -787,6 +812,7 @@ export interface GlobalSettingsUpdate {
 	api_port?: number;
 	api_bind?: string;
 	worker_log_mode?: string;
+	opencode?: OpenCodeSettingsUpdate;
 }
 
 export interface GlobalSettingsUpdateResponse {
