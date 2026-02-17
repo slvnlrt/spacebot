@@ -48,18 +48,25 @@ const SECTIONS = [
 
 const PROVIDERS = [
 	{
-		id: "anthropic",
-		name: "Anthropic",
-		description: "Claude models (Sonnet, Opus, Haiku)",
-		placeholder: "sk-ant-...",
-		envVar: "ANTHROPIC_API_KEY",
-	},
-	{
 		id: "openrouter",
 		name: "OpenRouter",
 		description: "Multi-provider gateway with unified API",
 		placeholder: "sk-or-...",
 		envVar: "OPENROUTER_API_KEY",
+	},
+	{
+		id: "opencode-zen",
+		name: "OpenCode Zen",
+		description: "Multi-format gateway (Kimi, GLM, MiniMax, Qwen)",
+		placeholder: "...",
+		envVar: "OPENCODE_ZEN_API_KEY",
+	},
+	{
+		id: "anthropic",
+		name: "Anthropic",
+		description: "Claude models (Sonnet, Opus, Haiku)",
+		placeholder: "sk-ant-...",
+		envVar: "ANTHROPIC_API_KEY",
 	},
 	{
 		id: "openai",
@@ -116,13 +123,6 @@ const PROVIDERS = [
 		description: "Mistral Large, Small, Codestral models",
 		placeholder: "...",
 		envVar: "MISTRAL_API_KEY",
-	},
-	{
-		id: "opencode-zen",
-		name: "OpenCode Zen",
-		description: "Multi-format gateway (Kimi, GLM, MiniMax, Qwen)",
-		placeholder: "...",
-		envVar: "OPENCODE_ZEN_API_KEY",
 	},
 ] as const;
 
