@@ -1177,6 +1177,18 @@ export const api = {
 		return response.json() as Promise<DeleteBindingResponse>;
 	},
 
+	togglePlatform: async (platform: string, enabled: boolean) => {
+		const response = await fetch(`${API_BASE}/messaging/toggle`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ platform, enabled }),
+		});
+		if (!response.ok) {
+			throw new Error(`API error: ${response.status}`);
+		}
+		return response.json() as Promise<{ success: boolean; message: string }>;
+	},
+
 	disconnectPlatform: async (platform: string) => {
 		const response = await fetch(`${API_BASE}/messaging/disconnect`, {
 			method: "POST",

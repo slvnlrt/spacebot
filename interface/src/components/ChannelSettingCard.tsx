@@ -2,7 +2,21 @@ import {useState} from "react";
 import {AnimatePresence, motion} from "framer-motion";
 import {useMutation, useQuery, useQueryClient} from "@tanstack/react-query";
 import {api, type PlatformStatus, type BindingInfo} from "@/api/client";
-import {Button, Input, Select, SelectTrigger, SelectValue, SelectContent, SelectItem, Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter} from "@/ui";
+import {
+	Button,
+	Input,
+	Select,
+	SelectTrigger,
+	SelectValue,
+	SelectContent,
+	SelectItem,
+	Dialog,
+	DialogContent,
+	DialogHeader,
+	DialogTitle,
+	DialogFooter,
+	Toggle,
+} from "@/ui";
 import {PlatformIcon} from "@/lib/platformIcons";
 import {TagInput} from "@/components/TagInput";
 import {FontAwesomeIcon} from "@fortawesome/react-fontawesome";
@@ -19,15 +33,29 @@ interface ChannelSettingCardProps {
 	onToggle: () => void;
 }
 
-export function ChannelSettingCard({platform, name, description, status, expanded, onToggle}: ChannelSettingCardProps) {
+export function ChannelSettingCard({
+	platform,
+	name,
+	description,
+	status,
+	expanded,
+	onToggle,
+}: ChannelSettingCardProps) {
 	const queryClient = useQueryClient();
 	const configured = status?.configured ?? false;
 	const enabled = status?.enabled ?? false;
 
-	const [credentialInputs, setCredentialInputs] = useState<Record<string, string>>({});
-	const [message, setMessage] = useState<{text: string; type: "success" | "error"} | null>(null);
+	const [credentialInputs, setCredentialInputs] = useState<
+		Record<string, string>
+	>({});
+	const [message, setMessage] = useState<{
+		text: string;
+		type: "success" | "error";
+	} | null>(null);
 	const [confirmDisconnect, setConfirmDisconnect] = useState(false);
-	const [editingBinding, setEditingBinding] = useState<BindingInfo | null>(null);
+	const [editingBinding, setEditingBinding] = useState<BindingInfo | null>(
+		null,
+	);
 	const [addingBinding, setAddingBinding] = useState(false);
 	const [bindingForm, setBindingForm] = useState({
 		agent_id: "main",
@@ -52,7 +80,18 @@ export function ChannelSettingCard({platform, name, description, status, expande
 		enabled: expanded,
 	});
 
-	const platformBindings = bindingsData?.bindings?.filter((b) => b.channel === platform) ?? [];
+	const platformBindings =
+		bindingsData?.bindings?.filter((b) => b.channel === platform) ?? [];
+
+	const toggleEnabled = useMutation({
+		mutationFn: (newEnabled: boolean) =>
+			api.togglePlatform(platform, newEnabled),
+		onSuccess: () => {
+			queryClient.invalidateQueries({queryKey: ["messaging-status"]});
+		},
+		onError: (error) =>
+			setMessage({text: `Failed: ${error.message}`, type: "error"}),
+	});
 
 	// --- Mutations ---
 
@@ -68,7 +107,8 @@ export function ChannelSettingCard({platform, name, description, status, expande
 				setMessage({text: result.message, type: "error"});
 			}
 		},
-		onError: (error) => setMessage({text: `Failed: ${error.message}`, type: "error"}),
+		onError: (error) =>
+			setMessage({text: `Failed: ${error.message}`, type: "error"}),
 	});
 
 	const addBindingMutation = useMutation({
@@ -83,7 +123,8 @@ export function ChannelSettingCard({platform, name, description, status, expande
 				setMessage({text: result.message, type: "error"});
 			}
 		},
-		onError: (error) => setMessage({text: `Failed: ${error.message}`, type: "error"}),
+		onError: (error) =>
+			setMessage({text: `Failed: ${error.message}`, type: "error"}),
 	});
 
 	const updateBindingMutation = useMutation({
@@ -98,7 +139,8 @@ export function ChannelSettingCard({platform, name, description, status, expande
 				setMessage({text: result.message, type: "error"});
 			}
 		},
-		onError: (error) => setMessage({text: `Failed: ${error.message}`, type: "error"}),
+		onError: (error) =>
+			setMessage({text: `Failed: ${error.message}`, type: "error"}),
 	});
 
 	const deleteBindingMutation = useMutation({
@@ -111,7 +153,8 @@ export function ChannelSettingCard({platform, name, description, status, expande
 				setMessage({text: result.message, type: "error"});
 			}
 		},
-		onError: (error) => setMessage({text: `Failed: ${error.message}`, type: "error"}),
+		onError: (error) =>
+			setMessage({text: `Failed: ${error.message}`, type: "error"}),
 	});
 
 	const disconnectMutation = useMutation({
@@ -122,38 +165,59 @@ export function ChannelSettingCard({platform, name, description, status, expande
 			queryClient.invalidateQueries({queryKey: ["messaging-status"]});
 			queryClient.invalidateQueries({queryKey: ["bindings"]});
 		},
-		onError: (error) => setMessage({text: `Failed: ${error.message}`, type: "error"}),
+		onError: (error) =>
+			setMessage({text: `Failed: ${error.message}`, type: "error"}),
 	});
 
 	function resetBindingForm() {
-		setBindingForm({agent_id: agentsData?.agents?.[0]?.id ?? "main", guild_id: "", workspace_id: "", chat_id: "", channel_ids: [], dm_allowed_users: []});
+		setBindingForm({
+			agent_id: agentsData?.agents?.[0]?.id ?? "main",
+			guild_id: "",
+			workspace_id: "",
+			chat_id: "",
+			channel_ids: [],
+			dm_allowed_users: [],
+		});
 	}
 
 	function handleSaveCredentials() {
 		const request: any = {agent_id: "main", channel: platform};
 		if (platform === "discord") {
 			if (!credentialInputs.discord_token?.trim()) return;
-			request.platform_credentials = {discord_token: credentialInputs.discord_token.trim()};
+			request.platform_credentials = {
+				discord_token: credentialInputs.discord_token.trim(),
+			};
 		} else if (platform === "slack") {
-			if (!credentialInputs.slack_bot_token?.trim() || !credentialInputs.slack_app_token?.trim()) return;
+			if (
+				!credentialInputs.slack_bot_token?.trim() ||
+				!credentialInputs.slack_app_token?.trim()
+			)
+				return;
 			request.platform_credentials = {
 				slack_bot_token: credentialInputs.slack_bot_token.trim(),
 				slack_app_token: credentialInputs.slack_app_token.trim(),
 			};
 		} else if (platform === "telegram") {
 			if (!credentialInputs.telegram_token?.trim()) return;
-			request.platform_credentials = {telegram_token: credentialInputs.telegram_token.trim()};
+			request.platform_credentials = {
+				telegram_token: credentialInputs.telegram_token.trim(),
+			};
 		}
 		saveCreds.mutate(request);
 	}
 
 	function handleAddBinding() {
 		const request: any = {agent_id: bindingForm.agent_id, channel: platform};
-		if (platform === "discord" && bindingForm.guild_id.trim()) request.guild_id = bindingForm.guild_id.trim();
-		if (platform === "slack" && bindingForm.workspace_id.trim()) request.workspace_id = bindingForm.workspace_id.trim();
-		if (platform === "telegram" && bindingForm.chat_id.trim()) request.chat_id = bindingForm.chat_id.trim();
-		if (bindingForm.channel_ids.length > 0) request.channel_ids = bindingForm.channel_ids;
-		if (bindingForm.dm_allowed_users.length > 0) request.dm_allowed_users = bindingForm.dm_allowed_users;
+		if (platform === "discord" && bindingForm.guild_id.trim())
+			request.guild_id = bindingForm.guild_id.trim();
+		if (platform === "slack" && bindingForm.workspace_id.trim())
+			request.workspace_id = bindingForm.workspace_id.trim();
+		if (platform === "telegram" && bindingForm.chat_id.trim())
+			request.chat_id = bindingForm.chat_id.trim();
+		if (bindingForm.channel_ids.length > 0)
+			request.channel_ids = bindingForm.channel_ids;
+		if (bindingForm.dm_allowed_users.length > 0)
+			request.dm_allowed_users = bindingForm.dm_allowed_users;
 		addBindingMutation.mutate(request);
 	}
 
@@ -168,9 +232,12 @@ export function ChannelSettingCard({platform, name, description, status, expande
 			agent_id: bindingForm.agent_id,
 			channel: platform,
 		};
-		if (platform === "discord" && bindingForm.guild_id.trim()) request.guild_id = bindingForm.guild_id.trim();
-		if (platform === "slack" && bindingForm.workspace_id.trim()) request.workspace_id = bindingForm.workspace_id.trim();
-		if (platform === "telegram" && bindingForm.chat_id.trim()) request.chat_id = bindingForm.chat_id.trim();
+		if (platform === "discord" && bindingForm.guild_id.trim())
+			request.guild_id = bindingForm.guild_id.trim();
+		if (platform === "slack" && bindingForm.workspace_id.trim())
+			request.workspace_id = bindingForm.workspace_id.trim();
+		if (platform === "telegram" && bindingForm.chat_id.trim())
+			request.chat_id = bindingForm.chat_id.trim();
 		request.channel_ids = bindingForm.channel_ids;
 		request.dm_allowed_users = bindingForm.dm_allowed_users;
 		updateBindingMutation.mutate(request);
@@ -202,17 +269,23 @@ export function ChannelSettingCard({platform, name, description, status, expande
 	return (
 		<div className="rounded-lg border border-app-line bg-app-box">
 			{/* Header — always visible, acts as toggle */}
-			<button
-				type="button"
+			<div
+				role="button"
 				onClick={onToggle}
-				className="flex w-full items-center gap-3 p-4 text-left"
+				className="flex w-full items-center gap-3 p-4 text-left cursor-pointer"
 			>
-				<PlatformIcon platform={platform} size="lg" className="text-ink-faint" />
+				<PlatformIcon
+					platform={platform}
+					size="lg"
+					className="text-ink-faint"
+				/>
 				<div className="flex-1 min-w-0">
 					<div className="flex items-center gap-2">
 						<span className="text-sm font-medium text-ink">{name}</span>
 						{configured && (
-							<span className={`text-tiny ${enabled ? "text-green-400" : "text-ink-faint"}`}>
+							<span
+								className={`text-tiny ${enabled ? "text-green-400" : "text-ink-faint"}`}
+							>
 								{enabled ? "● Active" : "○ Disabled"}
 							</span>
 						)}
@@ -226,7 +299,7 @@ export function ChannelSettingCard({platform, name, description, status, expande
 				>
 					<FontAwesomeIcon icon={faChevronDown} size="sm" />
 				</motion.div>
-			</button>
+			</div>
 
 			{/* Expanded content */}
 			<AnimatePresence initial={false}>
@@ -239,6 +312,26 @@ export function ChannelSettingCard({platform, name, description, status, expande
 						className="overflow-hidden"
 					>
 						<div className="border-t border-app-line/50 bg-app-darkBox px-4 pb-4 pt-4 flex flex-col gap-4">
+							{/* Enable/Disable toggle */}
+							{configured && (
+								<div className="flex items-center justify-between">
+									<div>
+										<span className="text-sm font-medium text-ink">
+											Enabled
+										</span>
+										<p className="mt-0.5 text-sm text-ink-dull">
+											{enabled
+												? `${name} is receiving messages`
+												: `${name} is disconnected`}
+										</p>
+									</div>
+									<Toggle
+										checked={enabled}
+										onCheckedChange={(checked) => toggleEnabled.mutate(checked)}
+										disabled={toggleEnabled.isPending}
+									/>
+								</div>
+							)}
 							{/* Credentials */}
 							<CredentialsSection
 								platform={platform}
@@ -266,7 +359,11 @@ export function ChannelSettingCard({platform, name, description, status, expande
 										setMessage(null);
 									}}
 									onStartEdit={startEditBinding}
-									onCancelEdit={() => { setEditingBinding(null); setAddingBinding(false); setMessage(null); }}
+									onCancelEdit={() => {
+										setEditingBinding(null);
+										setAddingBinding(false);
+										setMessage(null);
+									}}
 									onAdd={handleAddBinding}
 									onUpdate={handleUpdateBinding}
 									onDelete={handleDeleteBinding}
@@ -278,11 +375,13 @@ export function ChannelSettingCard({platform, name, description, status, expande
 
 							{/* Status message */}
 							{message && (
-								<div className={`rounded-md border px-3 py-2 text-sm ${
-									message.type === "success"
-										? "border-green-500/20 bg-green-500/10 text-green-400"
-										: "border-red-500/20 bg-red-500/10 text-red-400"
-								}`}>
+								<div
+									className={`rounded-md border px-3 py-2 text-sm ${
+										message.type === "success"
+											? "border-green-500/20 bg-green-500/10 text-green-400"
+											: "border-red-500/20 bg-red-500/10 text-red-400"
+									}`}
+								>
 									{message.text}
 								</div>
 							)}
@@ -313,11 +412,19 @@ interface DisabledChannelCardProps {
 	description: string;
 }
 
-export function DisabledChannelCard({platform, name, description}: DisabledChannelCardProps) {
+export function DisabledChannelCard({
+	platform,
+	name,
+	description,
+}: DisabledChannelCardProps) {
 	return (
 		<div className="rounded-lg border border-app-line bg-app-box p-4 opacity-40">
 			<div className="flex items-center gap-3">
-				<PlatformIcon platform={platform} size="lg" className="text-ink-faint/50" />
+				<PlatformIcon
+					platform={platform}
+					size="lg"
+					className="text-ink-faint/50"
+				/>
 				<div className="flex-1">
 					<span className="text-sm font-medium text-ink">{name}</span>
 					<p className="mt-0.5 text-sm text-ink-dull">{description}</p>
@@ -355,14 +462,27 @@ function CredentialsSection({
 
 			{platform === "discord" && (
 				<div>
-					<label className="mb-1.5 block text-sm font-medium text-ink-dull">Bot Token</label>
+					<label className="mb-1.5 block text-sm font-medium text-ink-dull">
+						Bot Token
+					</label>
 					<Input
 						type="password"
 						size="lg"
 						value={credentialInputs.discord_token ?? ""}
-						onChange={(e) => setCredentialInputs({...credentialInputs, discord_token: e.target.value})}
-						placeholder={configured ? "Enter new token to update" : "MTk4NjIyNDgzNDcxOTI1MjQ4.D..."}
-						onKeyDown={(e) => { if (e.key === "Enter") onSave(); }}
+						onChange={(e) =>
+							setCredentialInputs({
+								...credentialInputs,
+								discord_token: e.target.value,
+							})
+						}
+						placeholder={
+							configured
+								? "Enter new token to update"
+								: "MTk4NjIyNDgzNDcxOTI1MjQ4.D..."
+						}
+						onKeyDown={(e) => {
+							if (e.key === "Enter") onSave();
+						}}
 					/>
 				</div>
 			)}
@@ -370,24 +490,44 @@ function CredentialsSection({
 			{platform === "slack" && (
 				<>
 					<div>
-						<label className="mb-1.5 block text-sm font-medium text-ink-dull">Bot Token</label>
+						<label className="mb-1.5 block text-sm font-medium text-ink-dull">
+							Bot Token
+						</label>
 						<Input
 							type="password"
 							size="lg"
 							value={credentialInputs.slack_bot_token ?? ""}
-							onChange={(e) => setCredentialInputs({...credentialInputs, slack_bot_token: e.target.value})}
-							placeholder={configured ? "Enter new token to update" : "xoxb-..."}
+							onChange={(e) =>
+								setCredentialInputs({
+									...credentialInputs,
+									slack_bot_token: e.target.value,
+								})
+							}
+							placeholder={
+								configured ? "Enter new token to update" : "xoxb-..."
+							}
 						/>
 					</div>
 					<div>
-						<label className="mb-1.5 block text-sm font-medium text-ink-dull">App Token</label>
+						<label className="mb-1.5 block text-sm font-medium text-ink-dull">
+							App Token
+						</label>
 						<Input
 							type="password"
 							size="lg"
 							value={credentialInputs.slack_app_token ?? ""}
-							onChange={(e) => setCredentialInputs({...credentialInputs, slack_app_token: e.target.value})}
-							placeholder={configured ? "Enter new token to update" : "xapp-..."}
-							onKeyDown={(e) => { if (e.key === "Enter") onSave(); }}
+							onChange={(e) =>
+								setCredentialInputs({
+									...credentialInputs,
+									slack_app_token: e.target.value,
+								})
+							}
+							placeholder={
+								configured ? "Enter new token to update" : "xapp-..."
+							}
+							onKeyDown={(e) => {
+								if (e.key === "Enter") onSave();
+							}}
 						/>
 					</div>
 				</>
@@ -395,14 +535,27 @@ function CredentialsSection({
 
 			{platform === "telegram" && (
 				<div>
-					<label className="mb-1.5 block text-sm font-medium text-ink-dull">Bot Token</label>
+					<label className="mb-1.5 block text-sm font-medium text-ink-dull">
+						Bot Token
+					</label>
 					<Input
 						type="password"
 						size="lg"
 						value={credentialInputs.telegram_token ?? ""}
-						onChange={(e) => setCredentialInputs({...credentialInputs, telegram_token: e.target.value})}
-						placeholder={configured ? "Enter new token to update" : "123456789:ABCdefGHI..."}
-						onKeyDown={(e) => { if (e.key === "Enter") onSave(); }}
+						onChange={(e) =>
+							setCredentialInputs({
+								...credentialInputs,
+								telegram_token: e.target.value,
+							})
+						}
+						placeholder={
+							configured
+								? "Enter new token to update"
+								: "123456789:ABCdefGHI..."
+						}
+						onKeyDown={(e) => {
+							if (e.key === "Enter") onSave();
+						}}
 					/>
 				</div>
 			)}
@@ -413,11 +566,12 @@ function CredentialsSection({
 				</p>
 			)}
 
-			{platform !== "webhook" && Object.values(credentialInputs).some((v) => v?.trim()) && (
-				<Button onClick={onSave} loading={saving} size="sm">
-					{configured ? "Update Credentials" : "Connect"}
-				</Button>
-			)}
+			{platform !== "webhook" &&
+				Object.values(credentialInputs).some((v) => v?.trim()) && (
+					<Button onClick={onSave} loading={saving} size="sm">
+						{configured ? "Update Credentials" : "Connect"}
+					</Button>
+				)}
 		</div>
 	);
 }
@@ -477,24 +631,51 @@ function BindingsSection({
 			{bindings.length > 0 ? (
 				<div className="rounded-md border border-app-line bg-app-box">
 					{bindings.map((binding, idx) => (
-						<div key={idx} className="flex items-center gap-2 border-b border-app-line/50 px-3 py-2 last:border-b-0">
+						<div
+							key={idx}
+							className="flex items-center gap-2 border-b border-app-line/50 px-3 py-2 last:border-b-0"
+						>
 							<div className="flex-1 min-w-0">
 								<span className="text-sm text-ink">{binding.agent_id}</span>
 								<div className="flex flex-wrap gap-1.5 mt-0.5 text-tiny text-ink-faint">
 									{binding.guild_id && <span>Guild: {binding.guild_id}</span>}
-									{binding.workspace_id && <span>Workspace: {binding.workspace_id}</span>}
-									{binding.chat_id && <span>Chat: {binding.chat_id}</span>}
-									{binding.channel_ids.length > 0 && <span>{binding.channel_ids.length} channel{binding.channel_ids.length > 1 ? "s" : ""}</span>}
-									{binding.dm_allowed_users.length > 0 && <span>{binding.dm_allowed_users.length} DM user{binding.dm_allowed_users.length > 1 ? "s" : ""}</span>}
-									{!binding.guild_id && !binding.workspace_id && !binding.chat_id && binding.channel_ids.length === 0 && (
-										<span>All conversations</span>
+									{binding.workspace_id && (
+										<span>Workspace: {binding.workspace_id}</span>
 									)}
+									{binding.chat_id && <span>Chat: {binding.chat_id}</span>}
+									{binding.channel_ids.length > 0 && (
+										<span>
+											{binding.channel_ids.length} channel
+											{binding.channel_ids.length > 1 ? "s" : ""}
+										</span>
+									)}
+									{binding.dm_allowed_users.length > 0 && (
+										<span>
+											{binding.dm_allowed_users.length} DM user
+											{binding.dm_allowed_users.length > 1 ? "s" : ""}
+										</span>
+									)}
+									{!binding.guild_id &&
+										!binding.workspace_id &&
+										!binding.chat_id &&
+										binding.channel_ids.length === 0 && (
+											<span>All conversations</span>
+										)}
 								</div>
 							</div>
-							<Button size="sm" variant="ghost" onClick={() => onStartEdit(binding)}>
+							<Button
+								size="sm"
+								variant="outline"
+								onClick={() => onStartEdit(binding)}
+							>
 								Edit
 							</Button>
-							<Button size="sm" variant="ghost" onClick={() => onDelete(binding)} loading={deletePending}>
+							<Button
+								size="sm"
+								variant="outline"
+								onClick={() => onDelete(binding)}
+								loading={deletePending}
+							>
 								Remove
 							</Button>
 						</div>
@@ -507,10 +688,17 @@ function BindingsSection({
 			)}
 
 			{/* Add/Edit binding modal */}
-			<Dialog open={isEditingOrAdding} onOpenChange={(open) => { if (!open) onCancelEdit(); }}>
+			<Dialog
+				open={isEditingOrAdding}
+				onOpenChange={(open) => {
+					if (!open) onCancelEdit();
+				}}
+			>
 				<DialogContent className="max-w-md">
 					<DialogHeader>
-						<DialogTitle>{editingBinding ? "Edit Binding" : "Add Binding"}</DialogTitle>
+						<DialogTitle>
+							{editingBinding ? "Edit Binding" : "Add Binding"}
+						</DialogTitle>
 					</DialogHeader>
 					<BindingForm
 						platform={platform}
@@ -557,12 +745,21 @@ function BindingForm({
 	return (
 		<div className="flex flex-col gap-3">
 			<div>
-				<label className="mb-1 block text-sm font-medium text-ink-dull">Agent</label>
-				<Select value={bindingForm.agent_id} onValueChange={(v) => setBindingForm({...bindingForm, agent_id: v})}>
-					<SelectTrigger><SelectValue /></SelectTrigger>
+				<label className="mb-1 block text-sm font-medium text-ink-dull">
+					Agent
+				</label>
+				<Select
+					value={bindingForm.agent_id}
+					onValueChange={(v) => setBindingForm({...bindingForm, agent_id: v})}
+				>
+					<SelectTrigger>
+						<SelectValue />
+					</SelectTrigger>
 					<SelectContent>
 						{agents.map((a) => (
-							<SelectItem key={a.id} value={a.id}>{a.id}</SelectItem>
+							<SelectItem key={a.id} value={a.id}>
+								{a.id}
+							</SelectItem>
 						)) ?? <SelectItem value="main">main</SelectItem>}
 					</SelectContent>
 				</Select>
@@ -570,11 +767,15 @@ function BindingForm({
 
 			{platform === "discord" && (
 				<div>
-					<label className="mb-1 block text-sm font-medium text-ink-dull">Guild ID</label>
+					<label className="mb-1 block text-sm font-medium text-ink-dull">
+						Guild ID
+					</label>
 					<Input
 						size="lg"
 						value={bindingForm.guild_id}
-						onChange={(e) => setBindingForm({...bindingForm, guild_id: e.target.value})}
+						onChange={(e) =>
+							setBindingForm({...bindingForm, guild_id: e.target.value})
+						}
 						placeholder="Optional — leave empty for all servers"
 					/>
 				</div>
@@ -582,11 +783,15 @@ function BindingForm({
 
 			{platform === "slack" && (
 				<div>
-					<label className="mb-1 block text-sm font-medium text-ink-dull">Workspace ID</label>
+					<label className="mb-1 block text-sm font-medium text-ink-dull">
+						Workspace ID
+					</label>
 					<Input
 						size="lg"
 						value={bindingForm.workspace_id}
-						onChange={(e) => setBindingForm({...bindingForm, workspace_id: e.target.value})}
+						onChange={(e) =>
+							setBindingForm({...bindingForm, workspace_id: e.target.value})
+						}
 						placeholder="Optional — leave empty for all workspaces"
 					/>
 				</div>
@@ -594,11 +799,15 @@ function BindingForm({
 
 			{platform === "telegram" && (
 				<div>
-					<label className="mb-1 block text-sm font-medium text-ink-dull">Chat ID</label>
+					<label className="mb-1 block text-sm font-medium text-ink-dull">
+						Chat ID
+					</label>
 					<Input
 						size="lg"
 						value={bindingForm.chat_id}
-						onChange={(e) => setBindingForm({...bindingForm, chat_id: e.target.value})}
+						onChange={(e) =>
+							setBindingForm({...bindingForm, chat_id: e.target.value})
+						}
 						placeholder="Optional — leave empty for all chats"
 					/>
 				</div>
@@ -606,20 +815,28 @@ function BindingForm({
 
 			{(platform === "discord" || platform === "slack") && (
 				<div>
-					<label className="mb-1 block text-sm font-medium text-ink-dull">Channel IDs</label>
+					<label className="mb-1 block text-sm font-medium text-ink-dull">
+						Channel IDs
+					</label>
 					<TagInput
 						value={bindingForm.channel_ids}
-						onChange={(ids) => setBindingForm({...bindingForm, channel_ids: ids})}
+						onChange={(ids) =>
+							setBindingForm({...bindingForm, channel_ids: ids})
+						}
 						placeholder="Add channel ID..."
 					/>
 				</div>
 			)}
 
 			<div>
-				<label className="mb-1 block text-sm font-medium text-ink-dull">DM Allowed Users</label>
+				<label className="mb-1 block text-sm font-medium text-ink-dull">
+					DM Allowed Users
+				</label>
 				<TagInput
 					value={bindingForm.dm_allowed_users}
-					onChange={(users) => setBindingForm({...bindingForm, dm_allowed_users: users})}
+					onChange={(users) =>
+						setBindingForm({...bindingForm, dm_allowed_users: users})
+					}
 					placeholder="Add user ID..."
 				/>
 			</div>
@@ -652,19 +869,33 @@ function DisconnectSection({
 	return (
 		<div className="border-t border-app-line/50 pt-4">
 			{!confirmDisconnect ? (
-				<Button variant="ghost" size="sm" onClick={() => setConfirmDisconnect(true)} className="text-red-400 hover:text-red-300">
+				<Button
+					variant="outline"
+					size="sm"
+					onClick={() => setConfirmDisconnect(true)}
+				>
 					Disconnect {name}
 				</Button>
 			) : (
 				<div className="flex flex-col gap-2">
 					<p className="text-sm text-red-400">
-						This will remove all credentials and bindings for {name}. The bot will stop responding immediately.
+						This will remove all credentials and bindings for {name}. The bot
+						will stop responding immediately.
 					</p>
 					<div className="flex gap-2">
-						<Button variant="ghost" size="sm" onClick={() => setConfirmDisconnect(false)}>
+						<Button
+							variant="ghost"
+							size="sm"
+							onClick={() => setConfirmDisconnect(false)}
+						>
 							Cancel
 						</Button>
-						<Button size="sm" onClick={onDisconnect} loading={disconnecting} className="bg-red-500/20 text-red-400 hover:bg-red-500/30">
+						<Button
+							size="sm"
+							onClick={onDisconnect}
+							loading={disconnecting}
+							className="bg-red-500/20 text-red-400 hover:bg-red-500/30"
+						>
 							Confirm Disconnect
 						</Button>
 					</div>

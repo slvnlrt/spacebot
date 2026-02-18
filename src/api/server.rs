@@ -540,6 +540,7 @@ pub async fn start_http_server(
         .route("/models/refresh", post(refresh_models))
         .route("/messaging/status", get(messaging_status))
         .route("/messaging/disconnect", post(disconnect_platform))
+        .route("/messaging/toggle", post(toggle_platform))
         .route("/bindings", get(list_bindings).post(create_binding).put(update_binding).delete(delete_binding))
         .route("/settings", get(get_global_settings).put(update_global_settings))
         .route("/config/raw", get(get_raw_config).put(update_raw_config))
@@ -3661,6 +3662,160 @@ async fn disconnect_platform(
 #[derive(Deserialize)]
 struct DisconnectPlatformRequest {
     platform: String,
+}
+
+#[derive(Deserialize)]
+struct TogglePlatformRequest {
+    platform: String,
+    enabled: bool,
+}
+
+/// Toggle a messaging platform's enabled state. When disabling, shuts down the
+/// adapter. When enabling, reads credentials from config and hot-starts it.
+async fn toggle_platform(
+    State(state): State<Arc<ApiState>>,
+    Json(request): Json<TogglePlatformRequest>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let platform = &request.platform;
+    let config_path = state.config_path.read().await.clone();
+
+    let content = tokio::fs::read_to_string(&config_path).await.map_err(|error| {
+        tracing::warn!(%error, "failed to read config.toml");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    let mut doc: toml_edit::DocumentMut = content.parse().map_err(|error| {
+        tracing::warn!(%error, "failed to parse config.toml");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    // Check the platform section exists
+    let platform_table = doc
+        .get_mut("messaging")
+        .and_then(|m| m.as_table_mut())
+        .and_then(|m| m.get_mut(platform.as_str()))
+        .and_then(|p| p.as_table_mut());
+
+    let Some(table) = platform_table else {
+        return Ok(Json(serde_json::json!({
+            "success": false,
+            "message": format!("{platform} is not configured")
+        })));
+    };
+
+    table["enabled"] = toml_edit::value(request.enabled);
+
+    tokio::fs::write(&config_path, doc.to_string()).await.map_err(|error| {
+        tracing::warn!(%error, "failed to write config.toml");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    let manager_guard = state.messaging_manager.read().await;
+    let manager = manager_guard.as_ref();
+
+    if request.enabled {
+        // Re-read the full config to get credentials and start the adapter
+        if let Ok(new_config) = crate::config::Config::load_from_path(&config_path) {
+            if let Some(manager) = manager {
+                match platform.as_str() {
+                    "discord" => {
+                        if let Some(discord_config) = &new_config.messaging.discord {
+                            let perms = {
+                                let perms_guard = state.discord_permissions.read().await;
+                                match perms_guard.as_ref() {
+                                    Some(existing) => existing.clone(),
+                                    None => {
+                                        drop(perms_guard);
+                                        let perms = crate::config::DiscordPermissions::from_config(
+                                            discord_config,
+                                            &new_config.bindings,
+                                        );
+                                        let arc_swap = std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(perms));
+                                        state.set_discord_permissions(arc_swap.clone()).await;
+                                        arc_swap
+                                    }
+                                }
+                            };
+                            let adapter = crate::messaging::discord::DiscordAdapter::new(&discord_config.token, perms);
+                            if let Err(error) = manager.register_and_start(adapter).await {
+                                tracing::error!(%error, "failed to start discord adapter on toggle");
+                            }
+                        }
+                    }
+                    "slack" => {
+                        if let Some(slack_config) = &new_config.messaging.slack {
+                            let perms = {
+                                let perms_guard = state.slack_permissions.read().await;
+                                match perms_guard.as_ref() {
+                                    Some(existing) => existing.clone(),
+                                    None => {
+                                        drop(perms_guard);
+                                        let perms = crate::config::SlackPermissions::from_config(
+                                            slack_config,
+                                            &new_config.bindings,
+                                        );
+                                        let arc_swap = std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(perms));
+                                        state.set_slack_permissions(arc_swap.clone()).await;
+                                        arc_swap
+                                    }
+                                }
+                            };
+                            let adapter = crate::messaging::slack::SlackAdapter::new(
+                                &slack_config.bot_token,
+                                &slack_config.app_token,
+                                perms,
+                            );
+                            if let Err(error) = manager.register_and_start(adapter).await {
+                                tracing::error!(%error, "failed to start slack adapter on toggle");
+                            }
+                        }
+                    }
+                    "telegram" => {
+                        if let Some(telegram_config) = &new_config.messaging.telegram {
+                            let perms = crate::config::TelegramPermissions::from_config(
+                                telegram_config,
+                                &new_config.bindings,
+                            );
+                            let arc_swap = std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(perms));
+                            let adapter = crate::messaging::telegram::TelegramAdapter::new(
+                                &telegram_config.token,
+                                arc_swap,
+                            );
+                            if let Err(error) = manager.register_and_start(adapter).await {
+                                tracing::error!(%error, "failed to start telegram adapter on toggle");
+                            }
+                        }
+                    }
+                    "webhook" => {
+                        if let Some(webhook_config) = &new_config.messaging.webhook {
+                            let adapter = crate::messaging::webhook::WebhookAdapter::new(
+                                webhook_config.port,
+                                &webhook_config.bind,
+                            );
+                            if let Err(error) = manager.register_and_start(adapter).await {
+                                tracing::error!(%error, "failed to start webhook adapter on toggle");
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    } else {
+        // Shut down the adapter
+        if let Some(manager) = manager {
+            if let Err(error) = manager.remove_adapter(platform).await {
+                tracing::warn!(%error, platform = %platform, "failed to shut down adapter on toggle");
+            }
+        }
+    }
+
+    let action = if request.enabled { "enabled" } else { "disabled" };
+    tracing::info!(platform = %platform, action, "platform toggled via API");
+
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "message": format!("{platform} {action}")
+    })))
 }
 
 #[derive(Serialize)]
