@@ -86,6 +86,7 @@ pub struct LlmConfig {
     pub ollama_key: Option<String>,
     pub ollama_base_url: Option<String>,
     pub opencode_zen_key: Option<String>,
+    pub nvidia_key: Option<String>,
 }
 
 impl LlmConfig {
@@ -104,6 +105,7 @@ impl LlmConfig {
             || self.ollama_key.is_some()
             || self.ollama_base_url.is_some()
             || self.opencode_zen_key.is_some()
+            || self.nvidia_key.is_some()
     }
 }
 
@@ -919,6 +921,7 @@ struct TomlLlmConfig {
     ollama_key: Option<String>,
     ollama_base_url: Option<String>,
     opencode_zen_key: Option<String>,
+    nvidia_key: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -1414,6 +1417,12 @@ impl Config {
                 .as_deref()
                 .and_then(resolve_env_value)
                 .or_else(|| std::env::var("OPENCODE_ZEN_API_KEY").ok()),
+            nvidia_key: toml
+                .llm
+                .nvidia_key
+                .as_deref()
+                .and_then(resolve_env_value)
+                .or_else(|| std::env::var("NVIDIA_API_KEY").ok()),
         };
 
         // Note: We allow boot without provider configuration now. System starts in setup mode.

@@ -62,6 +62,8 @@ impl LlmManager {
                 .ok_or_else(|| LlmError::MissingProviderKey("ollama".into()).into()),
             "opencode-zen" => self.config.opencode_zen_key.clone()
                 .ok_or_else(|| LlmError::MissingProviderKey("opencode-zen".into()).into()),
+            "nvidia" => self.config.nvidia_key.clone()
+                .ok_or_else(|| LlmError::MissingProviderKey("nvidia".into()).into()),
             _ => Err(LlmError::UnknownProvider(provider.into()).into()),
         }
     }

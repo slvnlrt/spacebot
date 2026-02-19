@@ -152,6 +152,14 @@ const PROVIDERS = [
 		defaultModel: "mistral-large-latest",
 	},
 	{
+		id: "nvidia",
+		name: "NVIDIA NIM",
+		description: "NVIDIA-hosted models via NIM API",
+		placeholder: "nvapi-...",
+		envVar: "NVIDIA_API_KEY",
+		defaultModel: "nvidia/meta/llama-3.1-405b-instruct",
+	},
+	{
 		id: "ollama",
 		name: "Ollama",
 		description: "Local or remote Ollama API endpoint",

@@ -78,6 +78,7 @@ impl SpacebotModel {
             "mistral" => self.call_mistral(request).await,
             "ollama" => self.call_ollama(request).await,
             "opencode-zen" => self.call_opencode_zen(request).await,
+            "nvidia" => self.call_nvidia(request).await,
             other => Err(CompletionError::ProviderError(format!(
                 "unknown provider: {other}"
             ))),
@@ -815,6 +816,18 @@ impl SpacebotModel {
             "https://opencode.ai/zen/v1/chat/completions",
         ).await
     }
+
+    async fn call_nvidia(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<completion::CompletionResponse<RawResponse>, CompletionError> {
+        self.call_openai_compatible(
+            request,
+            "nvidia",
+            "NVIDIA NIM",
+            "https://integrate.api.nvidia.com/v1/chat/completions",
+        ).await
+    }
 }
 
 // --- Helpers ---
@@ -1126,6 +1139,21 @@ fn parse_openai_response(
         }
     }
 
+    // Some reasoning models (e.g., NVIDIA kimi-k2.5) return reasoning in a separate field
+    if assistant_content.is_empty() {
+        if let Some(reasoning) = choice["reasoning_content"].as_str() {
+            if !reasoning.is_empty() {
+                tracing::debug!(
+                    provider = %provider_label,
+                    "extracted reasoning_content as main content"
+                );
+                assistant_content.push(AssistantContent::Text(Text {
+                    text: reasoning.to_string(),
+                }));
+            }
+        }
+    }
+
     if let Some(tool_calls) = choice["tool_calls"].as_array() {
         for tc in tool_calls {
             let id = tc["id"].as_str().unwrap_or("").to_string();
@@ -1143,8 +1171,15 @@ fn parse_openai_response(
         }
     }
 
-    let result_choice = OneOrMany::many(assistant_content)
-        .map_err(|_| CompletionError::ResponseError(format!("empty response from {provider_label}")))?;
+    let result_choice = OneOrMany::many(assistant_content.clone())
+        .map_err(|_| {
+            tracing::warn!(
+                provider = %provider_label,
+                choice = ?choice,
+                "empty response from provider"
+            );
+            CompletionError::ResponseError(format!("empty response from {provider_label}"))
+        })?;
 
     let input_tokens = body["usage"]["prompt_tokens"].as_u64().unwrap_or(0);
     let output_tokens = body["usage"]["completion_tokens"].as_u64().unwrap_or(0);

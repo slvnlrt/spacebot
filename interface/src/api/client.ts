@@ -655,6 +655,7 @@ export interface ProviderStatus {
 	mistral: boolean;
 	ollama: boolean;
 	opencode_zen: boolean;
+	nvidia: boolean;
 }
 
 export interface ProvidersResponse {
