@@ -74,15 +74,11 @@ impl Branch {
     /// On context overflow, compacts history and retries up to `MAX_OVERFLOW_RETRIES`
     /// times. Branches inherit a full clone of channel history which may already
     /// be large, making them susceptible to overflow on the first LLM call.
+    #[tracing::instrument(skip(self, prompt), fields(branch_id = %self.id, channel_id = %self.channel_id))]
     pub async fn run(mut self, prompt: impl Into<String>) -> Result<String> {
         let prompt = prompt.into();
 
-        tracing::info!(
-            branch_id = %self.id,
-            channel_id = %self.channel_id,
-            description = %self.description,
-            "branch starting"
-        );
+        tracing::info!(description = %self.description, "branch starting");
 
         // Pre-flight context check: if the forked history is already large,
         // compact before we even make the first LLM call.
@@ -114,18 +110,17 @@ impl Branch {
                     let partial = extract_last_assistant_text(&self.history).unwrap_or_else(|| {
                         "Branch exhausted its turns without a final conclusion.".into()
                     });
-                    tracing::warn!(branch_id = %self.id, "branch hit max turns, returning partial result");
+                    tracing::warn!("branch hit max turns, returning partial result");
                     break partial;
                 }
                 Err(rig::completion::PromptError::PromptCancelled { reason, .. }) => {
-                    tracing::info!(branch_id = %self.id, %reason, "branch cancelled");
+                    tracing::info!(%reason, "branch cancelled");
                     break format!("Branch was cancelled: {reason}");
                 }
                 Err(error) if is_context_overflow_error(&error.to_string()) => {
                     overflow_retries += 1;
                     if overflow_retries > MAX_OVERFLOW_RETRIES {
                         tracing::error!(
-                            branch_id = %self.id,
                             %error,
                             "branch context overflow unrecoverable after {MAX_OVERFLOW_RETRIES} attempts"
                         );
@@ -135,7 +130,6 @@ impl Branch {
                     }
 
                     tracing::warn!(
-                        branch_id = %self.id,
                         attempt = overflow_retries,
                         %error,
                         "branch context overflow, compacting and retrying"
@@ -145,7 +139,7 @@ impl Branch {
                         "Continue where you left off. Older context has been compacted.".into();
                 }
                 Err(error) => {
-                    tracing::error!(branch_id = %self.id, %error, "branch LLM call failed");
+                    tracing::error!(%error, "branch LLM call failed");
                     return Err(crate::error::AgentError::Other(error.into()).into());
                 }
             }
@@ -159,7 +153,7 @@ impl Branch {
             conclusion: conclusion.clone(),
         });
 
-        tracing::info!(branch_id = %self.id, "branch completed");
+        tracing::info!("branch completed");
 
         Ok(conclusion)
     }

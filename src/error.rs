@@ -29,10 +29,10 @@ pub enum Error {
     #[error(transparent)]
     Settings(Box<SettingsError>),
 
-    #[error("database error: {0}")]
+    #[error(transparent)]
     Sqlx(#[from] sqlx::Error),
 
-    #[error("IO error: {0}")]
+    #[error(transparent)]
     Io(#[from] std::io::Error),
 
     #[error(transparent)]
@@ -97,7 +97,7 @@ pub enum ConfigError {
 /// Database connection and operation errors.
 #[derive(Debug, thiserror::Error)]
 pub enum DbError {
-    #[error("failed to connect to SQLite: {0}")]
+    #[error(transparent)]
     SqliteConnect(#[from] sqlx::Error),
 
     #[error("failed to connect to LanceDB: {0}")]
@@ -106,7 +106,7 @@ pub enum DbError {
     #[error("LanceDB operation failed: {0}")]
     LanceDb(String),
 
-    #[error("failed to connect to redb: {0}")]
+    #[error(transparent)]
     RedbConnect(#[from] redb::Error),
 
     #[error("migration failed: {0}")]
@@ -162,7 +162,7 @@ pub enum MemoryError {
     #[error("graph operation failed: {0}")]
     GraphOperationFailed(String),
 
-    #[error("database error: {0}")]
+    #[error(transparent)]
     Database(#[from] sqlx::Error),
 
     #[error(transparent)]

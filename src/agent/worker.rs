@@ -179,11 +179,12 @@ impl Worker {
     /// and compacts if the worker is approaching the context window limit.
     /// This prevents long-running workers from dying mid-task due to context
     /// exhaustion.
+    #[tracing::instrument(skip(self), fields(worker_id = %self.id))]
     pub async fn run(mut self) -> Result<String> {
         self.status_tx.send_modify(|s| *s = "running".to_string());
         self.hook.send_status("running");
 
-        tracing::info!(worker_id = %self.id, task = %self.task, "worker starting");
+        tracing::info!(worker_id = %self.id, task_len = self.task.len(), "worker starting");
 
         // Create per-worker ToolServer with task tools
         let worker_tool_server = crate::tools::create_worker_tool_server(
@@ -237,7 +238,6 @@ impl Worker {
                         .send_status(format!("working (segment {segments_run})"));
 
                     tracing::debug!(
-                        worker_id = %self.id,
                         segment = segments_run,
                         history_len = history.len(),
                         "continuing to next segment"
@@ -247,7 +247,7 @@ impl Worker {
                     self.state = WorkerState::Failed;
                     self.hook.send_status("cancelled");
                     self.write_failure_log(&history, &format!("cancelled: {reason}"));
-                    tracing::info!(worker_id = %self.id, %reason, "worker cancelled");
+                    tracing::info!(%reason, "worker cancelled");
                     return Ok(format!("Worker cancelled: {reason}"));
                 }
                 Err(error) if is_context_overflow_error(&error.to_string()) => {
@@ -256,12 +256,11 @@ impl Worker {
                         self.state = WorkerState::Failed;
                         self.hook.send_status("failed");
                         self.write_failure_log(&history, &format!("context overflow after {MAX_OVERFLOW_RETRIES} compaction attempts: {error}"));
-                        tracing::error!(worker_id = %self.id, %error, "worker context overflow unrecoverable");
+                        tracing::error!(%error, "worker context overflow unrecoverable");
                         return Err(crate::error::AgentError::Other(error.into()).into());
                     }
 
                     tracing::warn!(
-                        worker_id = %self.id,
                         attempt = overflow_retries,
                         %error,
                         "context overflow, compacting and retrying"
@@ -277,7 +276,7 @@ impl Worker {
                     self.state = WorkerState::Failed;
                     self.hook.send_status("failed");
                     self.write_failure_log(&history, &error.to_string());
-                    tracing::error!(worker_id = %self.id, %error, "worker LLM call failed");
+                    tracing::error!(%error, "worker LLM call failed");
                     return Err(crate::error::AgentError::Other(error.into()).into());
                 }
             }
@@ -310,11 +309,10 @@ impl Worker {
                             follow_up_overflow_retries += 1;
                             if follow_up_overflow_retries > MAX_OVERFLOW_RETRIES {
                                 self.write_failure_log(&history, &format!("follow-up context overflow after {MAX_OVERFLOW_RETRIES} compaction attempts: {error}"));
-                                tracing::error!(worker_id = %self.id, %error, "follow-up context overflow unrecoverable");
+                                tracing::error!(%error, "follow-up context overflow unrecoverable");
                                 break false;
                             }
                             tracing::warn!(
-                                worker_id = %self.id,
                                 attempt = follow_up_overflow_retries,
                                 %error,
                                 "follow-up context overflow, compacting and retrying"
@@ -329,7 +327,7 @@ impl Worker {
                         }
                         Err(error) => {
                             self.write_failure_log(&history, &format!("follow-up failed: {error}"));
-                            tracing::error!(worker_id = %self.id, %error, "worker follow-up failed");
+                            tracing::error!(%error, "worker follow-up failed");
                             break false;
                         }
                     }
@@ -420,7 +418,6 @@ impl Worker {
         history.insert(0, rig::message::Message::from(marker));
 
         tracing::info!(
-            worker_id = %self.id,
             removed = remove_count,
             remaining = history.len(),
             usage = %format!("{:.0}%", usage * 100.0),

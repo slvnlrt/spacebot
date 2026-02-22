@@ -317,7 +317,8 @@ impl Channel {
 
     /// Run the channel event loop.
     pub async fn run(mut self) -> Result<()> {
-        tracing::info!(channel_id = %self.id, "channel started");
+        let channel_id = self.id.clone();
+        tracing::info!(channel_id = %channel_id, "channel started");
 
         loop {
             // Compute sleep duration based on coalesce deadline
@@ -342,26 +343,26 @@ impl Channel {
                     } else {
                         // Flush any pending buffer before handling this message
                         if let Err(error) = self.flush_coalesce_buffer().await {
-                            tracing::error!(%error, channel_id = %self.id, "error flushing coalesce buffer");
+                            tracing::error!(%error, channel_id = %channel_id, "error flushing coalesce buffer");
                         }
                         if let Err(error) = self.handle_message(message).await {
-                            tracing::error!(%error, channel_id = %self.id, "error handling message");
+                            tracing::error!(%error, channel_id = %channel_id, "error handling message");
                         }
                     }
                 }
                 Ok(event) = self.event_rx.recv() => {
                     // Events bypass coalescing - flush buffer first if needed
                     if let Err(error) = self.flush_coalesce_buffer().await {
-                        tracing::error!(%error, channel_id = %self.id, "error flushing coalesce buffer");
+                        tracing::error!(%error, channel_id = %channel_id, "error flushing coalesce buffer");
                     }
                     if let Err(error) = self.handle_event(event).await {
-                        tracing::error!(%error, channel_id = %self.id, "error handling event");
+                        tracing::error!(%error, channel_id = %channel_id, "error handling event");
                     }
                 }
                 _ = tokio::time::sleep(sleep_duration), if self.coalesce_deadline.is_some() => {
                     // Deadline reached - flush the buffer
                     if let Err(error) = self.flush_coalesce_buffer().await {
-                        tracing::error!(%error, channel_id = %self.id, "error flushing coalesce buffer on deadline");
+                        tracing::error!(%error, channel_id = %channel_id, "error flushing coalesce buffer on deadline");
                     }
                 }
                 else => break,
@@ -370,10 +371,10 @@ impl Channel {
 
         // Flush any remaining buffer before shutting down
         if let Err(error) = self.flush_coalesce_buffer().await {
-            tracing::error!(%error, channel_id = %self.id, "error flushing coalesce buffer on shutdown");
+            tracing::error!(%error, channel_id = %channel_id, "error flushing coalesce buffer on shutdown");
         }
 
-        tracing::info!(channel_id = %self.id, "channel stopped");
+        tracing::info!(channel_id = %channel_id, "channel stopped");
         Ok(())
     }
 
@@ -490,12 +491,7 @@ impl Channel {
         let elapsed = last_timestamp.signed_duration_since(first_timestamp);
         let elapsed_secs = elapsed.num_milliseconds() as f64 / 1000.0;
 
-        tracing::info!(
-            channel_id = %self.id,
-            message_count,
-            elapsed_secs,
-            "handling batched messages"
-        );
+        tracing::info!(message_count, elapsed_secs, "handling batched messages");
 
         // Count unique senders for the hint
         let unique_senders: std::collections::HashSet<_> =
@@ -654,7 +650,7 @@ impl Channel {
             .await;
         // Check compaction
         if let Err(error) = self.compactor.check_and_compact().await {
-            tracing::warn!(channel_id = %self.id, %error, "compaction check failed");
+            tracing::warn!(%error, "compaction check failed");
         }
 
         // Increment message counter for memory persistence
@@ -723,11 +719,7 @@ impl Channel {
     /// memory_save. The tools act on the channel's shared state directly.
     #[tracing::instrument(skip(self, message), fields(channel_id = %self.id, agent_id = %self.deps.agent_id, message_id = %message.id))]
     async fn handle_message(&mut self, message: InboundMessage) -> Result<()> {
-        tracing::info!(
-            channel_id = %self.id,
-            message_id = %message.id,
-            "handling message"
-        );
+        tracing::info!("handling message");
 
         // Track conversation_id for synthetic re-trigger messages
         if self.conversation_id.is_none() {
@@ -829,7 +821,7 @@ impl Channel {
 
         // Check context size and trigger compaction if needed
         if let Err(error) = self.compactor.check_and_compact().await {
-            tracing::warn!(channel_id = %self.id, %error, "compaction check failed");
+            tracing::warn!(%error, "compaction check failed");
         }
 
         // Increment message counter and spawn memory persistence branch if threshold reached
@@ -926,7 +918,7 @@ impl Channel {
     ///
     /// Returns a formatted context string for injection into the prompt.
     /// Updates `injection_state` with newly injected memory IDs and embeddings.
-    #[tracing::instrument(skip(self), fields(channel_id = %self.id))]
+    #[tracing::instrument(skip(self, user_text), fields(channel_id = %self.id))]
     async fn compute_memory_injection(&mut self, user_text: &str) -> Option<String> {
         // Skip pre-hook for system messages (re-triggers after worker/branch completion)
         // The caller should check this before calling, but we double-check here.
@@ -1140,7 +1132,7 @@ impl Channel {
         if let Ok(ref response) = result
             && extract_reply_from_tool_syntax(response.trim()).is_some()
         {
-            tracing::warn!(channel_id = %self.id, "LLM emitted tool syntax as text, retrying with correction");
+            tracing::warn!("LLM emitted tool syntax as text, retrying with correction");
             let prompt_engine = self.deps.runtime_config.prompts.load();
             let correction = prompt_engine.render_system_tool_syntax_correction()?;
             result = agent
@@ -1176,9 +1168,9 @@ impl Channel {
                 let replied = replied_flag.load(std::sync::atomic::Ordering::Relaxed);
 
                 if skipped {
-                    tracing::debug!(channel_id = %self.id, "channel turn skipped (no response)");
+                    tracing::debug!("channel turn skipped (no response)");
                 } else if replied {
-                    tracing::debug!(channel_id = %self.id, "channel turn replied via tool (fallback suppressed)");
+                    tracing::debug!("channel turn replied via tool (fallback suppressed)");
                 } else {
                     // If the LLM returned text without using the reply tool, send it
                     // directly. Some models respond with text instead of tool calls.
@@ -1197,7 +1189,7 @@ impl Channel {
                     );
                     if !final_text.is_empty() {
                         if extracted.is_some() {
-                            tracing::warn!(channel_id = %self.id, "extracted reply from malformed tool syntax in LLM text output");
+                            tracing::warn!("extracted reply from malformed tool syntax in LLM text output");
                         }
                         self.state
                             .conversation_logger
@@ -1207,25 +1199,25 @@ impl Channel {
                             .send(OutboundResponse::Text(final_text))
                             .await
                         {
-                            tracing::error!(%error, channel_id = %self.id, "failed to send fallback reply");
+                            tracing::error!(%error, "failed to send fallback reply");
                         }
                     }
 
-                    tracing::debug!(channel_id = %self.id, "channel turn completed");
+                    tracing::debug!("channel turn completed");
                 }
             }
             Err(rig::completion::PromptError::MaxTurnsError { .. }) => {
-                tracing::warn!(channel_id = %self.id, "channel hit max turns");
+                tracing::warn!("channel hit max turns");
             }
             Err(rig::completion::PromptError::PromptCancelled { reason, .. }) => {
                 if reason == "reply delivered" {
-                    tracing::debug!(channel_id = %self.id, "channel turn completed via reply tool");
+                    tracing::debug!("channel turn completed via reply tool");
                 } else {
-                    tracing::info!(channel_id = %self.id, %reason, "channel turn cancelled");
+                    tracing::info!(%reason, "channel turn cancelled");
                 }
             }
             Err(error) => {
-                tracing::error!(channel_id = %self.id, %error, "channel LLM call failed");
+                tracing::error!(%error, "channel LLM call failed");
             }
         }
 
@@ -1635,7 +1627,6 @@ pub async fn spawn_worker_from_state(
         "worker.run",
         worker_id = %worker_id,
         channel_id = %state.channel_id,
-        task = %task,
     );
     let handle = spawn_worker_task(
         worker_id,
@@ -1663,7 +1654,7 @@ pub async fn spawn_worker_from_state(
         })
         .ok();
 
-    tracing::info!(worker_id = %worker_id, task = %task, "worker spawned");
+    tracing::info!(worker_id = %worker_id, "worker spawned");
 
     Ok(worker_id)
 }
@@ -1727,7 +1718,6 @@ pub async fn spawn_opencode_worker_from_state(
         "worker.run",
         worker_id = %worker_id,
         channel_id = %state.channel_id,
-        task = %task,
         worker_type = "opencode",
     );
     let handle = spawn_worker_task(
@@ -1761,7 +1751,7 @@ pub async fn spawn_opencode_worker_from_state(
         })
         .ok();
 
-    tracing::info!(worker_id = %worker_id, task = %task, "OpenCode worker spawned");
+    tracing::info!(worker_id = %worker_id, "OpenCode worker spawned");
 
     Ok(worker_id)
 }
