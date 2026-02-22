@@ -926,26 +926,33 @@ impl Channel {
         let memory_search = self.deps.memory_search();
         let store = memory_search.store();
 
-        // Time threshold for "recent" memories (1 hour ago)
-        let recent_threshold = chrono::Utc::now() - chrono::Duration::hours(1);
-        let context_window_depth = 50; // Number of turns to consider for re-injection
+        // Load configuration values
+        let config = self.deps.runtime_config.memory_injection.load();
+        let recent_threshold = chrono::Utc::now() - chrono::Duration::hours(config.recent_threshold_hours);
+        let context_window_depth = config.context_window_depth;
+        let identity_limit = config.identity_limit;
+        let important_limit = config.important_limit;
+        let recent_limit = config.recent_limit;
+        let vector_search_limit = config.vector_search_limit;
+        let semantic_threshold = config.semantic_threshold;
+        let importance_threshold = config.importance_threshold;
 
         let mut all_memories = Vec::new();
 
         // 1. SQL Pre-hook: Identity memories (always included)
-        match store.get_by_type(MemoryType::Identity, 10).await {
+        match store.get_by_type(MemoryType::Identity, identity_limit).await {
             Ok(memories) => all_memories.extend(memories),
             Err(error) => tracing::warn!(%error, "failed to fetch identity memories"),
         }
 
-        // 2. SQL Pre-hook: High importance memories (>0.8)
-        match store.get_high_importance(0.8, 10).await {
+        // 2. SQL Pre-hook: High importance memories
+        match store.get_high_importance(importance_threshold, important_limit).await {
             Ok(memories) => all_memories.extend(memories),
             Err(error) => tracing::warn!(%error, "failed to fetch high importance memories"),
         }
 
-        // 3. SQL Pre-hook: Recent memories (<1h)
-        match store.get_recent_since(recent_threshold, 10).await {
+        // 3. SQL Pre-hook: Recent memories
+        match store.get_recent_since(recent_threshold, recent_limit).await {
             Ok(memories) => all_memories.extend(memories),
             Err(error) => tracing::warn!(%error, "failed to fetch recent memories"),
         }
@@ -953,7 +960,7 @@ impl Channel {
         // 4. Vector Pre-hook: Semantic search on user message
         let search_config = SearchConfig {
             mode: SearchMode::Hybrid,
-            max_results: 20,
+            max_results: vector_search_limit,
             ..Default::default()
         };
 
@@ -969,7 +976,6 @@ impl Channel {
         // 5. Deduplication: filter by ID and semantic similarity
         let mut unique_memories = Vec::new();
         let mut seen_ids = HashSet::new();
-        let semantic_threshold = 0.85;
 
         for memory in all_memories {
             // Skip if already injected and still within context window
