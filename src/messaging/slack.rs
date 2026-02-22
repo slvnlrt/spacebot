@@ -117,8 +117,18 @@ async fn handle_push_event(
 ) -> UserCallbackResult<()> {
     match event.event {
         SlackEventCallbackBody::Message(msg) => {
-            let channel = msg.origin.channel.as_ref().map(|c| c.0.as_str()).unwrap_or("none");
-            let sender = msg.sender.user.as_ref().map(|u| u.0.as_str()).unwrap_or("none");
+            let channel = msg
+                .origin
+                .channel
+                .as_ref()
+                .map(|c| c.0.as_str())
+                .unwrap_or("none");
+            let sender = msg
+                .sender
+                .user
+                .as_ref()
+                .map(|u| u.0.as_str())
+                .unwrap_or("none");
             let subtype = msg.subtype.as_ref().map(|s| format!("{:?}", s));
             tracing::debug!(channel, sender, ?subtype, "slack push event: message");
             handle_message_event(msg, &event.team_id, client, states).await
@@ -148,9 +158,11 @@ async fn handle_message_event(
     let state_guard = states.read().await;
     let adapter_state = state_guard
         .get_user_state::<Arc<SlackAdapterState>>()
-        .ok_or_else(|| Box::<dyn std::error::Error + Send + Sync>::from(
-            "SlackAdapterState not found in user_state",
-        ))?;
+        .ok_or_else(|| {
+            Box::<dyn std::error::Error + Send + Sync>::from(
+                "SlackAdapterState not found in user_state",
+            )
+        })?;
 
     let user_id = msg_event.sender.user.as_ref().map(|u| u.0.clone());
 
@@ -182,10 +194,18 @@ async fn handle_message_event(
         if let Some(ref sender_id) = user_id
             && !perms.dm_allowed_users.contains(sender_id)
         {
-            tracing::debug!(channel_id, user_id = sender_id.as_str(), "DM dropped: user not in dm_allowed_users");
+            tracing::debug!(
+                channel_id,
+                user_id = sender_id.as_str(),
+                "DM dropped: user not in dm_allowed_users"
+            );
             return Ok(());
         }
-        tracing::info!(channel_id, ?user_id, "DM permitted, bypassing channel filter");
+        tracing::info!(
+            channel_id,
+            ?user_id,
+            "DM permitted, bypassing channel filter"
+        );
     }
 
     if !is_dm {
@@ -255,9 +275,11 @@ async fn handle_app_mention_event(
     let state_guard = states.read().await;
     let adapter_state = state_guard
         .get_user_state::<Arc<SlackAdapterState>>()
-        .ok_or_else(|| Box::<dyn std::error::Error + Send + Sync>::from(
-            "SlackAdapterState not found in user_state",
-        ))?;
+        .ok_or_else(|| {
+            Box::<dyn std::error::Error + Send + Sync>::from(
+                "SlackAdapterState not found in user_state",
+            )
+        })?;
 
     let user_id = mention.user.0.clone();
 
@@ -356,9 +378,11 @@ async fn handle_command_event(
     let state_guard = states.read().await;
     let adapter_state = state_guard
         .get_user_state::<Arc<SlackAdapterState>>()
-        .ok_or_else(|| Box::<dyn std::error::Error + Send + Sync>::from(
-            "SlackAdapterState not found in user_state",
-        ))?;
+        .ok_or_else(|| {
+            Box::<dyn std::error::Error + Send + Sync>::from(
+                "SlackAdapterState not found in user_state",
+            )
+        })?;
 
     let command_str = event.command.0.clone();
     let team_id = event.team_id.0.clone();
@@ -497,9 +521,11 @@ async fn handle_interaction_event(
     let state_guard = states.read().await;
     let adapter_state = state_guard
         .get_user_state::<Arc<SlackAdapterState>>()
-        .ok_or_else(|| Box::<dyn std::error::Error + Send + Sync>::from(
-            "SlackAdapterState not found in user_state",
-        ))?;
+        .ok_or_else(|| {
+            Box::<dyn std::error::Error + Send + Sync>::from(
+                "SlackAdapterState not found in user_state",
+            )
+        })?;
 
     let user_id = block_actions
         .user
@@ -1517,7 +1543,11 @@ fn sanitize_reaction_name(emoji: &str) -> String {
             // Note: shortcodes come from gemoji (GitHub's set) which may not match Slack's
             // shortcode names for uncommon emojis. Common emojis (thumbsup, heart, etc.) are
             // consistent across both sets.
-            tracing::debug!(unicode = trimmed, shortcode, "resolved unicode emoji to shortcode");
+            tracing::debug!(
+                unicode = trimmed,
+                shortcode,
+                "resolved unicode emoji to shortcode"
+            );
             return shortcode.to_string();
         }
         // Unicode emoji matched but has no shortcode — use the emoji's name as fallback.
@@ -1560,7 +1590,10 @@ mod tests {
     fn sanitize_reaction_name_unicode_emoji_with_shortcode() {
         // gemoji maps 👍 to "+1" — verify we get the shortcode, not the unicode back
         let result = sanitize_reaction_name("\u{1F44D}"); // 👍
-        assert_eq!(result, "+1", "should resolve unicode thumbs-up to its gemoji shortcode");
+        assert_eq!(
+            result, "+1",
+            "should resolve unicode thumbs-up to its gemoji shortcode"
+        );
     }
 
     #[test]

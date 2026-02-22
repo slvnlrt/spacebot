@@ -177,24 +177,66 @@ pub struct LlmConfig {
 impl std::fmt::Debug for LlmConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("LlmConfig")
-            .field("anthropic_key", &self.anthropic_key.as_ref().map(|_| "[REDACTED]"))
-            .field("openai_key", &self.openai_key.as_ref().map(|_| "[REDACTED]"))
-            .field("openrouter_key", &self.openrouter_key.as_ref().map(|_| "[REDACTED]"))
+            .field(
+                "anthropic_key",
+                &self.anthropic_key.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field(
+                "openai_key",
+                &self.openai_key.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field(
+                "openrouter_key",
+                &self.openrouter_key.as_ref().map(|_| "[REDACTED]"),
+            )
             .field("zhipu_key", &self.zhipu_key.as_ref().map(|_| "[REDACTED]"))
             .field("groq_key", &self.groq_key.as_ref().map(|_| "[REDACTED]"))
-            .field("together_key", &self.together_key.as_ref().map(|_| "[REDACTED]"))
-            .field("fireworks_key", &self.fireworks_key.as_ref().map(|_| "[REDACTED]"))
-            .field("deepseek_key", &self.deepseek_key.as_ref().map(|_| "[REDACTED]"))
+            .field(
+                "together_key",
+                &self.together_key.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field(
+                "fireworks_key",
+                &self.fireworks_key.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field(
+                "deepseek_key",
+                &self.deepseek_key.as_ref().map(|_| "[REDACTED]"),
+            )
             .field("xai_key", &self.xai_key.as_ref().map(|_| "[REDACTED]"))
-            .field("mistral_key", &self.mistral_key.as_ref().map(|_| "[REDACTED]"))
-            .field("gemini_key", &self.gemini_key.as_ref().map(|_| "[REDACTED]"))
-            .field("ollama_key", &self.ollama_key.as_ref().map(|_| "[REDACTED]"))
+            .field(
+                "mistral_key",
+                &self.mistral_key.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field(
+                "gemini_key",
+                &self.gemini_key.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field(
+                "ollama_key",
+                &self.ollama_key.as_ref().map(|_| "[REDACTED]"),
+            )
             .field("ollama_base_url", &self.ollama_base_url)
-            .field("opencode_zen_key", &self.opencode_zen_key.as_ref().map(|_| "[REDACTED]"))
-            .field("nvidia_key", &self.nvidia_key.as_ref().map(|_| "[REDACTED]"))
-            .field("minimax_key", &self.minimax_key.as_ref().map(|_| "[REDACTED]"))
-            .field("moonshot_key", &self.moonshot_key.as_ref().map(|_| "[REDACTED]"))
-            .field("zai_coding_plan_key", &self.zai_coding_plan_key.as_ref().map(|_| "[REDACTED]"))
+            .field(
+                "opencode_zen_key",
+                &self.opencode_zen_key.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field(
+                "nvidia_key",
+                &self.nvidia_key.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field(
+                "minimax_key",
+                &self.minimax_key.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field(
+                "moonshot_key",
+                &self.moonshot_key.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field(
+                "zai_coding_plan_key",
+                &self.zai_coding_plan_key.as_ref().map(|_| "[REDACTED]"),
+            )
             .field("providers", &self.providers)
             .finish()
     }
@@ -284,7 +326,10 @@ impl std::fmt::Debug for DefaultsConfig {
             .field("cortex", &self.cortex)
             .field("browser", &self.browser)
             .field("mcp", &self.mcp)
-            .field("brave_search_key", &self.brave_search_key.as_ref().map(|_| "[REDACTED]"))
+            .field(
+                "brave_search_key",
+                &self.brave_search_key.as_ref().map(|_| "[REDACTED]"),
+            )
             .field("history_backfill_count", &self.history_backfill_count)
             .field("cron", &self.cron)
             .field("opencode", &self.opencode)
@@ -2373,10 +2418,7 @@ impl Config {
                 .into_iter()
                 .map(|(provider_id, config)| {
                     let api_key = resolve_env_value(&config.api_key).ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "failed to resolve API key for provider '{}'",
-                            provider_id
-                        )
+                        anyhow::anyhow!("failed to resolve API key for provider '{}'", provider_id)
                     })?;
                     Ok((
                         provider_id.to_lowercase(),
@@ -4274,7 +4316,6 @@ bind = "127.0.0.1"
 
         assert_eq!(config.api.bind, "[::]");
     }
-
 
     /// Helper to build a minimal `SlackConfig` for permission tests.
     fn slack_config_with_dm_users(dm_allowed_users: Vec<String>) -> SlackConfig {
