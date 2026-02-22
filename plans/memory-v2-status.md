@@ -4,13 +4,35 @@
 
 L'implémentation de Memory V2 (pre-hook systématique avec déduplication) est **terminée**. L'optimisation `get_embedding()` a été ajoutée pour éviter le recalcul des embeddings.
 
-## Ce qui a été implémenté
+**Commits :**
+- `1f8edbe` - [memory-v2] Implement pre-hook memory injection with deduplication
+- `e66dc8e` - [memory-v2] Add planning documentation and status tracking
+- `82f338a` - [memory-v2] [logs cleanup] Implement logging improvements to reduce noise and prevent large payload leakage in spans
+- `374c1bd` - [memory-v2] [config] Add MemoryInjectionConfig for memory pre-hook settings
+- `f4c3549` - [memory-v2] [api] Add API persistence for memory injection settings
+- `a40bc47` - [memory-v2] [ui] Add settings UI controls for memory injection
+- `ed8f168` - [memory-v2] [test] Add unit tests for memory injection utilities
 
-### 1. Structure de données (`src/agent/channel.rs`)
+---
 
-```rust
-pub struct ChannelInjectionState {
-    pub injected_ids: HashMap<String, usize>,  // memory_id -> turn_number
+## ✅ Tâches terminées
+
+Toutes les tâches prévues pour Memory V2 ont été complétées avec succès :
+1. **Observabilité (Logs & Tracing)** : Nettoyage des logs, exclusion des gros payloads, réduction du bruit de LanceDB.
+2. **Configuration** : Création de `MemoryInjectionConfig`, ajout à `RuntimeConfig`, et utilisation dans `compute_memory_injection`.
+3. **Persistence API** : Exposition et sauvegarde de `memory_injection` via `src/api/settings.rs` et `src/config.rs`.
+4. **UI Settings** : Ajout d'une section "Memory Injection" dans l'interface avec des contrôles pour tous les paramètres et alignement corrigé.
+5. **Tests** : Tests unitaires et d'intégration ajoutés pour les utilitaires de similarité et la logique de déduplication.
+
+## Note sur les "types" de mémoire
+Les settings contrôlent la limite par *source* de récupération dans le pre-hook, pas par type spécifique de mémoire (sauf pour Identity).
+- **Identity** : Limite pour les mémoires de type `Identity`.
+- **High Importance** : Limite pour les mémoires avec un score d'importance > seuil (peut inclure Fact, Preference, Decision, etc.).
+- **Recent** : Limite pour les mémoires créées récemment (peut inclure tout type de mémoire).
+- **Vector Search** : Limite pour les mémoires trouvées sémantiquement selon la requête de l'utilisateur (peut inclure tout type de mémoire).
+
+Le comportement d'injection combine ces sources, déduplique selon l'ID et la similarité cosinus, puis injecte le résultat dans le prompt. Le code fait bien la distinction et combine ces sources correctement avant déduplication.
+
     pub semantic_buffer: Vec<Vec<f32>>,         // embeddings injectés
 }
 ```
@@ -62,7 +84,25 @@ let embedding = match memory_search.embedding_table().get_embedding(&memory.id).
 };
 ```
 
+## ✅ Phase 1.1 : Optimisations & Sécurité (Post-Review)
+
+- **Sécurité** : Ajout d'un commentaire SAFETY pour le filtrage LanceDB ([`src/memory/lance.rs:144`](src/memory/lance.rs:144))
+- **Performance RAM** : Remplacement de `Vec` par `VecDeque` pour `semantic_buffer` (O(1) removal) ([`src/agent/channel.rs:117`](src/agent/channel.rs:117))
+- **Nettoyage Code** : Suppression d'un clone inutile dans la boucle de déduplication ([`src/agent/channel.rs:1032`](src/agent/channel.rs:1032))
+- **Flexibilité** : Signature générique pour `is_semantically_duplicate` ([`src/memory/embedding.rs:92`](src/memory/embedding.rs:92))
+
 ## Tâches restantes
+
+### 🔴 A vérifier : Types de mémoires et Settings
+- **Problème identifié** : Nous avons des settings pour contrôler le nombre de mémoires récupérées (ex: `identity_limit`), mais cela ne couvre qu'un seul type de mémoire (Identity). Il existe d'autres types de mémoires (Fact, Preference, Decision, Goal, Todo, Event, Observation).
+- **Problème identifié** : Les concepts de "High Importance", "Recent" et "Vector Search" sont présentés comme des "sources" dans les settings, mais est-ce que cela a un sens ? Par exemple, "Vector Search" n'est pas vraiment une source (toutes les mémoires sont dans LanceDB).
+- **Action requise** : Vérifier que les settings actuels sont cohérents avec l'architecture de Spacebot.
+- **Action requise** : S'assurer que le code de récupération des mémoires dans les pre-hooks (`compute_memory_injection`) fait bien la distinction par type de mémoire et utilise correctement ces settings. Faut-il ajouter des limites explicites pour chaque type de mémoire (ex: `fact_limit`, `preference_limit`) ? Faut-il repenser la façon dont les settings sont structurés ?
+
+### 🔴 A vérifier : Tests et UI
+- **Tests** : Il faut vérifier que les tests ajoutés sont utiles, bien implémentés, et que nous avons bien tout ce qu'il faut pour tester la logique de déduplication et les utilitaires.
+- **UI** : Il y avait un bug graphique d'alignement dans les settings. Une correction a été apportée (suppression de `items-center`), il faut s'assurer que l'affichage est maintenant correct.
+- **Commits** : Une partie des sous-tâches a été poussée en commit, il faut vérifier et commiter le reste en séparant par thème.
 
 ### Priorité 1 - Configuration (valeurs hardcodées)
 
