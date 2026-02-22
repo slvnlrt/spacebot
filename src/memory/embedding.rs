@@ -97,3 +97,94 @@ where
         .into_iter()
         .any(|buffer_embedding| cosine_similarity(embedding, buffer_embedding) > threshold)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Test that identical vectors have cosine similarity of 1.0.
+    #[test]
+    fn test_cosine_similarity_identical() {
+        let vector = vec![1.0, 2.0, 3.0, 4.0];
+        let similarity = cosine_similarity(&vector, &vector);
+        assert!(
+            (similarity - 1.0).abs() < 1e-6,
+            "Expected 1.0 for identical vectors, got {}",
+            similarity
+        );
+    }
+
+    /// Test that orthogonal vectors have cosine similarity of 0.0.
+    #[test]
+    fn test_cosine_similarity_orthogonal() {
+        // (1, 0) and (0, 1) are orthogonal
+        let a = vec![1.0, 0.0];
+        let b = vec![0.0, 1.0];
+        let similarity = cosine_similarity(&a, &b);
+        assert!(
+            similarity.abs() < 1e-6,
+            "Expected 0.0 for orthogonal vectors, got {}",
+            similarity
+        );
+    }
+
+    /// Test that opposite vectors have cosine similarity of -1.0.
+    #[test]
+    fn test_cosine_similarity_opposite() {
+        let a = vec![1.0, 2.0, 3.0];
+        let b = vec![-1.0, -2.0, -3.0];
+        let similarity = cosine_similarity(&a, &b);
+        assert!(
+            (similarity - (-1.0)).abs() < 1e-6,
+            "Expected -1.0 for opposite vectors, got {}",
+            similarity
+        );
+    }
+
+    /// Test that semantic deduplication filters embeddings above the threshold.
+    #[test]
+    fn test_deduplication_semantic() {
+        // Create a base embedding
+        let base = vec![1.0, 0.0, 0.0];
+
+        // Create a buffer with an embedding that's similar (cosine = 0.8)
+        // (1, 0, 0) dot (1, 0.6, 0) = 1, magnitude_a = 1, magnitude_b = sqrt(1.36) ≈ 1.166
+        // cosine = 1 / 1.166 ≈ 0.857
+        let similar = vec![1.0, 0.6, 0.0];
+        let buffer = vec![similar.clone()];
+
+        // With threshold 0.8, the similar embedding should be filtered (0.857 > 0.8)
+        assert!(
+            is_semantically_duplicate(&base, &buffer, 0.8),
+            "Expected base to be detected as duplicate of similar embedding with threshold 0.8"
+        );
+
+        // With threshold 0.9, it should NOT be filtered (0.857 <= 0.9)
+        assert!(
+            !is_semantically_duplicate(&base, &buffer, 0.9),
+            "Expected base to NOT be detected as duplicate with threshold 0.9"
+        );
+
+        // Test with orthogonal embedding (should never be filtered)
+        let orthogonal = vec![0.0, 1.0, 0.0];
+        let buffer_orthogonal = vec![orthogonal];
+        assert!(
+            !is_semantically_duplicate(&base, &buffer_orthogonal, 0.1),
+            "Expected orthogonal embedding to not be duplicate"
+        );
+    }
+
+    /// Test edge cases for cosine similarity.
+    #[test]
+    fn test_cosine_similarity_edge_cases() {
+        // Empty vectors
+        assert_eq!(cosine_similarity(&[], &[]), 0.0);
+
+        // Different lengths
+        assert_eq!(cosine_similarity(&[1.0], &[1.0, 2.0]), 0.0);
+
+        // Zero vectors
+        assert_eq!(cosine_similarity(&[0.0, 0.0], &[1.0, 2.0]), 0.0);
+        assert_eq!(cosine_similarity(&[1.0, 2.0], &[0.0, 0.0]), 0.0);
+    }
+}
