@@ -907,6 +907,30 @@ export interface OpenCodeSettingsUpdate {
 	permissions?: Partial<OpenCodePermissions>;
 }
 
+export interface MemoryInjectionConfig {
+	enabled: boolean;
+	recent_threshold_hours: number;
+	identity_limit: number;
+	important_limit: number;
+	recent_limit: number;
+	vector_search_limit: number;
+	context_window_depth: number;
+	semantic_threshold: number;
+	importance_threshold: number;
+}
+
+export interface MemoryInjectionConfigUpdate {
+	enabled?: boolean;
+	recent_threshold_hours?: number;
+	identity_limit?: number;
+	important_limit?: number;
+	recent_limit?: number;
+	vector_search_limit?: number;
+	context_window_depth?: number;
+	semantic_threshold?: number;
+	importance_threshold?: number;
+}
+
 export interface GlobalSettingsResponse {
 	brave_search_key: string | null;
 	api_enabled: boolean;
@@ -914,6 +938,7 @@ export interface GlobalSettingsResponse {
 	api_bind: string;
 	worker_log_mode: string;
 	opencode: OpenCodeSettings;
+	memory_injection: MemoryInjectionConfig;
 }
 
 export interface GlobalSettingsUpdate {
@@ -923,6 +948,7 @@ export interface GlobalSettingsUpdate {
 	api_bind?: string;
 	worker_log_mode?: string;
 	opencode?: OpenCodeSettingsUpdate;
+	memory_injection?: MemoryInjectionConfigUpdate;
 }
 
 export interface GlobalSettingsUpdateResponse {

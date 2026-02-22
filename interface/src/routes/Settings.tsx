@@ -1,7 +1,7 @@
 import {useState, useEffect, useRef} from "react";
 import {useQuery, useMutation, useQueryClient} from "@tanstack/react-query";
 import {api, type GlobalSettingsResponse} from "@/api/client";
-import {Button, Input, SettingSidebarButton, Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter, Select, SelectTrigger, SelectValue, SelectContent, SelectItem, Toggle} from "@/ui";
+import {Button, Input, SettingSidebarButton, Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter, Select, SelectTrigger, SelectValue, SelectContent, SelectItem, Toggle, Slider, NumberStepper} from "@/ui";
 import {useSearch, useNavigate} from "@tanstack/react-router";
 import {ChannelSettingCard, DisabledChannelCard} from "@/components/ChannelSettingCard";
 import {ModelSelect} from "@/components/ModelSelect";
@@ -11,7 +11,7 @@ import {faSearch} from "@fortawesome/free-solid-svg-icons";
 
 import {parse as parseToml} from "smol-toml";
 
-type SectionId = "providers" | "channels" | "api-keys" | "server" | "opencode" | "worker-logs" | "config-file";
+type SectionId = "providers" | "channels" | "api-keys" | "server" | "opencode" | "worker-logs" | "memory-injection" | "config-file";
 
 const SECTIONS = [
 	{
@@ -49,6 +49,12 @@ const SECTIONS = [
 		label: "Worker Logs",
 		group: "system" as const,
 		description: "Worker execution logging",
+	},
+	{
+		id: "memory-injection" as const,
+		label: "Memory Injection",
+		group: "system" as const,
+		description: "Memory pre-hook configuration (Experimental)",
 	},
 	{
 		id: "config-file" as const,
@@ -246,7 +252,7 @@ export function Settings() {
 		queryKey: ["global-settings"],
 		queryFn: api.globalSettings,
 		staleTime: 5_000,
-		enabled: activeSection === "api-keys" || activeSection === "server" || activeSection === "opencode" || activeSection === "worker-logs",
+		enabled: activeSection === "api-keys" || activeSection === "server" || activeSection === "opencode" || activeSection === "worker-logs" || activeSection === "memory-injection",
 	});
 
 	const updateMutation = useMutation({
@@ -459,6 +465,8 @@ export function Settings() {
 						<OpenCodeSection settings={globalSettings} isLoading={globalSettingsLoading} />
 					) : activeSection === "worker-logs" ? (
 						<WorkerLogsSection settings={globalSettings} isLoading={globalSettingsLoading} />
+					) : activeSection === "memory-injection" ? (
+						<MemoryInjectionSection settings={globalSettings} isLoading={globalSettingsLoading} />
 					) : activeSection === "config-file" ? (
 						<ConfigFileSection />
 					) : null}
@@ -993,6 +1001,250 @@ function WorkerLogsSection({settings, isLoading}: GlobalSettingsSectionProps) {
 							</div>
 						))}
 					</div>
+
+					<Button onClick={handleSave} loading={updateMutation.isPending}>
+						Save Changes
+					</Button>
+				</div>
+			)}
+
+			{message && (
+				<div
+					className={`mt-4 rounded-md border px-3 py-2 text-sm ${
+						message.type === "success"
+							? "border-green-500/20 bg-green-500/10 text-green-400"
+							: "border-red-500/20 bg-red-500/10 text-red-400"
+					}`}
+				>
+					{message.text}
+				</div>
+			)}
+		</div>
+	);
+}
+
+function MemoryInjectionSection({settings, isLoading}: GlobalSettingsSectionProps) {
+	const queryClient = useQueryClient();
+	const [enabled, setEnabled] = useState(settings?.memory_injection?.enabled ?? true);
+	const [semanticThreshold, setSemanticThreshold] = useState(settings?.memory_injection?.semantic_threshold ?? 0.85);
+	const [importanceThreshold, setImportanceThreshold] = useState(settings?.memory_injection?.importance_threshold ?? 0.8);
+	const [identityLimit, setIdentityLimit] = useState(settings?.memory_injection?.identity_limit ?? 10);
+	const [importantLimit, setImportantLimit] = useState(settings?.memory_injection?.important_limit ?? 10);
+	const [recentLimit, setRecentLimit] = useState(settings?.memory_injection?.recent_limit ?? 10);
+	const [vectorSearchLimit, setVectorSearchLimit] = useState(settings?.memory_injection?.vector_search_limit ?? 20);
+	const [contextWindowDepth, setContextWindowDepth] = useState(settings?.memory_injection?.context_window_depth ?? 50);
+	const [recentThresholdHours, setRecentThresholdHours] = useState(settings?.memory_injection?.recent_threshold_hours ?? 1);
+	const [message, setMessage] = useState<{ text: string; type: "success" | "error" } | null>(null);
+
+	// Update form state when settings load
+	useEffect(() => {
+		if (settings?.memory_injection) {
+			setEnabled(settings.memory_injection.enabled ?? true);
+			setSemanticThreshold(settings.memory_injection.semantic_threshold);
+			setImportanceThreshold(settings.memory_injection.importance_threshold);
+			setIdentityLimit(settings.memory_injection.identity_limit);
+			setImportantLimit(settings.memory_injection.important_limit);
+			setRecentLimit(settings.memory_injection.recent_limit);
+			setVectorSearchLimit(settings.memory_injection.vector_search_limit);
+			setContextWindowDepth(settings.memory_injection.context_window_depth);
+			setRecentThresholdHours(settings.memory_injection.recent_threshold_hours);
+		}
+	}, [settings?.memory_injection]);
+
+	const updateMutation = useMutation({
+		mutationFn: api.updateGlobalSettings,
+		onSuccess: (result) => {
+			if (result.success) {
+				setMessage({text: result.message, type: "success"});
+				queryClient.invalidateQueries({queryKey: ["global-settings"]});
+			} else {
+				setMessage({text: result.message, type: "error"});
+			}
+		},
+		onError: (error) => {
+			setMessage({text: `Failed: ${error.message}`, type: "error"});
+		},
+	});
+
+	const handleSave = () => {
+		updateMutation.mutate({
+			memory_injection: {
+				enabled,
+				semantic_threshold: semanticThreshold,
+				importance_threshold: importanceThreshold,
+				identity_limit: identityLimit,
+				important_limit: importantLimit,
+				recent_limit: recentLimit,
+				vector_search_limit: vectorSearchLimit,
+				context_window_depth: contextWindowDepth,
+				recent_threshold_hours: recentThresholdHours,
+			},
+		});
+	};
+
+	return (
+		<div className="mx-auto max-w-2xl px-6 py-6">
+			<div className="mb-6">
+				<div className="flex items-center gap-2">
+					<h2 className="font-plex text-sm font-semibold text-ink">Memory Injection</h2>
+					<span className="rounded bg-yellow-500/20 px-1.5 py-0.5 text-tiny font-medium text-yellow-400">Experimental</span>
+				</div>
+				<p className="mt-1 text-sm text-ink-dull">
+					Control how relevant memories are surfaced in conversations. Before each response, the system searches memories by type, importance, recency, and semantic similarity to the user's message.
+				</p>
+			</div>
+
+			{isLoading ? (
+				<div className="flex items-center gap-2 text-ink-dull">
+					<div className="h-2 w-2 animate-pulse rounded-full bg-accent" />
+					Loading settings...
+				</div>
+			) : (
+				<div className="flex flex-col gap-4">
+					{/* Enable toggle */}
+					<div className="rounded-lg border border-app-line bg-app-box p-4">
+						<div className="flex items-center justify-between">
+							<div>
+								<span className="text-sm font-medium text-ink">Enable Memory Injection</span>
+								<p className="mt-0.5 text-sm text-ink-dull">
+									When disabled, memories will not be automatically injected into context
+								</p>
+							</div>
+							<Toggle
+								size="sm"
+								checked={enabled}
+								onCheckedChange={setEnabled}
+							/>
+						</div>
+					</div>
+
+					{enabled && (
+						<>
+							{/* Thresholds Section */}
+							<div className="rounded-lg border border-app-line bg-app-box p-4">
+								<span className="text-sm font-medium text-ink">Thresholds</span>
+								<p className="mt-0.5 text-sm text-ink-dull">
+									Control deduplication and importance filtering
+								</p>
+								<div className="mt-4 flex flex-col gap-6">
+									<div>
+										<div className="flex items-center justify-between mb-2">
+											<span className="text-sm text-ink">Semantic Similarity Threshold</span>
+											<span className="text-sm text-ink-dull">{semanticThreshold.toFixed(2)}</span>
+										</div>
+										<Slider
+											value={[semanticThreshold]}
+											onValueChange={(v) => setSemanticThreshold(v[0])}
+											min={0.5}
+											max={1}
+											step={0.01}
+										/>
+										<p className="mt-1 text-tiny text-ink-faint">
+											Cosine similarity threshold for deduplication. When two memories have similarity above this value, they're considered duplicates and only one is kept. Higher = stricter.
+										</p>
+									</div>
+									<div>
+										<div className="flex items-center justify-between mb-2">
+											<span className="text-sm text-ink">Importance Threshold</span>
+											<span className="text-sm text-ink-dull">{importanceThreshold.toFixed(2)}</span>
+										</div>
+										<Slider
+											value={[importanceThreshold]}
+											onValueChange={(v) => setImportanceThreshold(v[0])}
+											min={0.5}
+											max={1}
+											step={0.01}
+										/>
+										<p className="mt-1 text-tiny text-ink-faint">
+											Memories with importance score above this threshold are always fetched before each turn. These are critical memories that should never be missed.
+										</p>
+									</div>
+								</div>
+							</div>
+
+							{/* Memory Fetch Limits Section */}
+							<div className="rounded-lg border border-app-line bg-app-box p-4">
+								<span className="text-sm font-medium text-ink">Fetch Limits</span>
+								<p className="mt-0.5 text-sm text-ink-dull">
+									Maximum memories retrieved from each source before deduplication
+								</p>
+								<div className="mt-4 grid grid-cols-2 gap-x-6 gap-y-4">
+									<div>
+										<NumberStepper
+											label="Identity Type"
+											description="Memories stored with type 'identity' (facts about the agent's identity)"
+											value={identityLimit}
+											onChange={setIdentityLimit}
+											min={1}
+											max={50}
+										/>
+									</div>
+									<div>
+										<NumberStepper
+											label="High Importance"
+											description="Memories with importance score above the threshold"
+											value={importantLimit}
+											onChange={setImportantLimit}
+											min={1}
+											max={50}
+										/>
+									</div>
+									<div>
+										<NumberStepper
+											label="Recent"
+											description="Memories created within the recent time window"
+											value={recentLimit}
+											onChange={setRecentLimit}
+											min={1}
+											max={50}
+										/>
+									</div>
+									<div>
+										<NumberStepper
+											label="Vector Search"
+											description="Semantic search results matching the user's message"
+											value={vectorSearchLimit}
+											onChange={setVectorSearchLimit}
+											min={1}
+											max={100}
+										/>
+									</div>
+								</div>
+							</div>
+
+							{/* Context Settings Section */}
+							<div className="rounded-lg border border-app-line bg-app-box p-4">
+								<span className="text-sm font-medium text-ink">Context Behavior</span>
+								<p className="mt-0.5 text-sm text-ink-dull">
+									Control how memories are managed within the conversation context
+								</p>
+								<div className="mt-4 grid grid-cols-2 gap-x-6 gap-y-4">
+									<div>
+										<NumberStepper
+											label="Re-injection Delay"
+											description="Number of turns before a memory can appear again"
+											value={contextWindowDepth}
+											onChange={setContextWindowDepth}
+											min={1}
+											max={200}
+											suffix="turns"
+										/>
+									</div>
+									<div>
+										<NumberStepper
+											label="Recent Window"
+											description="How far back to look for 'recent' memories"
+											value={recentThresholdHours}
+											onChange={setRecentThresholdHours}
+											min={1}
+											max={168}
+											suffix="hours"
+										/>
+									</div>
+								</div>
+							</div>
+						</>
+					)}
 
 					<Button onClick={handleSave} loading={updateMutation.isPending}>
 						Save Changes
