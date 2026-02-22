@@ -14,6 +14,20 @@ pub(super) struct GlobalSettingsResponse {
     api_bind: String,
     worker_log_mode: String,
     opencode: OpenCodeSettingsResponse,
+    memory_injection: MemoryInjectionResponse,
+}
+
+#[derive(Serialize)]
+pub(super) struct MemoryInjectionResponse {
+    enabled: bool,
+    recent_threshold_hours: i64,
+    identity_limit: i64,
+    important_limit: i64,
+    recent_limit: i64,
+    vector_search_limit: usize,
+    context_window_depth: usize,
+    semantic_threshold: f32,
+    importance_threshold: f32,
 }
 
 #[derive(Serialize)]
@@ -41,6 +55,20 @@ pub(super) struct GlobalSettingsUpdate {
     api_bind: Option<String>,
     worker_log_mode: Option<String>,
     opencode: Option<OpenCodeSettingsUpdate>,
+    memory_injection: Option<MemoryInjectionUpdate>,
+}
+
+#[derive(Deserialize)]
+pub(super) struct MemoryInjectionUpdate {
+    enabled: Option<bool>,
+    recent_threshold_hours: Option<i64>,
+    identity_limit: Option<i64>,
+    important_limit: Option<i64>,
+    recent_limit: Option<i64>,
+    vector_search_limit: Option<usize>,
+    context_window_depth: Option<usize>,
+    semantic_threshold: Option<f32>,
+    importance_threshold: Option<f32>,
 }
 
 #[derive(Deserialize)]
@@ -88,7 +116,7 @@ pub(super) async fn get_global_settings(
 ) -> Result<Json<GlobalSettingsResponse>, StatusCode> {
     let config_path = state.config_path.read().await.clone();
 
-    let (brave_search_key, api_enabled, api_port, api_bind, worker_log_mode, opencode) =
+    let (brave_search_key, api_enabled, api_port, api_bind, worker_log_mode, opencode, memory_injection) =
         if config_path.exists() {
             let content = tokio::fs::read_to_string(&config_path)
                 .await
@@ -182,6 +210,48 @@ pub(super) async fn get_global_settings(
                 },
             };
 
+            let memory_injection_table = doc.get("defaults").and_then(|d| d.get("memory_injection"));
+            let memory_injection = MemoryInjectionResponse {
+                enabled: memory_injection_table
+                    .and_then(|m| m.get("enabled"))
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(true),
+                recent_threshold_hours: memory_injection_table
+                    .and_then(|m| m.get("recent_threshold_hours"))
+                    .and_then(|v| v.as_integer())
+                    .unwrap_or(1),
+                identity_limit: memory_injection_table
+                    .and_then(|m| m.get("identity_limit"))
+                    .and_then(|v| v.as_integer())
+                    .unwrap_or(10),
+                important_limit: memory_injection_table
+                    .and_then(|m| m.get("important_limit"))
+                    .and_then(|v| v.as_integer())
+                    .unwrap_or(10),
+                recent_limit: memory_injection_table
+                    .and_then(|m| m.get("recent_limit"))
+                    .and_then(|v| v.as_integer())
+                    .unwrap_or(10),
+                vector_search_limit: memory_injection_table
+                    .and_then(|m| m.get("vector_search_limit"))
+                    .and_then(|v| v.as_integer())
+                    .and_then(|i| usize::try_from(i).ok())
+                    .unwrap_or(20),
+                context_window_depth: memory_injection_table
+                    .and_then(|m| m.get("context_window_depth"))
+                    .and_then(|v| v.as_integer())
+                    .and_then(|i| usize::try_from(i).ok())
+                    .unwrap_or(50),
+                semantic_threshold: memory_injection_table
+                    .and_then(|m| m.get("semantic_threshold"))
+                    .and_then(|v| v.as_float())
+                    .unwrap_or(0.85) as f32,
+                importance_threshold: memory_injection_table
+                    .and_then(|m| m.get("importance_threshold"))
+                    .and_then(|v| v.as_float())
+                    .unwrap_or(0.8) as f32,
+            };
+
             (
                 brave_search,
                 api_enabled,
@@ -189,6 +259,7 @@ pub(super) async fn get_global_settings(
                 api_bind,
                 worker_log_mode,
                 opencode,
+                memory_injection,
             )
         } else {
             (
@@ -209,6 +280,17 @@ pub(super) async fn get_global_settings(
                         webfetch: "allow".to_string(),
                     },
                 },
+                MemoryInjectionResponse {
+                    enabled: true,
+                    recent_threshold_hours: 1,
+                    identity_limit: 10,
+                    important_limit: 10,
+                    recent_limit: 10,
+                    vector_search_limit: 20,
+                    context_window_depth: 50,
+                    semantic_threshold: 0.85,
+                    importance_threshold: 0.8,
+                },
             )
         };
 
@@ -219,6 +301,7 @@ pub(super) async fn get_global_settings(
         api_bind,
         worker_log_mode,
         opencode,
+        memory_injection,
     }))
 }
 
@@ -326,6 +409,50 @@ pub(super) async fn update_global_settings(
             if let Some(webfetch) = permissions.webfetch {
                 doc["defaults"]["opencode"]["permissions"]["webfetch"] = toml_edit::value(webfetch);
             }
+        }
+    }
+
+    if let Some(memory_injection) = request.memory_injection {
+        if doc.get("defaults").is_none() {
+            doc["defaults"] = toml_edit::Item::Table(toml_edit::Table::new());
+        }
+        if doc["defaults"].get("memory_injection").is_none() {
+            doc["defaults"]["memory_injection"] = toml_edit::Item::Table(toml_edit::Table::new());
+        }
+
+        if let Some(enabled) = memory_injection.enabled {
+            doc["defaults"]["memory_injection"]["enabled"] = toml_edit::value(enabled);
+        }
+        if let Some(recent_threshold_hours) = memory_injection.recent_threshold_hours {
+            doc["defaults"]["memory_injection"]["recent_threshold_hours"] =
+                toml_edit::value(recent_threshold_hours);
+        }
+        if let Some(identity_limit) = memory_injection.identity_limit {
+            doc["defaults"]["memory_injection"]["identity_limit"] =
+                toml_edit::value(identity_limit);
+        }
+        if let Some(important_limit) = memory_injection.important_limit {
+            doc["defaults"]["memory_injection"]["important_limit"] =
+                toml_edit::value(important_limit);
+        }
+        if let Some(recent_limit) = memory_injection.recent_limit {
+            doc["defaults"]["memory_injection"]["recent_limit"] = toml_edit::value(recent_limit);
+        }
+        if let Some(vector_search_limit) = memory_injection.vector_search_limit {
+            doc["defaults"]["memory_injection"]["vector_search_limit"] =
+                toml_edit::value(vector_search_limit as i64);
+        }
+        if let Some(context_window_depth) = memory_injection.context_window_depth {
+            doc["defaults"]["memory_injection"]["context_window_depth"] =
+                toml_edit::value(context_window_depth as i64);
+        }
+        if let Some(semantic_threshold) = memory_injection.semantic_threshold {
+            doc["defaults"]["memory_injection"]["semantic_threshold"] =
+                toml_edit::value(semantic_threshold as f64);
+        }
+        if let Some(importance_threshold) = memory_injection.importance_threshold {
+            doc["defaults"]["memory_injection"]["importance_threshold"] =
+                toml_edit::value(importance_threshold as f64);
         }
     }
 

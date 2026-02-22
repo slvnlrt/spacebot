@@ -928,6 +928,12 @@ impl Channel {
 
         // Load configuration values
         let config = self.deps.runtime_config.memory_injection.load();
+        
+        // If memory injection is disabled, return None
+        if !config.enabled {
+            return None;
+        }
+        
         let recent_threshold = chrono::Utc::now() - chrono::Duration::hours(config.recent_threshold_hours);
         let context_window_depth = config.context_window_depth;
         let identity_limit = config.identity_limit;
@@ -2320,4 +2326,170 @@ async fn download_text_attachment(
         "<file name=\"{}\" mime=\"{}\">\n{}\n</file>",
         attachment.filename, attachment.mime_type, truncated
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Test that exact ID deduplication works correctly.
+    /// A memory with the same ID should be filtered when it was recently injected.
+    #[test]
+    fn test_deduplication_exact_id() {
+        let mut state = ChannelInjectionState::new();
+        let memory_id = "memory-123";
+        let current_turn = 10;
+        let context_window_depth = 50;
+
+        // Initially, the memory should be allowed (never injected)
+        assert!(
+            state.should_reinject(memory_id, current_turn, context_window_depth),
+            "Memory should be allowed when never injected"
+        );
+
+        // Record the injection
+        state.record_injection(memory_id.to_string(), current_turn);
+
+        // Now, the memory should NOT be allowed (still in context window)
+        assert!(
+            !state.should_reinject(memory_id, current_turn, context_window_depth),
+            "Memory should be filtered when recently injected"
+        );
+
+        // Move forward but still within context window
+        let next_turn = current_turn + 10;
+        assert!(
+            !state.should_reinject(memory_id, next_turn, context_window_depth),
+            "Memory should still be filtered within context window"
+        );
+
+        // Move past context window depth
+        let far_turn = current_turn + context_window_depth + 1;
+        assert!(
+            state.should_reinject(memory_id, far_turn, context_window_depth),
+            "Memory should be allowed again after falling out of context window"
+        );
+    }
+
+    /// Test that injection state is updated correctly after recording injections.
+    #[test]
+    fn test_channel_injection_state_updates() {
+        let mut state = ChannelInjectionState::new();
+
+        // Initial state should be empty
+        assert!(state.injected_ids.is_empty(), "Initial state should be empty");
+        assert!(state.semantic_buffer.is_empty(), "Initial semantic buffer should be empty");
+
+        // Record an injection
+        let memory_id = "memory-abc";
+        let turn = 5;
+        state.record_injection(memory_id.to_string(), turn);
+
+        // Check that the ID was recorded
+        assert_eq!(state.injected_ids.len(), 1, "Should have one recorded ID");
+        assert_eq!(state.injected_ids.get(memory_id), Some(&turn), "ID should be mapped to correct turn");
+
+        // Add an embedding
+        let embedding = vec![1.0, 2.0, 3.0];
+        state.add_embedding(embedding.clone());
+
+        // Check that embedding was added
+        assert_eq!(state.semantic_buffer.len(), 1, "Should have one embedding in buffer");
+        assert_eq!(state.semantic_buffer.front(), Some(&embedding), "Embedding should match");
+
+        // Record more injections
+        for i in 0..5 {
+            state.record_injection(format!("memory-{}", i), turn + i);
+        }
+
+        // Should have 6 total (1 + 5)
+        assert_eq!(state.injected_ids.len(), 6, "Should have 6 recorded IDs");
+
+        // Add more embeddings
+        for i in 0..5 {
+            state.add_embedding(vec![i as f32, (i + 1) as f32]);
+        }
+
+        // Should have 6 embeddings (1 + 5)
+        assert_eq!(state.semantic_buffer.len(), 6, "Should have 6 embeddings in buffer");
+    }
+
+    /// Test that semantic buffer respects MAX_ENTRIES limit.
+    #[test]
+    fn test_semantic_buffer_bounded() {
+        let mut state = ChannelInjectionState::new();
+
+        // Add more embeddings than MAX_ENTRIES
+        for i in 0..ChannelInjectionState::MAX_ENTRIES + 10 {
+            state.add_embedding(vec![i as f32]);
+        }
+
+        // Buffer should be bounded to MAX_ENTRIES
+        assert_eq!(
+            state.semantic_buffer.len(),
+            ChannelInjectionState::MAX_ENTRIES,
+            "Semantic buffer should be bounded to MAX_ENTRIES"
+        );
+
+        // First entries should have been removed (FIFO)
+        // The oldest entry should be 10 (since we added 0..110 and keep 100)
+        let first = state.semantic_buffer.front().expect("buffer should not be empty");
+        assert_eq!(first[0], 10.0, "Oldest entries should have been removed");
+    }
+
+    /// Test that injected_ids respects MAX_ENTRIES limit via pruning.
+    #[test]
+    fn test_injected_ids_pruning() {
+        let mut state = ChannelInjectionState::new();
+
+        // Add more entries than MAX_ENTRIES
+        for i in 0..ChannelInjectionState::MAX_ENTRIES + 10 {
+            state.record_injection(format!("memory-{}", i), i);
+        }
+
+        // Should be pruned to MAX_ENTRIES
+        assert_eq!(
+            state.injected_ids.len(),
+            ChannelInjectionState::MAX_ENTRIES,
+            "injected_ids should be pruned to MAX_ENTRIES"
+        );
+
+        // Oldest entries should have been removed
+        // The oldest remaining should be memory-10 (turn 10)
+        assert!(
+            state.injected_ids.get("memory-5").is_none(),
+            "Oldest entries should have been pruned"
+        );
+        assert!(
+            state.injected_ids.get("memory-15").is_some(),
+            "Newer entries should still exist"
+        );
+    }
+
+    /// Test should_reinject edge cases.
+    #[test]
+    fn test_should_reinject_edge_cases() {
+        let state = ChannelInjectionState::new();
+
+        // Empty memory ID should still work
+        assert!(
+            state.should_reinject("", 0, 50),
+            "Empty ID should be allowed when not in state"
+        );
+
+        // Zero context window depth
+        let mut state2 = ChannelInjectionState::new();
+        state2.record_injection("test".to_string(), 0);
+        // With depth 0, even same turn would allow re-injection
+        // because injected_turn (0) < current_turn (0) - depth (0) = 0 is false
+        // but saturating_sub prevents underflow
+        assert!(
+            !state2.should_reinject("test", 0, 0),
+            "With depth 0, same turn should still block"
+        );
+        assert!(
+            state2.should_reinject("test", 1, 0),
+            "With depth 0, next turn should allow"
+        );
+    }
 }

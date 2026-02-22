@@ -216,6 +216,8 @@ pub struct DefaultsConfig {
     pub opencode: OpenCodeConfig,
     /// Worker log mode: "errors_only", "all_separate", or "all_combined".
     pub worker_log_mode: crate::settings::WorkerLogMode,
+    /// Memory injection configuration for pre-hook context enrichment.
+    pub memory_injection: MemoryInjectionConfig,
 }
 
 /// Compaction threshold configuration.
@@ -420,6 +422,10 @@ impl Default for CortexConfig {
 /// into the channel's context window.
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct MemoryInjectionConfig {
+    /// Whether memory injection is enabled.
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+
     /// Hours to look back for "recent" memories.
     #[serde(default = "default_recent_threshold_hours")]
     pub recent_threshold_hours: i64,
@@ -453,6 +459,9 @@ pub struct MemoryInjectionConfig {
     pub importance_threshold: f32,
 }
 
+fn default_enabled() -> bool {
+    true
+}
 fn default_recent_threshold_hours() -> i64 {
     1
 }
@@ -481,6 +490,7 @@ fn default_importance_threshold() -> f32 {
 impl Default for MemoryInjectionConfig {
     fn default() -> Self {
         Self {
+            enabled: default_enabled(),
             recent_threshold_hours: default_recent_threshold_hours(),
             identity_limit: default_identity_limit(),
             important_limit: default_important_limit(),
@@ -581,6 +591,7 @@ impl Default for DefaultsConfig {
             cron: Vec::new(),
             opencode: OpenCodeConfig::default(),
             worker_log_mode: crate::settings::WorkerLogMode::default(),
+            memory_injection: MemoryInjectionConfig::default(),
         }
     }
 }
@@ -1340,6 +1351,20 @@ struct TomlDefaultsConfig {
     brave_search_key: Option<String>,
     opencode: Option<TomlOpenCodeConfig>,
     worker_log_mode: Option<String>,
+    memory_injection: Option<TomlMemoryInjectionConfig>,
+}
+
+#[derive(Deserialize)]
+struct TomlMemoryInjectionConfig {
+    enabled: Option<bool>,
+    recent_threshold_hours: Option<i64>,
+    identity_limit: Option<i64>,
+    important_limit: Option<i64>,
+    recent_limit: Option<i64>,
+    vector_search_limit: Option<usize>,
+    context_window_depth: Option<usize>,
+    semantic_threshold: Option<f32>,
+    importance_threshold: Option<f32>,
 }
 
 #[derive(Deserialize, Default)]
@@ -1467,10 +1492,6 @@ struct TomlCronDef {
     #[serde(default)]
     run_once: bool,
     timeout_secs: Option<u64>,
-}
-
-fn default_enabled() -> bool {
-    true
 }
 
 #[derive(Deserialize, Default)]
@@ -2390,6 +2411,32 @@ impl Config {
                 .as_deref()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(base_defaults.worker_log_mode),
+            memory_injection: toml
+                .defaults
+                .memory_injection
+                .map(|mi| {
+                    let base = &base_defaults.memory_injection;
+                    MemoryInjectionConfig {
+                        enabled: mi.enabled.unwrap_or(base.enabled),
+                        recent_threshold_hours: mi
+                            .recent_threshold_hours
+                            .unwrap_or(base.recent_threshold_hours),
+                        identity_limit: mi.identity_limit.unwrap_or(base.identity_limit),
+                        important_limit: mi.important_limit.unwrap_or(base.important_limit),
+                        recent_limit: mi.recent_limit.unwrap_or(base.recent_limit),
+                        vector_search_limit: mi
+                            .vector_search_limit
+                            .unwrap_or(base.vector_search_limit),
+                        context_window_depth: mi
+                            .context_window_depth
+                            .unwrap_or(base.context_window_depth),
+                        semantic_threshold: mi.semantic_threshold.unwrap_or(base.semantic_threshold),
+                        importance_threshold: mi
+                            .importance_threshold
+                            .unwrap_or(base.importance_threshold),
+                    }
+                })
+                .unwrap_or(base_defaults.memory_injection),
         };
 
         let mut agents: Vec<AgentConfig> = toml
@@ -2787,7 +2834,7 @@ impl RuntimeConfig {
             history_backfill_count: ArcSwap::from_pointee(agent_config.history_backfill_count),
             brave_search_key: ArcSwap::from_pointee(agent_config.brave_search_key.clone()),
             cortex: ArcSwap::from_pointee(agent_config.cortex),
-            memory_injection: ArcSwap::from_pointee(MemoryInjectionConfig::default()),
+            memory_injection: ArcSwap::from_pointee(defaults.memory_injection),
             memory_bulletin: ArcSwap::from_pointee(String::new()),
             prompts: ArcSwap::from_pointee(prompts),
             identity: ArcSwap::from_pointee(identity),
@@ -2850,9 +2897,8 @@ impl RuntimeConfig {
         self.brave_search_key
             .store(Arc::new(resolved.brave_search_key));
         self.cortex.store(Arc::new(resolved.cortex));
-        // memory_injection uses defaults; can be extended to load from config file later
         self.memory_injection
-            .store(Arc::new(MemoryInjectionConfig::default()));
+            .store(Arc::new(config.defaults.memory_injection));
 
         tracing::info!(agent_id, "runtime config reloaded");
     }
