@@ -347,6 +347,32 @@ impl MemoryStore {
         Ok(rows.into_iter().map(|row| row_to_memory(&row)).collect())
     }
 
+    /// Get memories created since a given timestamp.
+    /// Used by the pre-hook to inject recent memories into context.
+    pub async fn get_recent_since(
+        &self,
+        since: chrono::DateTime<chrono::Utc>,
+        limit: i64,
+    ) -> Result<Vec<Memory>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT id, content, memory_type, importance, created_at, updated_at,
+                   last_accessed_at, access_count, source, channel_id, forgotten
+            FROM memories
+            WHERE created_at >= ? AND forgotten = 0
+            ORDER BY created_at DESC
+            LIMIT ?
+            "#,
+        )
+        .bind(since)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+        .context("failed to get recent memories")?;
+
+        Ok(rows.into_iter().map(|row| row_to_memory(&row)).collect())
+    }
+
     /// Get memories sorted by a flexible criterion with optional type filter.
     ///
     /// Used by non-hybrid search modes (Recent, Important, Typed) to retrieve

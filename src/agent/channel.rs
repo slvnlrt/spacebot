@@ -9,6 +9,7 @@ use crate::conversation::{ChannelStore, ConversationLogger, ProcessRunLogger};
 use crate::error::{AgentError, Result};
 use crate::hooks::SpacebotHook;
 use crate::llm::SpacebotModel;
+use crate::memory::{is_semantically_duplicate, MemoryType, SearchConfig, SearchMode};
 use crate::{
     AgentDeps, BranchId, ChannelId, InboundMessage, OutboundResponse, ProcessEvent, ProcessId,
     ProcessType, WorkerId,
@@ -20,6 +21,7 @@ use rig::one_or_many::OneOrMany;
 use rig::tool::server::ToolServer;
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 use tokio::sync::{RwLock, mpsc};
@@ -96,6 +98,102 @@ impl std::fmt::Debug for ChannelState {
     }
 }
 
+/// State for memory injection deduplication within a channel.
+///
+/// Stored in RAM directly in Channel (not in ChannelState) because:
+/// - It's specific to each channel (avoids conflicts between Discord, Slack, etc.)
+/// - Methods like `handle_message` take `&mut self`, allowing direct mutation
+/// - No need for async locks
+///
+/// The state is NOT reset during compaction because injected memories influence
+/// the conversation and their essence is captured in the compaction summary.
+/// Resetting would cause duplicate injection of raw memories.
+pub struct ChannelInjectionState {
+    /// Maps memory_id to the turn number when it was injected.
+    /// Bounded to prevent memory leaks (oldest entries pruned when exceeding MAX_ENTRIES).
+    pub injected_ids: HashMap<String, usize>,
+    /// Buffer of embeddings for semantic deduplication.
+    /// When a new memory's embedding is too similar (cosine > threshold) to any
+    /// in this buffer, the memory is skipped.
+    pub semantic_buffer: VecDeque<Vec<f32>>,
+}
+
+impl ChannelInjectionState {
+    /// Maximum number of entries in injected_ids before pruning.
+    const MAX_ENTRIES: usize = 100;
+
+    /// Create a new empty injection state.
+    pub fn new() -> Self {
+        Self {
+            injected_ids: HashMap::new(),
+            semantic_buffer: VecDeque::new(),
+        }
+    }
+
+    /// Check if a memory should be re-injected based on context window depth.
+    ///
+    /// Returns `true` if:
+    /// - The memory was never injected, OR
+    /// - The memory was injected but has fallen out of the context window
+    ///
+    /// Returns `false` if the memory is still within the context window.
+    pub fn should_reinject(
+        &self,
+        memory_id: &str,
+        current_turn: usize,
+        context_window_depth: usize,
+    ) -> bool {
+        match self.injected_ids.get(memory_id) {
+            Some(&injected_turn) => {
+                injected_turn < current_turn.saturating_sub(context_window_depth)
+            }
+            None => true,
+        }
+    }
+
+    /// Record that a memory was injected at the given turn.
+    pub fn record_injection(&mut self, memory_id: String, turn: usize) {
+        self.injected_ids.insert(memory_id, turn);
+        self.prune_if_needed();
+    }
+
+    /// Add an embedding to the semantic buffer for future deduplication.
+    pub fn add_embedding(&mut self, embedding: Vec<f32>) {
+        self.semantic_buffer.push_back(embedding);
+        // Keep buffer bounded
+        if self.semantic_buffer.len() > Self::MAX_ENTRIES {
+            self.semantic_buffer.pop_front();
+        }
+    }
+
+    /// Prune old entries if the map exceeds MAX_ENTRIES.
+    fn prune_if_needed(&mut self) {
+        if self.injected_ids.len() <= Self::MAX_ENTRIES {
+            return;
+        }
+
+        // Collect IDs with their turn numbers, then sort to find oldest
+        let mut turns: Vec<(String, usize)> = self
+            .injected_ids
+            .iter()
+            .map(|(id, &turn)| (id.clone(), turn))
+            .collect();
+        turns.sort_by_key(|(_, turn)| *turn);
+
+        // Remove entries with the lowest turn numbers
+        let to_remove = turns.len() - Self::MAX_ENTRIES;
+        for (id, _) in turns.into_iter().take(to_remove) {
+            self.injected_ids.remove(&id);
+        }
+    }
+}
+
+impl Default for ChannelInjectionState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// User-facing conversation process.
 pub struct Channel {
     pub id: ChannelId,
@@ -129,6 +227,10 @@ pub struct Channel {
     coalesce_buffer: Vec<InboundMessage>,
     /// Deadline for flushing the coalesce buffer.
     coalesce_deadline: Option<tokio::time::Instant>,
+    /// Current turn number (incremented after each user message).
+    current_turn: usize,
+    /// State for memory injection deduplication.
+    injection_state: ChannelInjectionState,
 }
 
 impl Channel {
@@ -206,6 +308,8 @@ impl Channel {
             branch_reply_targets: HashMap::new(),
             coalesce_buffer: Vec::new(),
             coalesce_deadline: None,
+            current_turn: 0,
+            injection_state: ChannelInjectionState::new(),
         };
 
         (channel, message_tx)
@@ -532,6 +636,9 @@ impl Channel {
             *reply_target = messages.iter().rev().find_map(extract_discord_message_id);
         }
 
+        // Pre-hook: Compute memory injection on combined text
+        let injected_context = self.compute_memory_injection(&combined_text).await;
+
         // Run agent turn with any image/audio attachments preserved
         let (result, skip_flag, replied_flag) = self
             .run_agent_turn(
@@ -539,6 +646,7 @@ impl Channel {
                 &system_prompt,
                 &conversation_id,
                 attachment_parts,
+                injected_context,
             )
             .await?;
 
@@ -551,6 +659,7 @@ impl Channel {
 
         // Increment message counter for memory persistence
         self.message_count += message_count;
+        self.current_turn += 1;
         self.check_memory_persistence().await;
 
         Ok(())
@@ -698,12 +807,20 @@ impl Channel {
             *reply_target = extract_discord_message_id(&message);
         }
 
+        // Pre-hook: Compute memory injection (skip for system re-triggers)
+        let injected_context = if message.source != "system" {
+            self.compute_memory_injection(&user_text).await
+        } else {
+            None
+        };
+
         let (result, skip_flag, replied_flag) = self
             .run_agent_turn(
                 &user_text,
                 &system_prompt,
                 &message.conversation_id,
                 attachment_content,
+                injected_context,
             )
             .await?;
 
@@ -718,6 +835,7 @@ impl Channel {
         // Increment message counter and spawn memory persistence branch if threshold reached
         if message.source != "system" {
             self.message_count += 1;
+            self.current_turn += 1;
             self.check_memory_persistence().await;
         }
 
@@ -799,16 +917,151 @@ impl Channel {
             .expect("failed to render channel prompt")
     }
 
+    /// Compute memories to inject before the LLM turn (pre-hook).
+    ///
+    /// This method implements the Memory V2 pre-hook system:
+    /// 1. SQL pre-hook: fetch Identity, Important (>0.8), and Recent (<1h) memories
+    /// 2. Vector pre-hook: semantic search on user message
+    /// 3. Deduplication: filter by exact ID and semantic similarity
+    ///
+    /// Returns a formatted context string for injection into the prompt.
+    /// Updates `injection_state` with newly injected memory IDs and embeddings.
+    #[tracing::instrument(skip(self), fields(channel_id = %self.id))]
+    async fn compute_memory_injection(&mut self, user_text: &str) -> Option<String> {
+        // Skip pre-hook for system messages (re-triggers after worker/branch completion)
+        // The caller should check this before calling, but we double-check here.
+
+        let memory_search = self.deps.memory_search();
+        let store = memory_search.store();
+
+        // Time threshold for "recent" memories (1 hour ago)
+        let recent_threshold = chrono::Utc::now() - chrono::Duration::hours(1);
+        let context_window_depth = 50; // Number of turns to consider for re-injection
+
+        let mut all_memories = Vec::new();
+
+        // 1. SQL Pre-hook: Identity memories (always included)
+        match store.get_by_type(MemoryType::Identity, 10).await {
+            Ok(memories) => all_memories.extend(memories),
+            Err(error) => tracing::warn!(%error, "failed to fetch identity memories"),
+        }
+
+        // 2. SQL Pre-hook: High importance memories (>0.8)
+        match store.get_high_importance(0.8, 10).await {
+            Ok(memories) => all_memories.extend(memories),
+            Err(error) => tracing::warn!(%error, "failed to fetch high importance memories"),
+        }
+
+        // 3. SQL Pre-hook: Recent memories (<1h)
+        match store.get_recent_since(recent_threshold, 10).await {
+            Ok(memories) => all_memories.extend(memories),
+            Err(error) => tracing::warn!(%error, "failed to fetch recent memories"),
+        }
+
+        // 4. Vector Pre-hook: Semantic search on user message
+        let search_config = SearchConfig {
+            mode: SearchMode::Hybrid,
+            max_results: 20,
+            ..Default::default()
+        };
+
+        match memory_search.search(user_text, &search_config).await {
+            Ok(results) => {
+                for result in results {
+                    all_memories.push(result.memory);
+                }
+            }
+            Err(error) => tracing::warn!(%error, "failed vector pre-hook search"),
+        }
+
+        // 5. Deduplication: filter by ID and semantic similarity
+        let mut unique_memories = Vec::new();
+        let mut seen_ids = HashSet::new();
+        let semantic_threshold = 0.85;
+
+        for memory in all_memories {
+            // Skip if already injected and still within context window
+            if !self.injection_state.should_reinject(
+                &memory.id,
+                self.current_turn,
+                context_window_depth,
+            ) {
+                continue;
+            }
+
+            // Skip if we've already seen this ID in this batch
+            if seen_ids.contains(&memory.id) {
+                continue;
+            }
+
+            // Get embedding for semantic deduplication: try LanceDB first, fallback to computing
+            let embedding = match memory_search.embedding_table().get_embedding(&memory.id).await {
+                Ok(Some(emb)) => emb,
+                Ok(None) => {
+                    tracing::debug!(memory_id = %memory.id, "embedding not found in LanceDB, computing");
+                    match memory_search.embedding_model_arc().embed_one(&memory.content).await {
+                        Ok(emb) => emb,
+                        Err(error) => {
+                            tracing::warn!(%error, memory_id = %memory.id, "failed to compute embedding for deduplication");
+                            unique_memories.push(memory.clone());
+                            seen_ids.insert(memory.id.clone());
+                            continue;
+                        }
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(%error, memory_id = %memory.id, "failed to get embedding from LanceDB, computing");
+                    match memory_search.embedding_model_arc().embed_one(&memory.content).await {
+                        Ok(emb) => emb,
+                        Err(error) => {
+                            tracing::warn!(%error, memory_id = %memory.id, "failed to compute embedding for deduplication");
+                            unique_memories.push(memory.clone());
+                            seen_ids.insert(memory.id.clone());
+                            continue;
+                        }
+                    }
+                }
+            };
+
+            // Check semantic similarity against buffer
+            if is_semantically_duplicate(&embedding, &self.injection_state.semantic_buffer, semantic_threshold) {
+                continue;
+            }
+
+            // Memory passed all filters - include it
+            seen_ids.insert(memory.id.clone());
+            self.injection_state.record_injection(memory.id.clone(), self.current_turn);
+            self.injection_state.add_embedding(embedding);
+            unique_memories.push(memory);
+        }
+
+        if unique_memories.is_empty() {
+            return None;
+        }
+
+        // 6. Format memories for injection
+        let context_lines: Vec<String> = unique_memories
+            .iter()
+            .map(|memory| {
+                let type_tag = format!("[{}]", memory.memory_type);
+                format!("{} {}", type_tag, memory.content)
+            })
+            .collect();
+
+        Some(format!("Relevant context from memory:\n{}", context_lines.join("\n")))
+    }
+
     /// Register per-turn tools, run the LLM agentic loop, and clean up.
     ///
     /// Returns the prompt result and skip flag for the caller to dispatch.
-    #[tracing::instrument(skip(self, user_text, system_prompt, attachment_content), fields(channel_id = %self.id, agent_id = %self.deps.agent_id))]
+    #[tracing::instrument(skip(self, user_text, system_prompt, attachment_content, injected_context), fields(channel_id = %self.id, agent_id = %self.deps.agent_id))]
     async fn run_agent_turn(
         &self,
         user_text: &str,
         system_prompt: &str,
         conversation_id: &str,
         attachment_content: Vec<UserContent>,
+        injected_context: Option<String>,
     ) -> Result<(
         std::result::Result<String, rig::completion::PromptError>,
         crate::tools::SkipFlag,
@@ -867,6 +1120,14 @@ impl Channel {
             let guard = self.state.history.read().await;
             guard.clone()
         };
+
+        // Inject memory context silently (not persisted to history)
+        // This is the key mechanism of Memory V2: LLM sees context without it being saved
+        if let Some(ref context) = injected_context {
+            // Use a user message format with clear prefix so LLM understands this is context
+            let context_message = format!("[Context from memory]:\n{}", context);
+            history.push(rig::message::Message::from(context_message));
+        }
 
         let mut result = agent
             .prompt(user_text)

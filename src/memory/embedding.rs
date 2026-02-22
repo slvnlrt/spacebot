@@ -60,3 +60,40 @@ impl EmbeddingModel {
 pub async fn embed_text(model: &Arc<EmbeddingModel>, text: &str) -> Result<Vec<f32>> {
     model.embed_one(text).await
 }
+
+/// Compute cosine similarity between two embedding vectors.
+///
+/// Returns a value in [-1, 1] where:
+/// - 1.0 means identical direction
+/// - 0.0 means orthogonal
+/// - -1.0 means opposite direction
+///
+/// Returns 0.0 if either vector is empty or has zero magnitude.
+pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+    if a.is_empty() || b.is_empty() || a.len() != b.len() {
+        return 0.0;
+    }
+
+    let dot_product: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
+    let magnitude_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let magnitude_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+
+    if magnitude_a == 0.0 || magnitude_b == 0.0 {
+        return 0.0;
+    }
+
+    dot_product / (magnitude_a * magnitude_b)
+}
+
+/// Check if an embedding is semantically similar to any in a buffer.
+///
+/// Returns true if the maximum cosine similarity with any buffer embedding
+/// exceeds the threshold.
+pub fn is_semantically_duplicate<'a, B>(embedding: &[f32], buffer: B, threshold: f32) -> bool
+where
+    B: IntoIterator<Item = &'a Vec<f32>>,
+{
+    buffer
+        .into_iter()
+        .any(|buffer_embedding| cosine_similarity(embedding, buffer_embedding) > threshold)
+}

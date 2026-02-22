@@ -133,6 +133,48 @@ impl EmbeddingTable {
         Ok(())
     }
 
+    /// Retrieve an embedding by memory ID.
+    /// Returns None if the memory is not found in the table.
+    pub async fn get_embedding(&self, memory_id: &str) -> Result<Option<Vec<f32>>> {
+        use lancedb::query::{ExecutableQuery, QueryBase};
+
+        // SAFETY: memory_id is always a UUID from Uuid::new_v4().to_string(),
+        // containing only [a-z0-9-], so cannot escape the string literal.
+        let rows: Vec<arrow_array::RecordBatch> = self
+            .table
+            .query()
+            .only_if(format!("id = '{}'", memory_id))
+            .execute()
+            .await
+            .map_err(|e| DbError::LanceDb(e.to_string()))?
+            .try_collect()
+            .await
+            .map_err(|e| DbError::LanceDb(e.to_string()))?;
+
+        let Some(batch) = rows.first() else {
+            return Ok(None);
+        };
+        let Some(embedding_col) = batch.column_by_name("embedding") else {
+            return Ok(None);
+        };
+
+        let list_array = embedding_col
+            .as_any()
+            .downcast_ref::<arrow_array::FixedSizeListArray>();
+        let Some(list_array) = list_array else {
+            return Ok(None);
+        };
+        if list_array.is_empty() {
+            return Ok(None);
+        }
+
+        let values = list_array.value(0);
+        let float_array = values.as_primitive::<Float32Type>();
+        let embedding: Vec<f32> = float_array.values().to_vec();
+
+        Ok(Some(embedding))
+    }
+
     /// Vector similarity search using cosine distance.
     /// Returns (memory_id, distance) pairs sorted by distance (ascending).
     pub async fn vector_search(
