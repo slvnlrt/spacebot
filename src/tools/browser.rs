@@ -4,6 +4,7 @@
 //! via headless Chrome using chromiumoxide. Uses an accessibility-tree based
 //! ref system for LLM-friendly element addressing.
 
+
 use crate::config::BrowserConfig;
 
 use chromiumoxide::browser::{Browser, BrowserConfig as ChromeConfig};
