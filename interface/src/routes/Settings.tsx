@@ -1029,10 +1029,12 @@ function MemoryInjectionSection({settings, isLoading}: GlobalSettingsSectionProp
 	const queryClient = useQueryClient();
 	const [enabled, setEnabled] = useState(settings?.memory_injection?.enabled ?? true);
 	const [searchLimit, setSearchLimit] = useState(settings?.memory_injection?.search_limit ?? 20);
+	const [contextualMinScore, setContextualMinScore] = useState(settings?.memory_injection?.contextual_min_score ?? 0.01);
 	const [maxTotal, setMaxTotal] = useState(settings?.memory_injection?.max_total ?? 25);
 	const [semanticThreshold, setSemanticThreshold] = useState(settings?.memory_injection?.semantic_threshold ?? 0.85);
 	const [contextWindowDepth, setContextWindowDepth] = useState(settings?.memory_injection?.context_window_depth ?? 50);
 	const [showAdvanced, setShowAdvanced] = useState(false);
+	const [ambientEnabled, setAmbientEnabled] = useState(settings?.memory_injection?.ambient_enabled ?? false);
 	const [pinnedTypes, setPinnedTypes] = useState<string[]>(settings?.memory_injection?.pinned_types ?? []);
 	const [pinnedLimit, setPinnedLimit] = useState(settings?.memory_injection?.pinned_limit ?? 3);
 	const [pinnedSort, setPinnedSort] = useState(settings?.memory_injection?.pinned_sort ?? "recent");
@@ -1054,9 +1056,11 @@ function MemoryInjectionSection({settings, isLoading}: GlobalSettingsSectionProp
 		if (settings?.memory_injection) {
 			setEnabled(settings.memory_injection.enabled ?? true);
 			setSearchLimit(settings.memory_injection.search_limit);
+			setContextualMinScore(settings.memory_injection.contextual_min_score ?? 0.01);
 			setMaxTotal(settings.memory_injection.max_total);
 			setSemanticThreshold(settings.memory_injection.semantic_threshold);
 			setContextWindowDepth(settings.memory_injection.context_window_depth);
+			setAmbientEnabled(settings.memory_injection.ambient_enabled ?? false);
 			setPinnedTypes(settings.memory_injection.pinned_types ?? []);
 			setPinnedLimit(settings.memory_injection.pinned_limit ?? 3);
 			setPinnedSort(settings.memory_injection.pinned_sort ?? "recent");
@@ -1083,10 +1087,12 @@ function MemoryInjectionSection({settings, isLoading}: GlobalSettingsSectionProp
 			memory_injection: {
 				enabled,
 				search_limit: searchLimit,
+				contextual_min_score: contextualMinScore,
 				max_total: maxTotal,
 				semantic_threshold: semanticThreshold,
 				context_window_depth: contextWindowDepth,
-				pinned_types: pinnedTypes,
+				ambient_enabled: ambientEnabled,
+				pinned_types: ambientEnabled ? pinnedTypes : [],
 				pinned_limit: pinnedLimit,
 				pinned_sort: pinnedSort,
 			},
@@ -1157,6 +1163,22 @@ function MemoryInjectionSection({settings, isLoading}: GlobalSettingsSectionProp
 										/>
 									</div>
 									<div>
+										<div className="flex items-center justify-between mb-2">
+											<span className="text-sm text-ink">Context Min Score</span>
+											<span className="text-sm text-ink-dull">{contextualMinScore.toFixed(3)}</span>
+										</div>
+										<Slider
+											value={[contextualMinScore]}
+											onValueChange={(v) => setContextualMinScore(v[0])}
+											min={0}
+											max={0.05}
+											step={0.001}
+										/>
+										<p className="mt-1 text-tiny text-ink-faint">
+											Minimum hybrid score for contextual candidates. Increase to reduce broad or vague matches.
+										</p>
+									</div>
+									<div>
 										<NumberStepper
 											label="Max Total"
 											description="Hard cap across pinned and contextual memories"
@@ -1210,13 +1232,24 @@ function MemoryInjectionSection({settings, isLoading}: GlobalSettingsSectionProp
 							<div className="rounded-lg border border-app-line bg-app-box p-4">
 								<div className="flex items-center justify-between">
 									<span className="text-sm font-medium text-ink">Ambient Awareness (Advanced)</span>
-									<Toggle size="sm" checked={showAdvanced} onCheckedChange={setShowAdvanced} />
+									<div className="flex items-center gap-3">
+										<div className="text-xs text-ink-dull">Enabled</div>
+										<Toggle size="sm" checked={ambientEnabled} onCheckedChange={setAmbientEnabled} />
+										<div className="text-xs text-ink-dull">Show</div>
+										<Toggle size="sm" checked={showAdvanced} onCheckedChange={setShowAdvanced} />
+									</div>
 								</div>
 								<p className="mt-0.5 text-sm text-ink-dull">
 									Optional always-on context between cortex bulletins. Keep disabled for community bots.
 								</p>
 								{showAdvanced && (
 									<div className="mt-4 flex flex-col gap-4">
+										<div className="rounded-md border border-app-line bg-app px-3 py-2 text-xs text-ink-dull">
+											Recommended for personal assistants: <span className="text-ink">todo</span> and <span className="text-ink">goal</span> (optionally <span className="text-ink">decision</span>). Other types can add noise.
+										</div>
+										<div className="text-xs text-ink-faint">
+											Selected: {pinnedTypes.length === 0 ? "none" : pinnedTypes.join(", ")}
+										</div>
 										<div className="grid grid-cols-2 gap-2">
 											{memoryTypeOptions.map((memoryType) => (
 												<Button

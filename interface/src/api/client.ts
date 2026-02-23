@@ -913,9 +913,11 @@ export interface OpenCodeSettingsUpdate {
 export interface MemoryInjectionConfig {
 	enabled: boolean;
 	search_limit: number;
+	contextual_min_score: number;
 	context_window_depth: number;
 	semantic_threshold: number;
 	pinned_types: string[];
+	ambient_enabled: boolean;
 	pinned_limit: number;
 	pinned_sort: string;
 	max_total: number;
@@ -924,18 +926,24 @@ export interface MemoryInjectionConfig {
 export interface MemoryInjectionConfigUpdate {
 	enabled?: boolean;
 	search_limit?: number;
+	contextual_min_score: number;
+	contextual_min_score?: number;
 	context_window_depth?: number;
 	semantic_threshold?: number;
+	ambient_enabled: boolean;
 	pinned_types?: string[];
+	ambient_enabled?: boolean;
 	pinned_limit?: number;
 	pinned_sort?: string;
 	max_total?: number;
 }
 
 export interface GlobalSettingsResponse {
+	contextual_min_score?: number;
 	brave_search_key: string | null;
 	api_enabled: boolean;
 	api_port: number;
+	ambient_enabled?: boolean;
 	api_bind: string;
 	worker_log_mode: string;
 	opencode: OpenCodeSettings;

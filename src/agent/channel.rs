@@ -987,6 +987,7 @@ impl Channel {
         let config = self.deps.runtime_config.memory_injection.load();
 
         if !config.enabled {
+            tracing::info!(channel_id = %self.id, "memory injection skipped (disabled)");
             return None;
         }
 
@@ -995,6 +996,7 @@ impl Channel {
         let context_window_depth = config.context_window_depth;
         let semantic_threshold = config.semantic_threshold;
         let search_limit = config.search_limit;
+        let contextual_min_score = config.contextual_min_score;
         let max_total = config.max_total;
 
         let pinned_sort = if config.pinned_sort == "importance" {
@@ -1004,7 +1006,11 @@ impl Channel {
         };
 
         let pinned_limit = config.pinned_limit;
-        let pinned_types = config.pinned_types.clone();
+        let pinned_types = if config.ambient_enabled {
+            config.pinned_types.clone()
+        } else {
+            Vec::new()
+        };
 
         let pinned_tasks = pinned_types
             .iter()
@@ -1033,6 +1039,7 @@ impl Channel {
             mode: SearchMode::Hybrid,
             max_results: search_limit,
             max_results_per_source: search_limit,
+            min_score: contextual_min_score,
             ..Default::default()
         };
 
@@ -1061,6 +1068,8 @@ impl Channel {
                 tracing::warn!(%error, "failed contextual hybrid pre-hook search");
             }
         }
+
+        let candidate_count = all_candidates.len();
 
         let mut deduped_count = 0usize;
         let mut unique_candidates = Vec::new();
@@ -1143,6 +1152,14 @@ impl Channel {
         }
 
         if unique_candidates.is_empty() {
+            let elapsed = started_at.elapsed();
+            tracing::info!(
+                channel_id = %self.id,
+                candidates = candidate_count,
+                deduped = deduped_count,
+                elapsed_ms = elapsed.as_millis() as u64,
+                "memory injection skipped (no candidates after dedup)"
+            );
             return None;
         }
 
@@ -1170,6 +1187,15 @@ impl Channel {
         }
 
         if final_memories.is_empty() {
+            let elapsed = started_at.elapsed();
+            tracing::info!(
+                channel_id = %self.id,
+                candidates = candidate_count,
+                deduped = deduped_count,
+                budget = max_total,
+                elapsed_ms = elapsed.as_millis() as u64,
+                "memory injection skipped (empty after budget)",
+            );
             return None;
         }
 

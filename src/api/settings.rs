@@ -21,9 +21,11 @@ pub(super) struct GlobalSettingsResponse {
 pub(super) struct MemoryInjectionResponse {
     enabled: bool,
     search_limit: usize,
+    contextual_min_score: f32,
     context_window_depth: usize,
     semantic_threshold: f32,
     pinned_types: Vec<String>,
+    ambient_enabled: bool,
     pinned_limit: i64,
     pinned_sort: String,
     max_total: usize,
@@ -61,9 +63,11 @@ pub(super) struct GlobalSettingsUpdate {
 pub(super) struct MemoryInjectionUpdate {
     enabled: Option<bool>,
     search_limit: Option<usize>,
+    contextual_min_score: Option<f32>,
     context_window_depth: Option<usize>,
     semantic_threshold: Option<f32>,
     pinned_types: Option<Vec<String>>,
+    ambient_enabled: Option<bool>,
     pinned_limit: Option<i64>,
     pinned_sort: Option<String>,
     max_total: Option<usize>,
@@ -219,6 +223,10 @@ pub(super) async fn get_global_settings(
                     .and_then(|v| v.as_integer())
                     .and_then(|i| usize::try_from(i).ok())
                     .unwrap_or(20),
+                contextual_min_score: memory_injection_table
+                    .and_then(|m| m.get("contextual_min_score"))
+                    .and_then(|v| v.as_float())
+                    .unwrap_or(0.01) as f32,
                 context_window_depth: memory_injection_table
                     .and_then(|m| m.get("context_window_depth"))
                     .and_then(|v| v.as_integer())
@@ -238,6 +246,10 @@ pub(super) async fn get_global_settings(
                             .collect::<Vec<_>>()
                     })
                     .unwrap_or_default(),
+                ambient_enabled: memory_injection_table
+                    .and_then(|m| m.get("ambient_enabled"))
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
                 pinned_limit: memory_injection_table
                     .and_then(|m| m.get("pinned_limit"))
                     .and_then(|v| v.as_integer())
@@ -285,9 +297,11 @@ pub(super) async fn get_global_settings(
                 MemoryInjectionResponse {
                     enabled: true,
                     search_limit: 20,
+                    contextual_min_score: 0.01,
                     context_window_depth: 50,
                     semantic_threshold: 0.85,
                     pinned_types: Vec::new(),
+                    ambient_enabled: false,
                     pinned_limit: 3,
                     pinned_sort: "recent".to_string(),
                     max_total: 25,
@@ -428,6 +442,10 @@ pub(super) async fn update_global_settings(
             doc["defaults"]["memory_injection"]["search_limit"] =
                 toml_edit::value(search_limit as i64);
         }
+        if let Some(contextual_min_score) = memory_injection.contextual_min_score {
+            doc["defaults"]["memory_injection"]["contextual_min_score"] =
+                toml_edit::value(contextual_min_score as f64);
+        }
         if let Some(context_window_depth) = memory_injection.context_window_depth {
             doc["defaults"]["memory_injection"]["context_window_depth"] =
                 toml_edit::value(context_window_depth as i64);
@@ -442,6 +460,10 @@ pub(super) async fn update_global_settings(
                 array.push(memory_type);
             }
             doc["defaults"]["memory_injection"]["pinned_types"] = toml_edit::Item::Value(array.into());
+        }
+        if let Some(ambient_enabled) = memory_injection.ambient_enabled {
+            doc["defaults"]["memory_injection"]["ambient_enabled"] =
+                toml_edit::value(ambient_enabled);
         }
         if let Some(pinned_limit) = memory_injection.pinned_limit {
             doc["defaults"]["memory_injection"]["pinned_limit"] = toml_edit::value(pinned_limit);

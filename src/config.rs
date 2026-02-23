@@ -536,6 +536,10 @@ pub struct MemoryInjectionConfig {
     #[serde(default = "default_search_limit")]
     pub search_limit: usize,
 
+    /// Minimum hybrid score for contextual candidates.
+    #[serde(default = "default_contextual_min_score")]
+    pub contextual_min_score: f32,
+
     /// Number of turns before a memory can be re-injected.
     #[serde(default = "default_context_window_depth")]
     pub context_window_depth: usize,
@@ -548,6 +552,10 @@ pub struct MemoryInjectionConfig {
     /// Empty by default for community-bot safe behavior.
     #[serde(default = "default_pinned_types")]
     pub pinned_types: Vec<String>,
+
+    /// Whether ambient awareness is enabled.
+    #[serde(default = "default_ambient_enabled")]
+    pub ambient_enabled: bool,
 
     /// Maximum memories to inject per pinned type.
     #[serde(default = "default_pinned_limit")]
@@ -568,6 +576,9 @@ fn default_enabled() -> bool {
 fn default_search_limit() -> usize {
     20
 }
+fn default_contextual_min_score() -> f32 {
+    0.01
+}
 fn default_context_window_depth() -> usize {
     50
 }
@@ -576,6 +587,9 @@ fn default_semantic_threshold() -> f32 {
 }
 fn default_pinned_types() -> Vec<String> {
     Vec::new()
+}
+fn default_ambient_enabled() -> bool {
+    false
 }
 fn default_pinned_limit() -> i64 {
     3
@@ -592,9 +606,11 @@ impl Default for MemoryInjectionConfig {
         Self {
             enabled: default_enabled(),
             search_limit: default_search_limit(),
+            contextual_min_score: default_contextual_min_score(),
             context_window_depth: default_context_window_depth(),
             semantic_threshold: default_semantic_threshold(),
             pinned_types: default_pinned_types(),
+            ambient_enabled: default_ambient_enabled(),
             pinned_limit: default_pinned_limit(),
             pinned_sort: default_pinned_sort(),
             max_total: default_max_total(),
@@ -1528,9 +1544,11 @@ struct TomlDefaultsConfig {
 struct TomlMemoryInjectionConfig {
     enabled: Option<bool>,
     search_limit: Option<usize>,
+    contextual_min_score: Option<f32>,
     context_window_depth: Option<usize>,
     semantic_threshold: Option<f32>,
     pinned_types: Option<Vec<String>>,
+    ambient_enabled: Option<bool>,
     pinned_limit: Option<i64>,
     pinned_sort: Option<String>,
     max_total: Option<usize>,
@@ -2834,11 +2852,15 @@ impl Config {
                     MemoryInjectionConfig {
                         enabled: mi.enabled.unwrap_or(base.enabled),
                         search_limit: mi.search_limit.unwrap_or(base.search_limit),
+                        contextual_min_score: mi
+                            .contextual_min_score
+                            .unwrap_or(base.contextual_min_score),
                         context_window_depth: mi
                             .context_window_depth
                             .unwrap_or(base.context_window_depth),
                         semantic_threshold: mi.semantic_threshold.unwrap_or(base.semantic_threshold),
                         pinned_types,
+                        ambient_enabled: mi.ambient_enabled.unwrap_or(base.ambient_enabled),
                         pinned_limit: mi.pinned_limit.unwrap_or(base.pinned_limit),
                         pinned_sort,
                         max_total: mi.max_total.unwrap_or(base.max_total),
