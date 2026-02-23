@@ -20,14 +20,13 @@ pub(super) struct GlobalSettingsResponse {
 #[derive(Serialize)]
 pub(super) struct MemoryInjectionResponse {
     enabled: bool,
-    recent_threshold_hours: i64,
-    identity_limit: i64,
-    important_limit: i64,
-    recent_limit: i64,
-    vector_search_limit: usize,
+    search_limit: usize,
     context_window_depth: usize,
     semantic_threshold: f32,
-    importance_threshold: f32,
+    pinned_types: Vec<String>,
+    pinned_limit: i64,
+    pinned_sort: String,
+    max_total: usize,
 }
 
 #[derive(Serialize)]
@@ -61,14 +60,13 @@ pub(super) struct GlobalSettingsUpdate {
 #[derive(Deserialize)]
 pub(super) struct MemoryInjectionUpdate {
     enabled: Option<bool>,
-    recent_threshold_hours: Option<i64>,
-    identity_limit: Option<i64>,
-    important_limit: Option<i64>,
-    recent_limit: Option<i64>,
-    vector_search_limit: Option<usize>,
+    search_limit: Option<usize>,
     context_window_depth: Option<usize>,
     semantic_threshold: Option<f32>,
-    importance_threshold: Option<f32>,
+    pinned_types: Option<Vec<String>>,
+    pinned_limit: Option<i64>,
+    pinned_sort: Option<String>,
+    max_total: Option<usize>,
 }
 
 #[derive(Deserialize)]
@@ -216,24 +214,8 @@ pub(super) async fn get_global_settings(
                     .and_then(|m| m.get("enabled"))
                     .and_then(|v| v.as_bool())
                     .unwrap_or(true),
-                recent_threshold_hours: memory_injection_table
-                    .and_then(|m| m.get("recent_threshold_hours"))
-                    .and_then(|v| v.as_integer())
-                    .unwrap_or(1),
-                identity_limit: memory_injection_table
-                    .and_then(|m| m.get("identity_limit"))
-                    .and_then(|v| v.as_integer())
-                    .unwrap_or(10),
-                important_limit: memory_injection_table
-                    .and_then(|m| m.get("important_limit"))
-                    .and_then(|v| v.as_integer())
-                    .unwrap_or(10),
-                recent_limit: memory_injection_table
-                    .and_then(|m| m.get("recent_limit"))
-                    .and_then(|v| v.as_integer())
-                    .unwrap_or(10),
-                vector_search_limit: memory_injection_table
-                    .and_then(|m| m.get("vector_search_limit"))
+                search_limit: memory_injection_table
+                    .and_then(|m| m.get("search_limit"))
                     .and_then(|v| v.as_integer())
                     .and_then(|i| usize::try_from(i).ok())
                     .unwrap_or(20),
@@ -246,10 +228,30 @@ pub(super) async fn get_global_settings(
                     .and_then(|m| m.get("semantic_threshold"))
                     .and_then(|v| v.as_float())
                     .unwrap_or(0.85) as f32,
-                importance_threshold: memory_injection_table
-                    .and_then(|m| m.get("importance_threshold"))
-                    .and_then(|v| v.as_float())
-                    .unwrap_or(0.8) as f32,
+                pinned_types: memory_injection_table
+                    .and_then(|m| m.get("pinned_types"))
+                    .and_then(|v| v.as_array())
+                    .map(|array| {
+                        array
+                            .iter()
+                            .filter_map(|value| value.as_str().map(ToString::to_string))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default(),
+                pinned_limit: memory_injection_table
+                    .and_then(|m| m.get("pinned_limit"))
+                    .and_then(|v| v.as_integer())
+                    .unwrap_or(3),
+                pinned_sort: memory_injection_table
+                    .and_then(|m| m.get("pinned_sort"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("recent")
+                    .to_string(),
+                max_total: memory_injection_table
+                    .and_then(|m| m.get("max_total"))
+                    .and_then(|v| v.as_integer())
+                    .and_then(|i| usize::try_from(i).ok())
+                    .unwrap_or(25),
             };
 
             (
@@ -282,14 +284,13 @@ pub(super) async fn get_global_settings(
                 },
                 MemoryInjectionResponse {
                     enabled: true,
-                    recent_threshold_hours: 1,
-                    identity_limit: 10,
-                    important_limit: 10,
-                    recent_limit: 10,
-                    vector_search_limit: 20,
+                    search_limit: 20,
                     context_window_depth: 50,
                     semantic_threshold: 0.85,
-                    importance_threshold: 0.8,
+                    pinned_types: Vec::new(),
+                    pinned_limit: 3,
+                    pinned_sort: "recent".to_string(),
+                    max_total: 25,
                 },
             )
         };
@@ -423,24 +424,9 @@ pub(super) async fn update_global_settings(
         if let Some(enabled) = memory_injection.enabled {
             doc["defaults"]["memory_injection"]["enabled"] = toml_edit::value(enabled);
         }
-        if let Some(recent_threshold_hours) = memory_injection.recent_threshold_hours {
-            doc["defaults"]["memory_injection"]["recent_threshold_hours"] =
-                toml_edit::value(recent_threshold_hours);
-        }
-        if let Some(identity_limit) = memory_injection.identity_limit {
-            doc["defaults"]["memory_injection"]["identity_limit"] =
-                toml_edit::value(identity_limit);
-        }
-        if let Some(important_limit) = memory_injection.important_limit {
-            doc["defaults"]["memory_injection"]["important_limit"] =
-                toml_edit::value(important_limit);
-        }
-        if let Some(recent_limit) = memory_injection.recent_limit {
-            doc["defaults"]["memory_injection"]["recent_limit"] = toml_edit::value(recent_limit);
-        }
-        if let Some(vector_search_limit) = memory_injection.vector_search_limit {
-            doc["defaults"]["memory_injection"]["vector_search_limit"] =
-                toml_edit::value(vector_search_limit as i64);
+        if let Some(search_limit) = memory_injection.search_limit {
+            doc["defaults"]["memory_injection"]["search_limit"] =
+                toml_edit::value(search_limit as i64);
         }
         if let Some(context_window_depth) = memory_injection.context_window_depth {
             doc["defaults"]["memory_injection"]["context_window_depth"] =
@@ -450,9 +436,21 @@ pub(super) async fn update_global_settings(
             doc["defaults"]["memory_injection"]["semantic_threshold"] =
                 toml_edit::value(semantic_threshold as f64);
         }
-        if let Some(importance_threshold) = memory_injection.importance_threshold {
-            doc["defaults"]["memory_injection"]["importance_threshold"] =
-                toml_edit::value(importance_threshold as f64);
+        if let Some(pinned_types) = memory_injection.pinned_types {
+            let mut array = toml_edit::Array::default();
+            for memory_type in pinned_types {
+                array.push(memory_type);
+            }
+            doc["defaults"]["memory_injection"]["pinned_types"] = toml_edit::Item::Value(array.into());
+        }
+        if let Some(pinned_limit) = memory_injection.pinned_limit {
+            doc["defaults"]["memory_injection"]["pinned_limit"] = toml_edit::value(pinned_limit);
+        }
+        if let Some(pinned_sort) = memory_injection.pinned_sort {
+            doc["defaults"]["memory_injection"]["pinned_sort"] = toml_edit::value(pinned_sort);
+        }
+        if let Some(max_total) = memory_injection.max_total {
+            doc["defaults"]["memory_injection"]["max_total"] = toml_edit::value(max_total as i64);
         }
     }
 

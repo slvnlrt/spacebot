@@ -526,31 +526,15 @@ impl Default for CortexConfig {
 ///
 /// Controls how memories are fetched and deduplicated before being injected
 /// into the channel's context window.
-#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct MemoryInjectionConfig {
     /// Whether memory injection is enabled.
     #[serde(default = "default_enabled")]
     pub enabled: bool,
 
-    /// Hours to look back for "recent" memories.
-    #[serde(default = "default_recent_threshold_hours")]
-    pub recent_threshold_hours: i64,
-
-    /// Maximum memories to fetch for Identity type.
-    #[serde(default = "default_identity_limit")]
-    pub identity_limit: i64,
-
-    /// Maximum high-importance memories to fetch.
-    #[serde(default = "default_important_limit")]
-    pub important_limit: i64,
-
-    /// Maximum recent memories to fetch.
-    #[serde(default = "default_recent_limit")]
-    pub recent_limit: i64,
-
-    /// Maximum results from vector search.
-    #[serde(default = "default_vector_search_limit")]
-    pub vector_search_limit: usize,
+    /// Maximum results from contextual hybrid search.
+    #[serde(default = "default_search_limit")]
+    pub search_limit: usize,
 
     /// Number of turns before a memory can be re-injected.
     #[serde(default = "default_context_window_depth")]
@@ -560,27 +544,28 @@ pub struct MemoryInjectionConfig {
     #[serde(default = "default_semantic_threshold")]
     pub semantic_threshold: f32,
 
-    /// Importance threshold for "high importance" memories.
-    #[serde(default = "default_importance_threshold")]
-    pub importance_threshold: f32,
+    /// Memory types to always inject as ambient context.
+    /// Empty by default for community-bot safe behavior.
+    #[serde(default = "default_pinned_types")]
+    pub pinned_types: Vec<String>,
+
+    /// Maximum memories to inject per pinned type.
+    #[serde(default = "default_pinned_limit")]
+    pub pinned_limit: i64,
+
+    /// Sort mode for pinned memories. Allowed values: "recent", "importance".
+    #[serde(default = "default_pinned_sort")]
+    pub pinned_sort: String,
+
+    /// Hard cap on total injected memories across pinned and contextual pools.
+    #[serde(default = "default_max_total")]
+    pub max_total: usize,
 }
 
 fn default_enabled() -> bool {
     true
 }
-fn default_recent_threshold_hours() -> i64 {
-    1
-}
-fn default_identity_limit() -> i64 {
-    10
-}
-fn default_important_limit() -> i64 {
-    10
-}
-fn default_recent_limit() -> i64 {
-    10
-}
-fn default_vector_search_limit() -> usize {
+fn default_search_limit() -> usize {
     20
 }
 fn default_context_window_depth() -> usize {
@@ -589,22 +574,30 @@ fn default_context_window_depth() -> usize {
 fn default_semantic_threshold() -> f32 {
     0.85
 }
-fn default_importance_threshold() -> f32 {
-    0.8
+fn default_pinned_types() -> Vec<String> {
+    Vec::new()
+}
+fn default_pinned_limit() -> i64 {
+    3
+}
+fn default_pinned_sort() -> String {
+    "recent".to_string()
+}
+fn default_max_total() -> usize {
+    25
 }
 
 impl Default for MemoryInjectionConfig {
     fn default() -> Self {
         Self {
             enabled: default_enabled(),
-            recent_threshold_hours: default_recent_threshold_hours(),
-            identity_limit: default_identity_limit(),
-            important_limit: default_important_limit(),
-            recent_limit: default_recent_limit(),
-            vector_search_limit: default_vector_search_limit(),
+            search_limit: default_search_limit(),
             context_window_depth: default_context_window_depth(),
             semantic_threshold: default_semantic_threshold(),
-            importance_threshold: default_importance_threshold(),
+            pinned_types: default_pinned_types(),
+            pinned_limit: default_pinned_limit(),
+            pinned_sort: default_pinned_sort(),
+            max_total: default_max_total(),
         }
     }
 }
@@ -1534,14 +1527,13 @@ struct TomlDefaultsConfig {
 #[derive(Deserialize)]
 struct TomlMemoryInjectionConfig {
     enabled: Option<bool>,
-    recent_threshold_hours: Option<i64>,
-    identity_limit: Option<i64>,
-    important_limit: Option<i64>,
-    recent_limit: Option<i64>,
-    vector_search_limit: Option<usize>,
+    search_limit: Option<usize>,
     context_window_depth: Option<usize>,
     semantic_threshold: Option<f32>,
-    importance_threshold: Option<f32>,
+    pinned_types: Option<Vec<String>>,
+    pinned_limit: Option<i64>,
+    pinned_sort: Option<String>,
+    max_total: Option<usize>,
 }
 
 #[derive(Deserialize, Default)]
@@ -2812,24 +2804,44 @@ impl Config {
                 .memory_injection
                 .map(|mi| {
                     let base = &base_defaults.memory_injection;
+                    let pinned_types = mi
+                        .pinned_types
+                        .unwrap_or_else(|| base.pinned_types.clone())
+                        .into_iter()
+                        .filter(|memory_type| {
+                            let is_valid = crate::memory::MemoryType::ALL
+                                .iter()
+                                .any(|candidate| candidate.to_string() == *memory_type);
+                            if !is_valid {
+                                tracing::warn!(
+                                    memory_type = %memory_type,
+                                    "invalid memory_injection.pinned_types entry, dropping"
+                                );
+                            }
+                            is_valid
+                        })
+                        .collect::<Vec<_>>();
+
+                    let pinned_sort = match mi.pinned_sort {
+                        Some(sort) if sort == "recent" || sort == "importance" => sort,
+                        Some(sort) => {
+                            tracing::warn!(sort = %sort, "invalid memory_injection.pinned_sort, using default");
+                            base.pinned_sort.clone()
+                        }
+                        None => base.pinned_sort.clone(),
+                    };
+
                     MemoryInjectionConfig {
                         enabled: mi.enabled.unwrap_or(base.enabled),
-                        recent_threshold_hours: mi
-                            .recent_threshold_hours
-                            .unwrap_or(base.recent_threshold_hours),
-                        identity_limit: mi.identity_limit.unwrap_or(base.identity_limit),
-                        important_limit: mi.important_limit.unwrap_or(base.important_limit),
-                        recent_limit: mi.recent_limit.unwrap_or(base.recent_limit),
-                        vector_search_limit: mi
-                            .vector_search_limit
-                            .unwrap_or(base.vector_search_limit),
+                        search_limit: mi.search_limit.unwrap_or(base.search_limit),
                         context_window_depth: mi
                             .context_window_depth
                             .unwrap_or(base.context_window_depth),
                         semantic_threshold: mi.semantic_threshold.unwrap_or(base.semantic_threshold),
-                        importance_threshold: mi
-                            .importance_threshold
-                            .unwrap_or(base.importance_threshold),
+                        pinned_types,
+                        pinned_limit: mi.pinned_limit.unwrap_or(base.pinned_limit),
+                        pinned_sort,
+                        max_total: mi.max_total.unwrap_or(base.max_total),
                     }
                 })
                 .unwrap_or(base_defaults.memory_injection),
@@ -3266,7 +3278,7 @@ impl RuntimeConfig {
             brave_search_key: ArcSwap::from_pointee(agent_config.brave_search_key.clone()),
             cron_timezone: ArcSwap::from_pointee(agent_config.cron_timezone.clone()),
             cortex: ArcSwap::from_pointee(agent_config.cortex),
-            memory_injection: ArcSwap::from_pointee(defaults.memory_injection),
+            memory_injection: ArcSwap::from_pointee(defaults.memory_injection.clone()),
             memory_bulletin: ArcSwap::from_pointee(String::new()),
             prompts: ArcSwap::from_pointee(prompts),
             identity: ArcSwap::from_pointee(identity),
@@ -3339,7 +3351,7 @@ impl RuntimeConfig {
         self.cron_timezone.store(Arc::new(resolved.cron_timezone));
         self.cortex.store(Arc::new(resolved.cortex));
         self.memory_injection
-            .store(Arc::new(config.defaults.memory_injection));
+            .store(Arc::new(config.defaults.memory_injection.clone()));
 
         mcp_manager.reconcile(&old_mcp, &new_mcp).await;
 

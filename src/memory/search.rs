@@ -205,7 +205,10 @@ impl MemorySearch {
 
         // 3. Graph traversal from high-importance memories
         // Get identity and high-importance memories as starting points
-        let seed_memories = self.store.get_high_importance(0.8, 20).await?;
+        let seed_memories = self
+            .store
+            .get_high_importance(config.graph_seed_threshold, config.graph_seed_limit)
+            .await?;
 
         for seed in seed_memories {
             // Check if seed is semantically related to query via simple keyword matching
@@ -340,6 +343,10 @@ pub struct SearchConfig {
     pub min_score: f32,
     /// Maximum graph traversal depth. Only used in hybrid mode.
     pub max_graph_depth: usize,
+    /// Importance threshold for graph seed memories in hybrid mode.
+    pub graph_seed_threshold: f32,
+    /// Maximum number of graph seed memories in hybrid mode.
+    pub graph_seed_limit: i64,
 }
 
 impl Default for SearchConfig {
@@ -355,6 +362,8 @@ impl Default for SearchConfig {
             // score is ~0.016. Set threshold low enough to not discard everything.
             min_score: 0.0,
             max_graph_depth: 2,
+            graph_seed_threshold: 0.8,
+            graph_seed_limit: 20,
         }
     }
 }

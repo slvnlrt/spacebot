@@ -1028,28 +1028,38 @@ function WorkerLogsSection({ settings, isLoading }: GlobalSettingsSectionProps) 
 function MemoryInjectionSection({settings, isLoading}: GlobalSettingsSectionProps) {
 	const queryClient = useQueryClient();
 	const [enabled, setEnabled] = useState(settings?.memory_injection?.enabled ?? true);
+	const [searchLimit, setSearchLimit] = useState(settings?.memory_injection?.search_limit ?? 20);
+	const [maxTotal, setMaxTotal] = useState(settings?.memory_injection?.max_total ?? 25);
 	const [semanticThreshold, setSemanticThreshold] = useState(settings?.memory_injection?.semantic_threshold ?? 0.85);
-	const [importanceThreshold, setImportanceThreshold] = useState(settings?.memory_injection?.importance_threshold ?? 0.8);
-	const [identityLimit, setIdentityLimit] = useState(settings?.memory_injection?.identity_limit ?? 10);
-	const [importantLimit, setImportantLimit] = useState(settings?.memory_injection?.important_limit ?? 10);
-	const [recentLimit, setRecentLimit] = useState(settings?.memory_injection?.recent_limit ?? 10);
-	const [vectorSearchLimit, setVectorSearchLimit] = useState(settings?.memory_injection?.vector_search_limit ?? 20);
 	const [contextWindowDepth, setContextWindowDepth] = useState(settings?.memory_injection?.context_window_depth ?? 50);
-	const [recentThresholdHours, setRecentThresholdHours] = useState(settings?.memory_injection?.recent_threshold_hours ?? 1);
+	const [showAdvanced, setShowAdvanced] = useState(false);
+	const [pinnedTypes, setPinnedTypes] = useState<string[]>(settings?.memory_injection?.pinned_types ?? []);
+	const [pinnedLimit, setPinnedLimit] = useState(settings?.memory_injection?.pinned_limit ?? 3);
+	const [pinnedSort, setPinnedSort] = useState(settings?.memory_injection?.pinned_sort ?? "recent");
 	const [message, setMessage] = useState<{ text: string; type: "success" | "error" } | null>(null);
+
+	const memoryTypeOptions = [
+		"identity",
+		"goal",
+		"decision",
+		"todo",
+		"preference",
+		"fact",
+		"event",
+		"observation",
+	];
 
 	// Update form state when settings load
 	useEffect(() => {
 		if (settings?.memory_injection) {
 			setEnabled(settings.memory_injection.enabled ?? true);
+			setSearchLimit(settings.memory_injection.search_limit);
+			setMaxTotal(settings.memory_injection.max_total);
 			setSemanticThreshold(settings.memory_injection.semantic_threshold);
-			setImportanceThreshold(settings.memory_injection.importance_threshold);
-			setIdentityLimit(settings.memory_injection.identity_limit);
-			setImportantLimit(settings.memory_injection.important_limit);
-			setRecentLimit(settings.memory_injection.recent_limit);
-			setVectorSearchLimit(settings.memory_injection.vector_search_limit);
 			setContextWindowDepth(settings.memory_injection.context_window_depth);
-			setRecentThresholdHours(settings.memory_injection.recent_threshold_hours);
+			setPinnedTypes(settings.memory_injection.pinned_types ?? []);
+			setPinnedLimit(settings.memory_injection.pinned_limit ?? 3);
+			setPinnedSort(settings.memory_injection.pinned_sort ?? "recent");
 		}
 	}, [settings?.memory_injection]);
 
@@ -1072,16 +1082,23 @@ function MemoryInjectionSection({settings, isLoading}: GlobalSettingsSectionProp
 		updateMutation.mutate({
 			memory_injection: {
 				enabled,
+				search_limit: searchLimit,
+				max_total: maxTotal,
 				semantic_threshold: semanticThreshold,
-				importance_threshold: importanceThreshold,
-				identity_limit: identityLimit,
-				important_limit: importantLimit,
-				recent_limit: recentLimit,
-				vector_search_limit: vectorSearchLimit,
 				context_window_depth: contextWindowDepth,
-				recent_threshold_hours: recentThresholdHours,
+				pinned_types: pinnedTypes,
+				pinned_limit: pinnedLimit,
+				pinned_sort: pinnedSort,
 			},
 		});
+	};
+
+	const togglePinnedType = (memoryType: string) => {
+		setPinnedTypes((current) =>
+			current.includes(memoryType)
+				? current.filter((value) => value !== memoryType)
+				: [...current, memoryType]
+		);
 	};
 
 	return (
@@ -1122,11 +1139,41 @@ function MemoryInjectionSection({settings, isLoading}: GlobalSettingsSectionProp
 
 					{enabled && (
 						<>
-							{/* Thresholds Section */}
+							{/* Contextual Search Section */}
 							<div className="rounded-lg border border-app-line bg-app-box p-4">
-								<span className="text-sm font-medium text-ink">Thresholds</span>
+								<span className="text-sm font-medium text-ink">Contextual Search</span>
 								<p className="mt-0.5 text-sm text-ink-dull">
-									Control deduplication and importance filtering
+									Hybrid search runs on every user message to find relevant memories.
+								</p>
+								<div className="mt-4 grid grid-cols-2 gap-x-6 gap-y-4">
+									<div>
+										<NumberStepper
+											label="Search Limit"
+											description="Maximum contextual memories retrieved by hybrid search"
+											value={searchLimit}
+											onChange={setSearchLimit}
+											min={1}
+											max={100}
+										/>
+									</div>
+									<div>
+										<NumberStepper
+											label="Max Total"
+											description="Hard cap across pinned and contextual memories"
+											value={maxTotal}
+											onChange={setMaxTotal}
+											min={1}
+											max={200}
+										/>
+									</div>
+								</div>
+							</div>
+
+							{/* Deduplication Section */}
+							<div className="rounded-lg border border-app-line bg-app-box p-4">
+								<span className="text-sm font-medium text-ink">Deduplication</span>
+								<p className="mt-0.5 text-sm text-ink-dull">
+									Control duplicate filtering across turns and within the same turn.
 								</p>
 								<div className="mt-4 flex flex-col gap-6">
 									<div>
@@ -1146,82 +1193,6 @@ function MemoryInjectionSection({settings, isLoading}: GlobalSettingsSectionProp
 										</p>
 									</div>
 									<div>
-										<div className="flex items-center justify-between mb-2">
-											<span className="text-sm text-ink">Importance Threshold</span>
-											<span className="text-sm text-ink-dull">{importanceThreshold.toFixed(2)}</span>
-										</div>
-										<Slider
-											value={[importanceThreshold]}
-											onValueChange={(v) => setImportanceThreshold(v[0])}
-											min={0.5}
-											max={1}
-											step={0.01}
-										/>
-										<p className="mt-1 text-tiny text-ink-faint">
-											Memories with importance score above this threshold are always fetched before each turn. These are critical memories that should never be missed.
-										</p>
-									</div>
-								</div>
-							</div>
-
-							{/* Memory Fetch Limits Section */}
-							<div className="rounded-lg border border-app-line bg-app-box p-4">
-								<span className="text-sm font-medium text-ink">Fetch Limits</span>
-								<p className="mt-0.5 text-sm text-ink-dull">
-									Maximum memories retrieved from each source before deduplication
-								</p>
-								<div className="mt-4 grid grid-cols-2 gap-x-6 gap-y-4">
-									<div>
-										<NumberStepper
-											label="Identity Type"
-											description="Memories stored with type 'identity' (facts about the agent's identity)"
-											value={identityLimit}
-											onChange={setIdentityLimit}
-											min={1}
-											max={50}
-										/>
-									</div>
-									<div>
-										<NumberStepper
-											label="High Importance"
-											description="Memories with importance score above the threshold"
-											value={importantLimit}
-											onChange={setImportantLimit}
-											min={1}
-											max={50}
-										/>
-									</div>
-									<div>
-										<NumberStepper
-											label="Recent"
-											description="Memories created within the recent time window"
-											value={recentLimit}
-											onChange={setRecentLimit}
-											min={1}
-											max={50}
-										/>
-									</div>
-									<div>
-										<NumberStepper
-											label="Vector Search"
-											description="Semantic search results matching the user's message"
-											value={vectorSearchLimit}
-											onChange={setVectorSearchLimit}
-											min={1}
-											max={100}
-										/>
-									</div>
-								</div>
-							</div>
-
-							{/* Context Settings Section */}
-							<div className="rounded-lg border border-app-line bg-app-box p-4">
-								<span className="text-sm font-medium text-ink">Context Behavior</span>
-								<p className="mt-0.5 text-sm text-ink-dull">
-									Control how memories are managed within the conversation context
-								</p>
-								<div className="mt-4 grid grid-cols-2 gap-x-6 gap-y-4">
-									<div>
 										<NumberStepper
 											label="Re-injection Delay"
 											description="Number of turns before a memory can appear again"
@@ -1232,18 +1203,58 @@ function MemoryInjectionSection({settings, isLoading}: GlobalSettingsSectionProp
 											suffix="turns"
 										/>
 									</div>
-									<div>
-										<NumberStepper
-											label="Recent Window"
-											description="How far back to look for 'recent' memories"
-											value={recentThresholdHours}
-											onChange={setRecentThresholdHours}
-											min={1}
-											max={168}
-											suffix="hours"
-										/>
-									</div>
 								</div>
+							</div>
+
+							{/* Ambient Awareness Section */}
+							<div className="rounded-lg border border-app-line bg-app-box p-4">
+								<div className="flex items-center justify-between">
+									<span className="text-sm font-medium text-ink">Ambient Awareness (Advanced)</span>
+									<Toggle size="sm" checked={showAdvanced} onCheckedChange={setShowAdvanced} />
+								</div>
+								<p className="mt-0.5 text-sm text-ink-dull">
+									Optional always-on context between cortex bulletins. Keep disabled for community bots.
+								</p>
+								{showAdvanced && (
+									<div className="mt-4 flex flex-col gap-4">
+										<div className="grid grid-cols-2 gap-2">
+											{memoryTypeOptions.map((memoryType) => (
+												<Button
+													key={memoryType}
+													onClick={() => togglePinnedType(memoryType)}
+													variant={pinnedTypes.includes(memoryType) ? "primary" : "secondary"}
+												>
+													{memoryType}
+												</Button>
+											))}
+										</div>
+										<div className="grid grid-cols-2 gap-x-6 gap-y-4">
+											<div>
+												<NumberStepper
+													label="Pinned Limit"
+													description="Maximum memories per pinned type"
+													value={pinnedLimit}
+													onChange={setPinnedLimit}
+													min={1}
+													max={20}
+												/>
+											</div>
+											<div>
+												<span className="text-sm font-medium text-ink">Pinned Sort</span>
+												<p className="mt-0.5 text-sm text-ink-dull">Ordering strategy for pinned memories</p>
+												<Select value={pinnedSort} onValueChange={setPinnedSort}>
+													<SelectTrigger className="mt-2">
+														<SelectValue />
+													</SelectTrigger>
+													<SelectContent>
+														<SelectItem value="recent">recent</SelectItem>
+														<SelectItem value="importance">importance</SelectItem>
+													</SelectContent>
+												</Select>
+											</div>
+										</div>
+									</div>
+								)}
 							</div>
 						</>
 					)}

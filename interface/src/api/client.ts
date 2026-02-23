@@ -912,26 +912,24 @@ export interface OpenCodeSettingsUpdate {
 
 export interface MemoryInjectionConfig {
 	enabled: boolean;
-	recent_threshold_hours: number;
-	identity_limit: number;
-	important_limit: number;
-	recent_limit: number;
-	vector_search_limit: number;
+	search_limit: number;
 	context_window_depth: number;
 	semantic_threshold: number;
-	importance_threshold: number;
+	pinned_types: string[];
+	pinned_limit: number;
+	pinned_sort: string;
+	max_total: number;
 }
 
 export interface MemoryInjectionConfigUpdate {
 	enabled?: boolean;
-	recent_threshold_hours?: number;
-	identity_limit?: number;
-	important_limit?: number;
-	recent_limit?: number;
-	vector_search_limit?: number;
+	search_limit?: number;
 	context_window_depth?: number;
 	semantic_threshold?: number;
-	importance_threshold?: number;
+	pinned_types?: string[];
+	pinned_limit?: number;
+	pinned_sort?: string;
+	max_total?: number;
 }
 
 export interface GlobalSettingsResponse {

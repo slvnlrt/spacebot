@@ -9,23 +9,26 @@ use crate::conversation::{ChannelStore, ConversationLogger, ProcessRunLogger};
 use crate::error::{AgentError, Result};
 use crate::hooks::SpacebotHook;
 use crate::llm::SpacebotModel;
-use crate::memory::{is_semantically_duplicate, MemoryType, SearchConfig, SearchMode};
+use crate::memory::{is_semantically_duplicate, MemoryType, SearchConfig, SearchMode, SearchSort};
 use crate::{
     AgentDeps, BranchId, ChannelId, InboundMessage, OutboundResponse, ProcessEvent, ProcessId,
     ProcessType, WorkerId,
 };
+
+use futures::future::join_all;
 use rig::agent::AgentBuilder;
 use rig::completion::{CompletionModel, Prompt};
 use rig::message::{ImageMediaType, MimeType, UserContent};
 use rig::one_or_many::OneOrMany;
 use rig::tool::server::ToolServer;
+use tokio::sync::broadcast;
+use tokio::sync::{RwLock, mpsc};
+use tracing::Instrument as _;
+
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::VecDeque;
 use std::sync::Arc;
-use tokio::sync::broadcast;
-use tokio::sync::{RwLock, mpsc};
-use tracing::Instrument as _;
 
 /// Debounce window for retriggers: coalesce rapid branch/worker completions
 /// into a single retrigger instead of firing one per event.
@@ -120,10 +123,10 @@ pub struct ChannelInjectionState {
     /// Maps memory_id to the turn number when it was injected.
     /// Bounded to prevent memory leaks (oldest entries pruned when exceeding MAX_ENTRIES).
     pub injected_ids: HashMap<String, usize>,
-    /// Buffer of embeddings for semantic deduplication.
+    /// Buffer of embeddings for semantic deduplication with insertion turn.
     /// When a new memory's embedding is too similar (cosine > threshold) to any
     /// in this buffer, the memory is skipped.
-    pub semantic_buffer: VecDeque<Vec<f32>>,
+    pub semantic_buffer: VecDeque<(Vec<f32>, usize)>,
 }
 
 impl ChannelInjectionState {
@@ -166,12 +169,19 @@ impl ChannelInjectionState {
     }
 
     /// Add an embedding to the semantic buffer for future deduplication.
-    pub fn add_embedding(&mut self, embedding: Vec<f32>) {
-        self.semantic_buffer.push_back(embedding);
+    pub fn add_embedding(&mut self, embedding: Vec<f32>, turn: usize) {
+        self.semantic_buffer.push_back((embedding, turn));
         // Keep buffer bounded
         if self.semantic_buffer.len() > Self::MAX_ENTRIES {
             self.semantic_buffer.pop_front();
         }
+    }
+
+    /// Prune semantic embeddings older than the active context window.
+    pub fn prune_semantic_buffer(&mut self, current_turn: usize, context_window_depth: usize) {
+        let oldest_kept_turn = current_turn.saturating_sub(context_window_depth);
+        self.semantic_buffer
+            .retain(|(_, inserted_turn)| *inserted_turn >= oldest_kept_turn);
     }
 
     /// Prune old entries if the map exceeds MAX_ENTRIES.
@@ -939,104 +949,156 @@ impl Channel {
 
     /// Compute memories to inject before the LLM turn (pre-hook).
     ///
-    /// This method implements the memory injection pre-hook system:
-    /// 1. SQL pre-hook: fetch Identity, Important (>0.8), and Recent (<1h) memories
-    /// 2. Vector pre-hook: semantic search on user message
-    /// 3. Deduplication: filter by exact ID and semantic similarity
-    ///
-    /// Returns a formatted context string for injection into the prompt.
-    /// Updates `injection_state` with newly injected memory IDs and embeddings.
+    /// Pipeline:
+    /// 1) Optional pinned-type retrieval (ambient context)
+    /// 2) Contextual hybrid search on the user message
+    /// 3) Deduplication by context-window ID, batch ID, and semantic similarity
+    /// 4) Budget enforcement (pinned first, contextual second)
+    /// 5) Structured context formatting for prompt injection
     #[tracing::instrument(skip(self, user_text), fields(channel_id = %self.id))]
     async fn compute_memory_injection(&mut self, user_text: &str) -> Option<String> {
-        // Skip pre-hook for system messages (re-triggers after worker/branch completion)
-        // The caller should check this before calling, but we double-check here.
+        #[derive(Clone, Copy, Debug)]
+        enum InjectionSource {
+            Pinned,
+            Contextual,
+        }
+
+        #[derive(Clone, Debug)]
+        struct InjectionCandidate {
+            memory: crate::memory::Memory,
+            source: InjectionSource,
+        }
+
+        let parse_memory_type = |value: &str| -> Option<MemoryType> {
+            match value {
+                "fact" => Some(MemoryType::Fact),
+                "preference" => Some(MemoryType::Preference),
+                "decision" => Some(MemoryType::Decision),
+                "identity" => Some(MemoryType::Identity),
+                "event" => Some(MemoryType::Event),
+                "observation" => Some(MemoryType::Observation),
+                "goal" => Some(MemoryType::Goal),
+                "todo" => Some(MemoryType::Todo),
+                _ => None,
+            }
+        };
 
         let memory_search = self.deps.memory_search();
-        let store = memory_search.store();
-
-        // Load configuration values
         let config = self.deps.runtime_config.memory_injection.load();
-        
-        // If memory injection is disabled, return None
+
         if !config.enabled {
             return None;
         }
-        
-        let recent_threshold = chrono::Utc::now() - chrono::Duration::hours(config.recent_threshold_hours);
+
+        let started_at = std::time::Instant::now();
+
         let context_window_depth = config.context_window_depth;
-        let identity_limit = config.identity_limit;
-        let important_limit = config.important_limit;
-        let recent_limit = config.recent_limit;
-        let vector_search_limit = config.vector_search_limit;
         let semantic_threshold = config.semantic_threshold;
-        let importance_threshold = config.importance_threshold;
+        let search_limit = config.search_limit;
+        let max_total = config.max_total;
 
-        let mut all_memories = Vec::new();
+        let pinned_sort = if config.pinned_sort == "importance" {
+            SearchSort::Importance
+        } else {
+            SearchSort::Recent
+        };
 
-        // 1. SQL Pre-hook: Identity memories (always included)
-        match store.get_by_type(MemoryType::Identity, identity_limit).await {
-            Ok(memories) => all_memories.extend(memories),
-            Err(error) => tracing::warn!(%error, "failed to fetch identity memories"),
-        }
+        let pinned_limit = config.pinned_limit;
+        let pinned_types = config.pinned_types.clone();
 
-        // 2. SQL Pre-hook: High importance memories
-        match store.get_high_importance(importance_threshold, important_limit).await {
-            Ok(memories) => all_memories.extend(memories),
-            Err(error) => tracing::warn!(%error, "failed to fetch high importance memories"),
-        }
+        let pinned_tasks = pinned_types
+            .iter()
+            .cloned()
+            .map(|memory_type_name| {
+                let memory_search = memory_search.clone();
+                async move {
+                    let Some(memory_type) = parse_memory_type(&memory_type_name) else {
+                        tracing::warn!(memory_type = %memory_type_name, "unknown pinned memory type");
+                        return Vec::new();
+                    };
 
-        // 3. SQL Pre-hook: Recent memories
-        match store.get_recent_since(recent_threshold, recent_limit).await {
-            Ok(memories) => all_memories.extend(memories),
-            Err(error) => tracing::warn!(%error, "failed to fetch recent memories"),
-        }
+                    memory_search
+                        .store()
+                        .get_sorted(pinned_sort, pinned_limit, Some(memory_type))
+                        .await
+                        .unwrap_or_else(|error| {
+                            tracing::warn!(%error, memory_type = %memory_type_name, "failed pinned type fetch");
+                            Vec::new()
+                        })
+                }
+            })
+            .collect::<Vec<_>>();
 
-        // 4. Vector Pre-hook: Semantic search on user message
         let search_config = SearchConfig {
             mode: SearchMode::Hybrid,
-            max_results: vector_search_limit,
+            max_results: search_limit,
+            max_results_per_source: search_limit,
             ..Default::default()
         };
 
-        match memory_search.search(user_text, &search_config).await {
+        let (pinned_results, contextual_results) = tokio::join!(
+            join_all(pinned_tasks),
+            memory_search.search(user_text, &search_config)
+        );
+
+        let mut all_candidates = pinned_results
+            .into_iter()
+            .flatten()
+            .map(|memory| InjectionCandidate {
+                memory,
+                source: InjectionSource::Pinned,
+            })
+            .collect::<Vec<_>>();
+
+        match contextual_results {
             Ok(results) => {
-                for result in results {
-                    all_memories.push(result.memory);
-                }
+                all_candidates.extend(results.into_iter().map(|result| InjectionCandidate {
+                    memory: result.memory,
+                    source: InjectionSource::Contextual,
+                }));
             }
-            Err(error) => tracing::warn!(%error, "failed vector pre-hook search"),
+            Err(error) => {
+                tracing::warn!(%error, "failed contextual hybrid pre-hook search");
+            }
         }
 
-        // 5. Deduplication: filter by ID and semantic similarity
-        let mut unique_memories = Vec::new();
+        let mut deduped_count = 0usize;
+        let mut unique_candidates = Vec::new();
         let mut seen_ids = HashSet::new();
 
-        for memory in all_memories {
-            // Skip if already injected and still within context window
+        self.injection_state
+            .prune_semantic_buffer(self.current_turn, context_window_depth);
+
+        for candidate in all_candidates {
+            let memory = candidate.memory;
+
             if !self.injection_state.should_reinject(
                 &memory.id,
                 self.current_turn,
                 context_window_depth,
             ) {
+                deduped_count += 1;
                 continue;
             }
 
-            // Skip if we've already seen this ID in this batch
             if seen_ids.contains(&memory.id) {
+                deduped_count += 1;
                 continue;
             }
 
-            // Get embedding for semantic deduplication: try LanceDB first, fallback to computing
             let embedding = match memory_search.embedding_table().get_embedding(&memory.id).await {
-                Ok(Some(emb)) => emb,
+                Ok(Some(embedding)) => embedding,
                 Ok(None) => {
                     tracing::debug!(memory_id = %memory.id, "embedding not found in LanceDB, computing");
                     match memory_search.embedding_model_arc().embed_one(&memory.content).await {
-                        Ok(emb) => emb,
+                        Ok(embedding) => embedding,
                         Err(error) => {
                             tracing::warn!(%error, memory_id = %memory.id, "failed to compute embedding for deduplication");
-                            unique_memories.push(memory.clone());
                             seen_ids.insert(memory.id.clone());
+                            unique_candidates.push(InjectionCandidate {
+                                memory,
+                                source: candidate.source,
+                            });
                             continue;
                         }
                     }
@@ -1044,43 +1106,141 @@ impl Channel {
                 Err(error) => {
                     tracing::warn!(%error, memory_id = %memory.id, "failed to get embedding from LanceDB, computing");
                     match memory_search.embedding_model_arc().embed_one(&memory.content).await {
-                        Ok(emb) => emb,
+                        Ok(embedding) => embedding,
                         Err(error) => {
                             tracing::warn!(%error, memory_id = %memory.id, "failed to compute embedding for deduplication");
-                            unique_memories.push(memory.clone());
                             seen_ids.insert(memory.id.clone());
+                            unique_candidates.push(InjectionCandidate {
+                                memory,
+                                source: candidate.source,
+                            });
                             continue;
                         }
                     }
                 }
             };
 
-            // Check semantic similarity against buffer
-            if is_semantically_duplicate(&embedding, &self.injection_state.semantic_buffer, semantic_threshold) {
+            if is_semantically_duplicate(
+                &embedding,
+                self.injection_state
+                    .semantic_buffer
+                    .iter()
+                    .map(|(buffer_embedding, _)| buffer_embedding),
+                semantic_threshold,
+            ) {
+                deduped_count += 1;
                 continue;
             }
 
-            // Memory passed all filters - include it
             seen_ids.insert(memory.id.clone());
             self.injection_state.record_injection(memory.id.clone(), self.current_turn);
-            self.injection_state.add_embedding(embedding);
-            unique_memories.push(memory);
+            self.injection_state
+                .add_embedding(embedding, self.current_turn);
+            unique_candidates.push(InjectionCandidate {
+                memory,
+                source: candidate.source,
+            });
         }
 
-        if unique_memories.is_empty() {
+        if unique_candidates.is_empty() {
             return None;
         }
 
-        // 6. Format memories for injection
-        let context_lines: Vec<String> = unique_memories
-            .iter()
-            .map(|memory| {
-                let type_tag = format!("[{}]", memory.memory_type);
-                format!("{} {}", type_tag, memory.content)
-            })
-            .collect();
+        let mut pinned_selected = Vec::new();
+        let mut contextual_selected = Vec::new();
+        for candidate in unique_candidates {
+            match candidate.source {
+                InjectionSource::Pinned => pinned_selected.push(candidate.memory),
+                InjectionSource::Contextual => contextual_selected.push(candidate.memory),
+            }
+        }
 
-        Some(format!("Relevant context from memory:\n{}", context_lines.join("\n")))
+        let mut final_memories = Vec::new();
+        for memory in pinned_selected {
+            if final_memories.len() >= max_total {
+                break;
+            }
+            final_memories.push((InjectionSource::Pinned, memory));
+        }
+        for memory in contextual_selected {
+            if final_memories.len() >= max_total {
+                break;
+            }
+            final_memories.push((InjectionSource::Contextual, memory));
+        }
+
+        if final_memories.is_empty() {
+            return None;
+        }
+
+        let pinned_count = final_memories
+            .iter()
+            .filter(|(source, _)| matches!(source, InjectionSource::Pinned))
+            .count();
+        let contextual_count = final_memories
+            .iter()
+            .filter(|(source, _)| matches!(source, InjectionSource::Contextual))
+            .count();
+
+        for (source, memory) in &final_memories {
+            tracing::debug!(
+                memory_id = %memory.id,
+                memory_type = %memory.memory_type,
+                source = %match source {
+                    InjectionSource::Pinned => "pinned",
+                    InjectionSource::Contextual => "contextual",
+                },
+                "memory injected"
+            );
+        }
+
+        let mut lines = Vec::new();
+        let pinned_lines = final_memories
+            .iter()
+            .filter_map(|(source, memory)| {
+                if matches!(source, InjectionSource::Pinned) {
+                    Some(format!("[{}] {}", memory.memory_type, memory.content))
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+        let contextual_lines = final_memories
+            .iter()
+            .filter_map(|(source, memory)| {
+                if matches!(source, InjectionSource::Contextual) {
+                    Some(format!("[{}] {}", memory.memory_type, memory.content))
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+
+        if !pinned_lines.is_empty() {
+            lines.push("[Pinned context]".to_string());
+            lines.extend(pinned_lines);
+        }
+
+        if !contextual_lines.is_empty() {
+            if !lines.is_empty() {
+                lines.push(String::new());
+            }
+            lines.push("[Relevant to this message]".to_string());
+            lines.extend(contextual_lines);
+        }
+
+        let elapsed = started_at.elapsed();
+        tracing::info!(
+            channel_id = %self.id,
+            pinned = pinned_count,
+            contextual = contextual_count,
+            total = final_memories.len(),
+            deduped = deduped_count,
+            elapsed_ms = elapsed.as_millis() as u64,
+            "memory injection complete"
+        );
+
+        Some(lines.join("\n"))
     }
 
     /// Register per-turn tools, run the LLM agentic loop, and clean up.
@@ -2752,10 +2912,10 @@ mod tests {
         assert_eq!(state.injected_ids.get(memory_id), Some(&turn));
 
         let embedding = vec![1.0, 2.0, 3.0];
-        state.add_embedding(embedding.clone());
+        state.add_embedding(embedding.clone(), turn);
 
         assert_eq!(state.semantic_buffer.len(), 1);
-        assert_eq!(state.semantic_buffer.front(), Some(&embedding));
+        assert_eq!(state.semantic_buffer.front(), Some(&(embedding, turn)));
 
         for i in 0..5 {
             state.record_injection(format!("memory-{}", i), turn + i);
@@ -2763,7 +2923,7 @@ mod tests {
         assert_eq!(state.injected_ids.len(), 6);
 
         for i in 0..5 {
-            state.add_embedding(vec![i as f32, (i + 1) as f32]);
+            state.add_embedding(vec![i as f32, (i + 1) as f32], turn + i);
         }
         assert_eq!(state.semantic_buffer.len(), 6);
     }
@@ -2774,13 +2934,28 @@ mod tests {
         let mut state = ChannelInjectionState::new();
 
         for i in 0..ChannelInjectionState::MAX_ENTRIES + 10 {
-            state.add_embedding(vec![i as f32]);
+            state.add_embedding(vec![i as f32], i);
         }
 
         assert_eq!(state.semantic_buffer.len(), ChannelInjectionState::MAX_ENTRIES);
 
         let first = state.semantic_buffer.front().expect("buffer should not be empty");
-        assert_eq!(first[0], 10.0);
+        assert_eq!(first.0[0], 10.0);
+        assert_eq!(first.1, 10);
+    }
+
+    #[test]
+    fn semantic_buffer_turn_pruning() {
+        let mut state = ChannelInjectionState::new();
+
+        state.add_embedding(vec![1.0], 1);
+        state.add_embedding(vec![2.0], 10);
+        state.add_embedding(vec![3.0], 20);
+
+        state.prune_semantic_buffer(25, 10);
+
+        assert_eq!(state.semantic_buffer.len(), 1);
+        assert_eq!(state.semantic_buffer.front(), Some(&(vec![3.0], 20)));
     }
 
     /// Injected ID map is pruned to bounded size.
