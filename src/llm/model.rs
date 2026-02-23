@@ -1253,15 +1253,21 @@ fn parse_anthropic_response(
         }
     }
 
-    let choice = OneOrMany::many(assistant_content).map_err(|_| {
+    let choice = OneOrMany::many(assistant_content).unwrap_or_else(|_| {
+        // Anthropic returns an empty content array when stop_reason is end_turn
+        // and the model has nothing further to say (e.g. after a side-effect-only
+        // tool call like react/skip). Treat this as a clean empty response rather
+        // than an error so the agentic loop terminates gracefully.
+        let stop_reason = body["stop_reason"].as_str().unwrap_or("unknown");
         tracing::debug!(
-            stop_reason = body["stop_reason"].as_str().unwrap_or("unknown"),
+            stop_reason,
             content_blocks = content_blocks.len(),
-            raw_content = %body["content"],
-            "empty assistant_content after parsing Anthropic response"
+            "empty assistant_content from Anthropic — returning synthetic empty text"
         );
-        CompletionError::ResponseError("empty response from Anthropic".into())
-    })?;
+        OneOrMany::one(AssistantContent::Text(Text {
+            text: String::new(),
+        }))
+    });
 
     let input_tokens = body["usage"]["input_tokens"].as_u64().unwrap_or(0);
     let output_tokens = body["usage"]["output_tokens"].as_u64().unwrap_or(0);
