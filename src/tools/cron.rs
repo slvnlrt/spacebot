@@ -8,6 +8,12 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
+/// Minimum allowed interval between cron job runs (seconds).
+const MIN_CRON_INTERVAL_SECS: u64 = 60;
+
+/// Maximum allowed prompt length for cron jobs (characters).
+const MAX_CRON_PROMPT_LENGTH: usize = 10_000;
+
 /// Tool for managing cron jobs (scheduled recurring tasks).
 #[derive(Debug, Clone)]
 pub struct CronTool {
@@ -168,8 +174,49 @@ impl CronTool {
             .delivery_target
             .ok_or_else(|| CronError("'delivery_target' is required for create".into()))?;
 
+        // Validate cron job ID: alphanumeric, hyphens, underscores only
+        if id.is_empty()
+            || id.len() > 50
+            || !id
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+        {
+            return Err(CronError(
+                "'id' must be 1-50 characters, alphanumeric with hyphens and underscores only"
+                    .into(),
+            ));
+        }
+
+        // Prevent excessively short intervals that could cause resource exhaustion
+        if interval_secs < MIN_CRON_INTERVAL_SECS {
+            return Err(CronError(format!(
+                "'interval_secs' must be at least {MIN_CRON_INTERVAL_SECS} (got {interval_secs})"
+            )));
+        }
+
+        // Cap prompt length to prevent context flooding
+        if prompt.len() > MAX_CRON_PROMPT_LENGTH {
+            return Err(CronError(format!(
+                "'prompt' exceeds maximum length of {MAX_CRON_PROMPT_LENGTH} characters (got {})",
+                prompt.len()
+            )));
+        }
+
+        // Validate delivery_target format (must be "adapter:target")
+        if !delivery_target.contains(':') {
+            return Err(CronError(
+                "'delivery_target' must be in 'adapter:target' format (e.g. 'discord:123456789')"
+                    .into(),
+            ));
+        }
+
         let active_hours = match (args.active_start_hour, args.active_end_hour) {
-            (Some(start), Some(end)) => Some((start, end)),
+            (Some(start), Some(end)) => {
+                if start > 23 || end > 23 {
+                    return Err(CronError("active hours must be 0-23".into()));
+                }
+                Some((start, end))
+            }
             _ => None,
         };
         let run_once = args.run_once.unwrap_or(false);
@@ -198,13 +245,24 @@ impl CronTool {
             .map_err(|error| CronError(format!("failed to register: {error}")))?;
 
         let interval_desc = format_interval(interval_secs);
+        let timezone = self.scheduler.cron_timezone_label();
         let mut message = if run_once {
             format!("Cron job '{id}' created. First run {interval_desc}; it then disables itself.")
         } else {
             format!("Cron job '{id}' created. Runs {interval_desc}.")
         };
         if let Some((start, end)) = active_hours {
-            message.push_str(&format!(" Active {start:02}:00-{end:02}:00."));
+            if timezone == "system" {
+                message.push_str(&format!(
+                    " Active {start:02}:00-{end:02}:00 in server local time."
+                ));
+            } else {
+                message.push_str(&format!(" Active {start:02}:00-{end:02}:00 in {timezone}."));
+            }
+        } else if timezone == "system" {
+            message.push_str(" Active-hours timezone: server local time.");
+        } else {
+            message.push_str(&format!(" Active-hours timezone: {timezone}."));
         }
 
         tracing::info!(cron_id = %id, %interval_secs, %delivery_target, "cron job created via tool");
@@ -238,9 +296,15 @@ impl CronTool {
             .collect();
 
         let count = entries.len();
+        let timezone = self.scheduler.cron_timezone_label();
+        let timezone_note = if timezone == "system" {
+            "active hours use server local time".to_string()
+        } else {
+            format!("active hours use {timezone}")
+        };
         Ok(CronOutput {
             success: true,
-            message: format!("{count} active cron job(s)."),
+            message: format!("{count} active cron job(s); {timezone_note}."),
             jobs: Some(entries),
         })
     }
@@ -250,6 +314,8 @@ impl CronTool {
             .delete_id
             .or(args.id)
             .ok_or_else(|| CronError("'delete_id' or 'id' is required for delete".into()))?;
+
+        self.scheduler.unregister(&id).await;
 
         self.store
             .delete(&id)

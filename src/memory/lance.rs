@@ -124,6 +124,7 @@ impl EmbeddingTable {
 
     /// Delete an embedding by memory ID.
     pub async fn delete(&self, memory_id: &str) -> Result<()> {
+        Self::validate_memory_id(memory_id)?;
         let predicate = format!("id = '{}'", memory_id);
         self.table
             .delete(&predicate)
@@ -238,6 +239,7 @@ impl EmbeddingTable {
         threshold: f32,
         limit: usize,
     ) -> Result<Vec<(String, f32)>> {
+        Self::validate_memory_id(memory_id)?;
         // First, retrieve the embedding for this memory
         use lancedb::query::{ExecutableQuery, QueryBase};
 
@@ -397,6 +399,18 @@ impl EmbeddingTable {
                 false,
             ),
         ])
+    }
+
+    /// Validate that a memory ID is a well-formed UUID to prevent predicate injection.
+    fn validate_memory_id(memory_id: &str) -> Result<()> {
+        if memory_id.len() != 36
+            || !memory_id
+                .chars()
+                .all(|c| c.is_ascii_hexdigit() || c == '-')
+        {
+            return Err(DbError::LanceDb(format!("invalid memory ID format: {}", memory_id)).into());
+        }
+        Ok(())
     }
 }
 

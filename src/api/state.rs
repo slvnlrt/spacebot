@@ -6,6 +6,7 @@ use crate::agent::status::StatusBlock;
 use crate::config::{Binding, DefaultsConfig, DiscordPermissions, RuntimeConfig, SlackPermissions};
 use crate::cron::{CronStore, Scheduler};
 use crate::llm::LlmManager;
+use crate::mcp::McpManager;
 use crate::memory::{EmbeddingModel, MemorySearch};
 use crate::messaging::MessagingManager;
 use crate::messaging::webchat::WebChatAdapter;
@@ -36,6 +37,7 @@ pub struct AgentInfo {
 /// State shared across all API handlers.
 pub struct ApiState {
     pub started_at: Instant,
+    pub auth_token: Option<String>,
     /// Aggregated event stream from all agents. SSE clients subscribe here.
     pub event_tx: broadcast::Sender<ApiEvent>,
     /// Per-agent SQLite pools for querying channel/conversation data.
@@ -61,6 +63,8 @@ pub struct ApiState {
     pub cron_schedulers: arc_swap::ArcSwap<HashMap<String, Arc<Scheduler>>>,
     /// Per-agent RuntimeConfig for reading live hot-reloaded configuration.
     pub runtime_configs: ArcSwap<HashMap<String, Arc<RuntimeConfig>>>,
+    /// Per-agent MCP managers for status and reconnect APIs.
+    pub mcp_managers: ArcSwap<HashMap<String, Arc<McpManager>>>,
     /// Shared reference to the Discord permissions ArcSwap (same instance used by the adapter and file watcher).
     pub discord_permissions: RwLock<Option<Arc<ArcSwap<DiscordPermissions>>>>,
     /// Shared reference to the Slack permissions ArcSwap (same instance used by the adapter and file watcher).
@@ -179,6 +183,7 @@ impl ApiState {
         let (event_tx, _) = broadcast::channel(512);
         Self {
             started_at: Instant::now(),
+            auth_token: None,
             event_tx,
             agent_pools: arc_swap::ArcSwap::from_pointee(HashMap::new()),
             agent_configs: arc_swap::ArcSwap::from_pointee(Vec::new()),
@@ -191,6 +196,7 @@ impl ApiState {
             cron_stores: arc_swap::ArcSwap::from_pointee(HashMap::new()),
             cron_schedulers: arc_swap::ArcSwap::from_pointee(HashMap::new()),
             runtime_configs: ArcSwap::from_pointee(HashMap::new()),
+            mcp_managers: ArcSwap::from_pointee(HashMap::new()),
             discord_permissions: RwLock::new(None),
             slack_permissions: RwLock::new(None),
             bindings: RwLock::new(None),
@@ -414,6 +420,11 @@ impl ApiState {
     /// Set the runtime configs for all agents.
     pub fn set_runtime_configs(&self, configs: HashMap<String, Arc<RuntimeConfig>>) {
         self.runtime_configs.store(Arc::new(configs));
+    }
+
+    /// Set the MCP managers for all agents.
+    pub fn set_mcp_managers(&self, managers: HashMap<String, Arc<McpManager>>) {
+        self.mcp_managers.store(Arc::new(managers));
     }
 
     /// Share the Discord permissions ArcSwap with the API so reads get hot-reloaded values.

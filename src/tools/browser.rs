@@ -4,6 +4,7 @@
 //! via headless Chrome using chromiumoxide. Uses an accessibility-tree based
 //! ref system for LLM-friendly element addressing.
 
+
 use crate::config::BrowserConfig;
 
 use chromiumoxide::browser::{Browser, BrowserConfig as ChromeConfig};
@@ -16,15 +17,115 @@ use chromiumoxide_cdp::cdp::browser_protocol::input::{
 };
 use chromiumoxide_cdp::cdp::browser_protocol::page::CaptureScreenshotFormat;
 use futures::StreamExt as _;
+use reqwest::Url;
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
+
+/// Validate that a URL is safe for the browser to navigate to.
+/// Blocks private/loopback IPs, link-local addresses, and cloud metadata endpoints
+/// to prevent server-side request forgery.
+fn validate_url(url: &str) -> Result<(), BrowserError> {
+    let parsed = Url::parse(url)
+        .map_err(|error| BrowserError::new(format!("invalid URL '{url}': {error}")))?;
+
+    match parsed.scheme() {
+        "http" | "https" => {}
+        other => {
+            return Err(BrowserError::new(format!(
+                "scheme '{other}' is not allowed — only http and https are permitted"
+            )));
+        }
+    }
+
+    let Some(host) = parsed.host_str() else {
+        return Err(BrowserError::new("URL has no host"));
+    };
+
+    // Block cloud metadata endpoints regardless of how the IP resolves
+    if host == "metadata.google.internal"
+        || host == "169.254.169.254"
+        || host == "metadata.aws.internal"
+    {
+        return Err(BrowserError::new(
+            "access to cloud metadata endpoints is blocked",
+        ));
+    }
+
+    // If the host parses as an IP address, check against blocked ranges
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        if is_blocked_ip(ip) {
+            return Err(BrowserError::new(format!(
+                "navigation to private/loopback address {ip} is blocked"
+            )));
+        }
+    }
+
+    // IPv6 addresses in brackets (url crate strips them for host_str)
+    if let Some(stripped) = host.strip_prefix('[').and_then(|h| h.strip_suffix(']')) {
+        if let Ok(ip) = stripped.parse::<IpAddr>() {
+            if is_blocked_ip(ip) {
+                return Err(BrowserError::new(format!(
+                    "navigation to private/loopback address {ip} is blocked"
+                )));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Returns true if the IP address belongs to a private, loopback, or
+/// link-local range that should not be reachable from the browser tool.
+fn is_blocked_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            v4.is_loopback()                             // 127.0.0.0/8
+            || v4.is_private()                            // 10/8, 172.16/12, 192.168/16
+            || v4.is_link_local()                         // 169.254.0.0/16
+            || v4.is_broadcast()                          // 255.255.255.255
+            || v4.is_unspecified()                        // 0.0.0.0
+            || is_v4_cgnat(v4) // 100.64.0.0/10
+        }
+        IpAddr::V6(v6) => {
+            v6.is_loopback()                             // ::1
+            || v6.is_unspecified()                        // ::
+            || is_v6_unique_local(v6)                    // fd00::/8 (fc00::/7)
+            || is_v6_link_local(v6)                      // fe80::/10
+            || is_v4_mapped_blocked(v6)
+        }
+    }
+}
+
+fn is_v4_cgnat(ip: Ipv4Addr) -> bool {
+    let octets = ip.octets();
+    octets[0] == 100 && (octets[1] & 0xC0) == 64 // 100.64.0.0/10
+}
+
+fn is_v6_unique_local(ip: Ipv6Addr) -> bool {
+    (ip.segments()[0] & 0xFE00) == 0xFC00 // fc00::/7
+}
+
+fn is_v6_link_local(ip: Ipv6Addr) -> bool {
+    (ip.segments()[0] & 0xFFC0) == 0xFE80 // fe80::/10
+}
+
+/// Check if an IPv6 address is a v4-mapped address (::ffff:x.x.x.x)
+/// pointing to a blocked IPv4 range.
+fn is_v4_mapped_blocked(ip: Ipv6Addr) -> bool {
+    if let Some(v4) = ip.to_ipv4_mapped() {
+        is_blocked_ip(IpAddr::V4(v4))
+    } else {
+        false
+    }
+}
 
 /// Tool for browser automation (worker-only).
 #[derive(Debug, Clone)]
@@ -412,6 +513,8 @@ impl BrowserTool {
             return Err(BrowserError::new("url is required for navigate action"));
         };
 
+        validate_url(&url)?;
+
         let mut state = self.state.lock().await;
         let page = self.get_or_create_page(&mut state, Some(&url)).await?;
 
@@ -440,6 +543,10 @@ impl BrowserTool {
             .ok_or_else(|| BrowserError::new("browser not launched — call launch first"))?;
 
         let target_url = url.as_deref().unwrap_or("about:blank");
+
+        if target_url != "about:blank" {
+            validate_url(target_url)?;
+        }
 
         let page = browser
             .new_page(target_url)

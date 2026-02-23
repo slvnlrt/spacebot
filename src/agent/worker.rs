@@ -21,6 +21,11 @@ const TURNS_PER_SEGMENT: usize = 25;
 /// Prevents infinite compact-retry loops if something is fundamentally wrong.
 const MAX_OVERFLOW_RETRIES: usize = 3;
 
+/// Max segments before the worker gives up and returns a partial result.
+/// Prevents unbounded worker loops when the LLM keeps hitting max_turns
+/// without completing the task.
+const MAX_SEGMENTS: usize = 10;
+
 /// Worker state machine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkerState {
@@ -186,6 +191,8 @@ impl Worker {
 
         tracing::info!(worker_id = %self.id, task_len = self.task.len(), "worker starting");
 
+        let mcp_tools = self.deps.mcp_manager.get_tools().await;
+
         // Create per-worker ToolServer with task tools
         let worker_tool_server = crate::tools::create_worker_tool_server(
             self.deps.agent_id.clone(),
@@ -197,11 +204,13 @@ impl Worker {
             self.brave_search_key.clone(),
             self.deps.runtime_config.workspace_dir.clone(),
             self.deps.runtime_config.instance_dir.clone(),
+            mcp_tools,
         );
 
         let routing = self.deps.runtime_config.routing.load();
         let model_name = routing.resolve(ProcessType::Worker, None).to_string();
         let model = SpacebotModel::make(&self.deps.llm_manager, &model_name)
+            .with_context(&*self.deps.agent_id, "worker")
             .with_routing((**routing).clone());
 
         let agent = AgentBuilder::new(model)
@@ -232,6 +241,33 @@ impl Worker {
                 }
                 Err(rig::completion::PromptError::MaxTurnsError { .. }) => {
                     overflow_retries = 0;
+
+                    if segments_run >= MAX_SEGMENTS {
+                        tracing::warn!(
+                            worker_id = %self.id,
+                            segments = segments_run,
+                            "worker hit max segments, returning partial result"
+                        );
+                        self.hook.send_status("done (max segments)");
+                        break history
+                            .iter()
+                            .rev()
+                            .find_map(|message| {
+                                if let rig::message::Message::Assistant { content, .. } = message {
+                                    content.iter().find_map(|part| {
+                                        if let rig::message::AssistantContent::Text(text) = part {
+                                            Some(text.text.clone())
+                                        } else {
+                                            None
+                                        }
+                                    })
+                                } else {
+                                    None
+                                }
+                            })
+                            .unwrap_or_else(|| "Worker reached maximum segments without a final response.".to_string());
+                    }
+
                     self.maybe_compact_history(&mut history).await;
                     prompt = "Continue where you left off. Do not repeat completed work.".into();
                     self.hook
@@ -320,9 +356,8 @@ impl Worker {
                             self.hook.send_status("compacting (overflow recovery)");
                             self.force_compact_history(&mut history).await;
                             let prompt_engine = self.deps.runtime_config.prompts.load();
-                            let overflow_msg = prompt_engine
-                                .render_system_worker_overflow()
-                                .expect("failed to render worker overflow message");
+                            let overflow_msg =
+                                prompt_engine.render_system_worker_overflow()?;
                             follow_up_prompt = format!("{follow_up}\n\n{overflow_msg}");
                         }
                         Err(error) => {
@@ -412,9 +447,13 @@ impl Worker {
 
         let recap = build_worker_recap(&removed);
         let prompt_engine = self.deps.runtime_config.prompts.load();
-        let marker = prompt_engine
-            .render_system_worker_compact(remove_count, &recap)
-            .expect("failed to render worker compact message");
+        let marker = match prompt_engine.render_system_worker_compact(remove_count, &recap) {
+            Ok(m) => m,
+            Err(error) => {
+                tracing::error!(%error, "failed to render worker compact marker");
+                return;
+            }
+        };
         history.insert(0, rig::message::Message::from(marker));
 
         tracing::info!(

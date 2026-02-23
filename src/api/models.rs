@@ -81,6 +81,15 @@ const MODELS_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(360
 /// Models known to work with Spacebot's current voice transcription path
 /// (OpenAI-compatible `/v1/chat/completions` with `input_audio`).
 const KNOWN_VOICE_TRANSCRIPTION_MODELS: &[&str] = &[
+    // Native Gemini API
+    "gemini/gemini-2.0-flash",
+    "gemini/gemini-2.5-flash",
+    "gemini/gemini-2.5-flash-lite",
+    "gemini/gemini-2.5-pro",
+    "gemini/gemini-3-flash-preview",
+    "gemini/gemini-3-pro-preview",
+    "gemini/gemini-3.1-pro-preview",
+    // Via OpenRouter
     "openrouter/google/gemini-2.0-flash-001",
     "openrouter/google/gemini-2.5-flash",
     "openrouter/google/gemini-2.5-flash-lite",
@@ -216,6 +225,16 @@ fn extra_models() -> Vec<ModelInfo> {
             reasoning: false,
             input_audio: false,
         },
+        // MiniMax CN
+        ModelInfo {
+            id: "minimax-cn/MiniMax-M2.5".into(),
+            name: "MiniMax M2.5".into(),
+            provider: "minimax-cn".into(),
+            context_window: Some(200000),
+            tool_call: true,
+            reasoning: false,
+            input_audio: false,
+        },
         // Moonshot AI (Kimi)
         ModelInfo {
             id: "moonshot/kimi-k2.5".into(),
@@ -286,7 +305,11 @@ async fn fetch_models_dev() -> anyhow::Result<Vec<ModelInfo>> {
                 .modalities
                 .as_ref()
                 .and_then(|m| m.input.as_ref())
-                .is_some_and(|inputs| inputs.iter().any(|input| input.to_lowercase().contains("audio")));
+                .is_some_and(|inputs| {
+                    inputs
+                        .iter()
+                        .any(|input| input.to_lowercase().contains("audio"))
+                });
 
             models.push(ModelInfo {
                 id: routing_id,
@@ -392,6 +415,9 @@ pub(super) async fn configured_providers(config_path: &std::path::Path) -> Vec<&
     }
     if has_key("minimax_key", "MINIMAX_API_KEY") {
         providers.push("minimax");
+    }
+    if has_key("minimax_cn_key", "MINIMAX_CN_API_KEY") {
+        providers.push("minimax-cn");
     }
     if has_key("moonshot_key", "MOONSHOT_API_KEY") {
         providers.push("moonshot");

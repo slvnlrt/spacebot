@@ -140,10 +140,10 @@ impl Messaging for DiscordAdapter {
 
                 for (index, chunk) in split_message(&text, 2000).into_iter().enumerate() {
                     let mut builder = CreateMessage::new().content(chunk);
-                    if index == 0 {
-                        if let Some(reply_message_id) = reply_to {
-                            builder = builder.reference_message((channel_id, reply_message_id));
-                        }
+                    if index == 0
+                        && let Some(reply_message_id) = reply_to
+                    {
+                        builder = builder.reference_message((channel_id, reply_message_id));
                     }
                     channel_id
                         .send_message(&*http, builder)
@@ -190,10 +190,10 @@ impl Messaging for DiscordAdapter {
                         }
                     }
 
-                    if i == 0 {
-                        if let Some(reply_message_id) = reply_to {
-                            msg = msg.reference_message((channel_id, reply_message_id));
-                        }
+                    if i == 0
+                        && let Some(reply_message_id) = reply_to
+                    {
+                        msg = msg.reference_message((channel_id, reply_message_id));
                     }
 
                     channel_id
@@ -608,21 +608,19 @@ impl EventHandler for Handler {
         let (metadata, formatted_author) = build_metadata(&ctx, &message, bot_user_id).await;
 
         // Channel filter: allow if the channel ID or its parent (for threads) is in the allowlist
-        if let Some(guild_id) = message.guild_id {
-            if let Some(allowed_channels) = permissions.channel_filter.get(&guild_id.get())
-                && !allowed_channels.is_empty()
-            {
-                let parent_channel_id = metadata
-                    .get("discord_parent_channel_id")
-                    .and_then(|v| v.as_u64());
+        if let Some(guild_id) = message.guild_id
+            && let Some(allowed_channels) = permissions.channel_filter.get(&guild_id.get())
+            && !allowed_channels.is_empty()
+        {
+            let parent_channel_id = metadata
+                .get("discord_parent_channel_id")
+                .and_then(|v| v.as_u64());
 
-                let direct_match = allowed_channels.contains(&message.channel_id.get());
-                let parent_match =
-                    parent_channel_id.is_some_and(|pid| allowed_channels.contains(&pid));
+            let direct_match = allowed_channels.contains(&message.channel_id.get());
+            let parent_match = parent_channel_id.is_some_and(|pid| allowed_channels.contains(&pid));
 
-                if !direct_match && !parent_match {
-                    return;
-                }
+            if !direct_match && !parent_match {
+                return;
             }
         }
 

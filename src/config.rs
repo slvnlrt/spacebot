@@ -4,10 +4,13 @@ use crate::error::{ConfigError, Result};
 use crate::llm::routing::RoutingConfig;
 use anyhow::Context as _;
 use arc_swap::ArcSwap;
+use chrono_tz::Tz;
 use serde::{Deserialize, Deserializer};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+
+const CRON_TIMEZONE_ENV_VAR: &str = "SPACEBOT_CRON_TIMEZONE";
 
 /// OpenTelemetry export configuration.
 ///
@@ -60,6 +63,7 @@ pub struct ApiConfig {
     pub port: u16,
     /// Address to bind the HTTP server on.
     pub bind: String,
+    pub auth_token: Option<String>,
 }
 
 impl Default for ApiConfig {
@@ -68,6 +72,7 @@ impl Default for ApiConfig {
             enabled: true,
             port: 19898,
             bind: "127.0.0.1".into(),
+            auth_token: None,
         }
     }
 }
@@ -125,7 +130,7 @@ impl<'de> serde::Deserialize<'de> for ApiType {
 }
 
 /// Configuration for a single LLM provider.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ProviderConfig {
     pub api_type: ApiType,
     pub base_url: String,
@@ -133,8 +138,19 @@ pub struct ProviderConfig {
     pub name: Option<String>,
 }
 
+impl std::fmt::Debug for ProviderConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProviderConfig")
+            .field("api_type", &self.api_type)
+            .field("base_url", &self.base_url)
+            .field("api_key", &"[REDACTED]")
+            .field("name", &self.name)
+            .finish()
+    }
+}
+
 /// LLM provider credentials (instance-level).
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct LlmConfig {
     pub anthropic_key: Option<String>,
     pub openai_key: Option<String>,
@@ -152,9 +168,36 @@ pub struct LlmConfig {
     pub opencode_zen_key: Option<String>,
     pub nvidia_key: Option<String>,
     pub minimax_key: Option<String>,
+    pub minimax_cn_key: Option<String>,
     pub moonshot_key: Option<String>,
     pub zai_coding_plan_key: Option<String>,
     pub providers: HashMap<String, ProviderConfig>,
+}
+
+impl std::fmt::Debug for LlmConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LlmConfig")
+            .field("anthropic_key", &self.anthropic_key.as_ref().map(|_| "[REDACTED]"))
+            .field("openai_key", &self.openai_key.as_ref().map(|_| "[REDACTED]"))
+            .field("openrouter_key", &self.openrouter_key.as_ref().map(|_| "[REDACTED]"))
+            .field("zhipu_key", &self.zhipu_key.as_ref().map(|_| "[REDACTED]"))
+            .field("groq_key", &self.groq_key.as_ref().map(|_| "[REDACTED]"))
+            .field("together_key", &self.together_key.as_ref().map(|_| "[REDACTED]"))
+            .field("fireworks_key", &self.fireworks_key.as_ref().map(|_| "[REDACTED]"))
+            .field("deepseek_key", &self.deepseek_key.as_ref().map(|_| "[REDACTED]"))
+            .field("xai_key", &self.xai_key.as_ref().map(|_| "[REDACTED]"))
+            .field("mistral_key", &self.mistral_key.as_ref().map(|_| "[REDACTED]"))
+            .field("gemini_key", &self.gemini_key.as_ref().map(|_| "[REDACTED]"))
+            .field("ollama_key", &self.ollama_key.as_ref().map(|_| "[REDACTED]"))
+            .field("ollama_base_url", &self.ollama_base_url)
+            .field("opencode_zen_key", &self.opencode_zen_key.as_ref().map(|_| "[REDACTED]"))
+            .field("nvidia_key", &self.nvidia_key.as_ref().map(|_| "[REDACTED]"))
+            .field("minimax_key", &self.minimax_key.as_ref().map(|_| "[REDACTED]"))
+            .field("moonshot_key", &self.moonshot_key.as_ref().map(|_| "[REDACTED]"))
+            .field("zai_coding_plan_key", &self.zai_coding_plan_key.as_ref().map(|_| "[REDACTED]"))
+            .field("providers", &self.providers)
+            .finish()
+    }
 }
 
 impl LlmConfig {
@@ -176,6 +219,7 @@ impl LlmConfig {
             || self.opencode_zen_key.is_some()
             || self.nvidia_key.is_some()
             || self.minimax_key.is_some()
+            || self.minimax_cn_key.is_some()
             || self.moonshot_key.is_some()
             || self.zai_coding_plan_key.is_some()
             || !self.providers.is_empty()
@@ -187,15 +231,18 @@ const OPENAI_PROVIDER_BASE_URL: &str = "https://api.openai.com";
 const OPENROUTER_PROVIDER_BASE_URL: &str = "https://openrouter.ai/api";
 const OPENCODE_ZEN_PROVIDER_BASE_URL: &str = "https://opencode.ai/zen";
 const MINIMAX_PROVIDER_BASE_URL: &str = "https://api.minimax.io/anthropic";
+const MINIMAX_CN_PROVIDER_BASE_URL: &str = "https://api.minimaxi.com/anthropic";
 const MOONSHOT_PROVIDER_BASE_URL: &str = "https://api.moonshot.ai";
 
 const ZHIPU_PROVIDER_BASE_URL: &str = "https://api.z.ai/api/paas/v4";
 const ZAI_CODING_PLAN_BASE_URL: &str = "https://api.z.ai/api/coding/paas/v4";
 const NVIDIA_PROVIDER_BASE_URL: &str = "https://integrate.api.nvidia.com";
-pub(crate) const GEMINI_PROVIDER_BASE_URL: &str = "https://generativelanguage.googleapis.com/v1beta/openai";
+const FIREWORKS_PROVIDER_BASE_URL: &str = "https://api.fireworks.ai/inference";
+pub(crate) const GEMINI_PROVIDER_BASE_URL: &str =
+    "https://generativelanguage.googleapis.com/v1beta/openai";
 
 /// Defaults inherited by all agents. Individual agents can override any field.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct DefaultsConfig {
     pub routing: RoutingConfig,
     pub max_concurrent_branches: usize,
@@ -209,8 +256,11 @@ pub struct DefaultsConfig {
     pub ingestion: IngestionConfig,
     pub cortex: CortexConfig,
     pub browser: BrowserConfig,
+    pub mcp: Vec<McpServerConfig>,
     /// Brave Search API key for web search tool. Supports "env:VAR_NAME" references.
     pub brave_search_key: Option<String>,
+    /// Default timezone used when evaluating cron active hours.
+    pub cron_timezone: Option<String>,
     pub history_backfill_count: usize,
     pub cron: Vec<CronDef>,
     pub opencode: OpenCodeConfig,
@@ -218,6 +268,62 @@ pub struct DefaultsConfig {
     pub worker_log_mode: crate::settings::WorkerLogMode,
     /// Memory injection configuration for pre-hook context enrichment.
     pub memory_injection: MemoryInjectionConfig,
+}
+
+impl std::fmt::Debug for DefaultsConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DefaultsConfig")
+            .field("routing", &self.routing)
+            .field("max_concurrent_branches", &self.max_concurrent_branches)
+            .field("max_concurrent_workers", &self.max_concurrent_workers)
+            .field("max_turns", &self.max_turns)
+            .field("branch_max_turns", &self.branch_max_turns)
+            .field("context_window", &self.context_window)
+            .field("compaction", &self.compaction)
+            .field("memory_persistence", &self.memory_persistence)
+            .field("coalesce", &self.coalesce)
+            .field("ingestion", &self.ingestion)
+            .field("cortex", &self.cortex)
+            .field("browser", &self.browser)
+            .field("mcp", &self.mcp)
+            .field("brave_search_key", &self.brave_search_key.as_ref().map(|_| "[REDACTED]"))
+            .field("history_backfill_count", &self.history_backfill_count)
+            .field("cron", &self.cron)
+            .field("opencode", &self.opencode)
+            .field("worker_log_mode", &self.worker_log_mode)
+            .finish()
+    }
+}
+
+/// MCP server configuration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpServerConfig {
+    pub name: String,
+    pub transport: McpTransport,
+    pub enabled: bool,
+}
+
+/// MCP transport configuration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum McpTransport {
+    Stdio {
+        command: String,
+        args: Vec<String>,
+        env: HashMap<String, String>,
+    },
+    Http {
+        url: String,
+        headers: HashMap<String, String>,
+    },
+}
+
+impl McpTransport {
+    pub fn kind(&self) -> &'static str {
+        match self {
+            McpTransport::Stdio { .. } => "stdio",
+            McpTransport::Http { .. } => "http",
+        }
+    }
 }
 
 /// Compaction threshold configuration.
@@ -523,8 +629,11 @@ pub struct AgentConfig {
     pub ingestion: Option<IngestionConfig>,
     pub cortex: Option<CortexConfig>,
     pub browser: Option<BrowserConfig>,
+    pub mcp: Option<Vec<McpServerConfig>>,
     /// Per-agent Brave Search API key override. None inherits from defaults.
     pub brave_search_key: Option<String>,
+    /// Optional timezone override for cron active-hours evaluation.
+    pub cron_timezone: Option<String>,
     /// Cron job definitions for this agent.
     pub cron: Vec<CronDef>,
 }
@@ -565,7 +674,9 @@ pub struct ResolvedAgentConfig {
     pub ingestion: IngestionConfig,
     pub cortex: CortexConfig,
     pub browser: BrowserConfig,
+    pub mcp: Vec<McpServerConfig>,
     pub brave_search_key: Option<String>,
+    pub cron_timezone: Option<String>,
     /// Number of messages to fetch from the platform when a new channel is created.
     pub history_backfill_count: usize,
     pub cron: Vec<CronDef>,
@@ -586,7 +697,9 @@ impl Default for DefaultsConfig {
             ingestion: IngestionConfig::default(),
             cortex: CortexConfig::default(),
             browser: BrowserConfig::default(),
+            mcp: Vec::new(),
             brave_search_key: None,
+            cron_timezone: None,
             history_backfill_count: 50,
             cron: Vec::new(),
             opencode: OpenCodeConfig::default(),
@@ -633,10 +746,16 @@ impl AgentConfig {
                 .browser
                 .clone()
                 .unwrap_or_else(|| defaults.browser.clone()),
+            mcp: resolve_mcp_configs(&defaults.mcp, self.mcp.as_deref()),
             brave_search_key: self
                 .brave_search_key
                 .clone()
                 .or_else(|| defaults.brave_search_key.clone()),
+            cron_timezone: resolve_cron_timezone(
+                &self.id,
+                self.cron_timezone.as_deref(),
+                defaults.cron_timezone.as_deref(),
+            ),
             history_backfill_count: defaults.history_backfill_count,
             cron: self.cron.clone(),
         }
@@ -836,7 +955,7 @@ pub struct MessagingConfig {
     pub twitch: Option<TwitchConfig>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct DiscordConfig {
     pub enabled: bool,
     pub token: String,
@@ -844,6 +963,17 @@ pub struct DiscordConfig {
     pub dm_allowed_users: Vec<String>,
     /// Whether to process messages from other bots (self-messages are always ignored).
     pub allow_bot_messages: bool,
+}
+
+impl std::fmt::Debug for DiscordConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DiscordConfig")
+            .field("enabled", &self.enabled)
+            .field("token", &"[REDACTED]")
+            .field("dm_allowed_users", &self.dm_allowed_users)
+            .field("allow_bot_messages", &self.allow_bot_messages)
+            .finish()
+    }
 }
 
 /// A single slash command definition for the Slack adapter.
@@ -860,7 +990,7 @@ pub struct SlackCommandConfig {
     pub description: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct SlackConfig {
     pub enabled: bool,
     pub bot_token: String,
@@ -869,6 +999,18 @@ pub struct SlackConfig {
     pub dm_allowed_users: Vec<String>,
     /// Slash command definitions. If empty, all slash commands are ignored.
     pub commands: Vec<SlackCommandConfig>,
+}
+
+impl std::fmt::Debug for SlackConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SlackConfig")
+            .field("enabled", &self.enabled)
+            .field("bot_token", &"[REDACTED]")
+            .field("app_token", &"[REDACTED]")
+            .field("dm_allowed_users", &self.dm_allowed_users)
+            .field("commands", &self.commands)
+            .finish()
+    }
 }
 
 /// Hot-reloadable Discord permission filters.
@@ -1003,12 +1145,22 @@ impl DiscordPermissions {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct TelegramConfig {
     pub enabled: bool,
     pub token: String,
     /// User IDs allowed to DM the bot. If empty, DMs are ignored entirely.
     pub dm_allowed_users: Vec<String>,
+}
+
+impl std::fmt::Debug for TelegramConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TelegramConfig")
+            .field("enabled", &self.enabled)
+            .field("token", &"[REDACTED]")
+            .field("dm_allowed_users", &self.dm_allowed_users)
+            .finish()
+    }
 }
 
 /// Hot-reloadable Telegram permission filters.
@@ -1065,15 +1217,30 @@ impl TelegramPermissions {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct TwitchConfig {
     pub enabled: bool,
     pub username: String,
     pub oauth_token: String,
+    pub client_id: Option<String>,
+    pub client_secret: Option<String>,
+    pub refresh_token: Option<String>,
     /// Channels to join (without the # prefix).
     pub channels: Vec<String>,
     /// Optional prefix that triggers the bot (e.g. "!ask"). If empty, all messages are processed.
     pub trigger_prefix: Option<String>,
+}
+
+impl std::fmt::Debug for TwitchConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TwitchConfig")
+            .field("enabled", &self.enabled)
+            .field("username", &self.username)
+            .field("oauth_token", &"[REDACTED]")
+            .field("channels", &self.channels)
+            .field("trigger_prefix", &self.trigger_prefix)
+            .finish()
+    }
 }
 
 /// Hot-reloadable Twitch permission filters.
@@ -1126,6 +1293,7 @@ pub struct WebhookConfig {
     pub enabled: bool,
     pub port: u16,
     pub bind: String,
+    pub auth_token: Option<String>,
 }
 
 // -- TOML deserialization types --
@@ -1166,6 +1334,8 @@ struct TomlApiConfig {
     port: u16,
     #[serde(default = "default_api_bind")]
     bind: String,
+    #[serde(default)]
+    auth_token: Option<String>,
 }
 
 impl Default for TomlApiConfig {
@@ -1174,6 +1344,7 @@ impl Default for TomlApiConfig {
             enabled: default_api_enabled(),
             port: default_api_port(),
             bind: default_api_bind(),
+            auth_token: None,
         }
     }
 }
@@ -1248,6 +1419,7 @@ struct TomlLlmConfigFields {
     opencode_zen_key: Option<String>,
     nvidia_key: Option<String>,
     minimax_key: Option<String>,
+    minimax_cn_key: Option<String>,
     moonshot_key: Option<String>,
     zai_coding_plan_key: Option<String>,
     #[serde(default)]
@@ -1275,6 +1447,7 @@ struct TomlLlmConfig {
     opencode_zen_key: Option<String>,
     nvidia_key: Option<String>,
     minimax_key: Option<String>,
+    minimax_cn_key: Option<String>,
     moonshot_key: Option<String>,
     zai_coding_plan_key: Option<String>,
     providers: HashMap<String, TomlProviderConfig>,
@@ -1327,6 +1500,7 @@ impl<'de> Deserialize<'de> for TomlLlmConfig {
             opencode_zen_key: fields.opencode_zen_key,
             nvidia_key: fields.nvidia_key,
             minimax_key: fields.minimax_key,
+            minimax_cn_key: fields.minimax_cn_key,
             moonshot_key: fields.moonshot_key,
             zai_coding_plan_key: fields.zai_coding_plan_key,
             providers: fields.providers,
@@ -1348,7 +1522,10 @@ struct TomlDefaultsConfig {
     ingestion: Option<TomlIngestionConfig>,
     cortex: Option<TomlCortexConfig>,
     browser: Option<TomlBrowserConfig>,
+    #[serde(default)]
+    mcp: Vec<TomlMcpServerConfig>,
     brave_search_key: Option<String>,
+    cron_timezone: Option<String>,
     opencode: Option<TomlOpenCodeConfig>,
     worker_log_mode: Option<String>,
     memory_injection: Option<TomlMemoryInjectionConfig>,
@@ -1456,6 +1633,26 @@ struct TomlOpenCodePermissions {
     webfetch: Option<String>,
 }
 
+#[derive(Deserialize, Clone)]
+struct TomlMcpServerConfig {
+    name: String,
+    transport: String,
+    #[serde(default = "default_mcp_enabled")]
+    enabled: bool,
+    command: Option<String>,
+    #[serde(default)]
+    args: Vec<String>,
+    #[serde(default)]
+    env: HashMap<String, String>,
+    url: Option<String>,
+    #[serde(default)]
+    headers: HashMap<String, String>,
+}
+
+fn default_mcp_enabled() -> bool {
+    true
+}
+
 #[derive(Deserialize)]
 struct TomlAgentConfig {
     id: String,
@@ -1474,7 +1671,9 @@ struct TomlAgentConfig {
     ingestion: Option<TomlIngestionConfig>,
     cortex: Option<TomlCortexConfig>,
     browser: Option<TomlBrowserConfig>,
+    mcp: Option<Vec<TomlMcpServerConfig>>,
     brave_search_key: Option<String>,
+    cron_timezone: Option<String>,
     #[serde(default)]
     cron: Vec<TomlCronDef>,
 }
@@ -1550,6 +1749,7 @@ struct TomlWebhookConfig {
     port: u16,
     #[serde(default = "default_webhook_bind")]
     bind: String,
+    auth_token: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -1558,6 +1758,9 @@ struct TomlTwitchConfig {
     enabled: bool,
     username: Option<String>,
     oauth_token: Option<String>,
+    client_id: Option<String>,
+    client_secret: Option<String>,
+    refresh_token: Option<String>,
     #[serde(default)]
     channels: Vec<String>,
     trigger_prefix: Option<String>,
@@ -1594,6 +1797,44 @@ fn resolve_env_value(value: &str) -> Option<String> {
     }
 }
 
+fn normalize_timezone(value: &str) -> Option<String> {
+    let timezone = value.trim();
+    if timezone.is_empty() {
+        return None;
+    }
+    Some(timezone.to_string())
+}
+
+fn resolve_cron_timezone(
+    agent_id: &str,
+    agent_timezone: Option<&str>,
+    default_timezone: Option<&str>,
+) -> Option<String> {
+    let timezone = agent_timezone
+        .and_then(normalize_timezone)
+        .or_else(|| default_timezone.and_then(normalize_timezone))
+        .or_else(|| {
+            std::env::var(CRON_TIMEZONE_ENV_VAR)
+                .ok()
+                .and_then(|value| normalize_timezone(&value))
+        });
+
+    let Some(timezone) = timezone else {
+        return None;
+    };
+
+    if timezone.parse::<Tz>().is_err() {
+        tracing::warn!(
+            agent_id,
+            cron_timezone = %timezone,
+            "invalid cron timezone configured, falling back to system local timezone"
+        );
+        return None;
+    }
+
+    Some(timezone)
+}
+
 fn parse_otlp_headers(value: Option<String>) -> Result<HashMap<String, String>> {
     let Some(raw) = value else {
         return Ok(HashMap::new());
@@ -1626,6 +1867,53 @@ fn parse_otlp_headers(value: Option<String>) -> Result<HashMap<String, String>> 
     }
 
     Ok(headers)
+}
+
+fn parse_mcp_server_config(raw: TomlMcpServerConfig) -> Result<McpServerConfig> {
+    if raw.name.trim().is_empty() {
+        return Err(ConfigError::Invalid("mcp server name cannot be empty".into()).into());
+    }
+
+    let transport = match raw.transport.as_str() {
+        "stdio" => {
+            let command = raw.command.ok_or_else(|| {
+                ConfigError::Invalid(format!(
+                    "mcp server '{}' with stdio transport requires 'command'",
+                    raw.name
+                ))
+            })?;
+            McpTransport::Stdio {
+                command,
+                args: raw.args,
+                env: raw.env,
+            }
+        }
+        "http" => {
+            let url = raw.url.ok_or_else(|| {
+                ConfigError::Invalid(format!(
+                    "mcp server '{}' with http transport requires 'url'",
+                    raw.name
+                ))
+            })?;
+            McpTransport::Http {
+                url,
+                headers: raw.headers,
+            }
+        }
+        other => {
+            return Err(ConfigError::Invalid(format!(
+                "mcp server '{}' has invalid transport '{}', expected 'stdio' or 'http'",
+                raw.name, other
+            ))
+            .into());
+        }
+    };
+
+    Ok(McpServerConfig {
+        name: raw.name,
+        transport,
+        enabled: raw.enabled,
+    })
 }
 
 /// Resolve a TomlRoutingConfig against a base RoutingConfig.
@@ -1668,6 +1956,28 @@ fn resolve_routing(toml: Option<TomlRoutingConfig>, base: &RoutingConfig) -> Rou
             .cortex_thinking_effort
             .unwrap_or_else(|| base.cortex_thinking_effort.clone()),
     }
+}
+
+fn resolve_mcp_configs(
+    default_configs: &[McpServerConfig],
+    agent_configs: Option<&[McpServerConfig]>,
+) -> Vec<McpServerConfig> {
+    let mut merged = default_configs.to_vec();
+
+    if let Some(agent_configs) = agent_configs {
+        for agent_config in agent_configs {
+            if let Some(existing_index) = merged
+                .iter()
+                .position(|existing| existing.name == agent_config.name)
+            {
+                merged[existing_index] = agent_config.clone();
+            } else {
+                merged.push(agent_config.clone());
+            }
+        }
+    }
+
+    merged
 }
 
 impl Config {
@@ -1767,7 +2077,9 @@ impl Config {
     /// Load from environment variables only (no config file).
     pub fn load_from_env(instance_dir: &Path) -> Result<Self> {
         let mut llm = LlmConfig {
-            anthropic_key: std::env::var("ANTHROPIC_API_KEY").ok(),
+            anthropic_key: std::env::var("ANTHROPIC_API_KEY")
+                .ok()
+                .or_else(|| std::env::var("ANTHROPIC_AUTH_TOKEN").ok()),
             openai_key: std::env::var("OPENAI_API_KEY").ok(),
             openrouter_key: std::env::var("OPENROUTER_API_KEY").ok(),
             zhipu_key: std::env::var("ZHIPU_API_KEY").ok(),
@@ -1783,6 +2095,7 @@ impl Config {
             opencode_zen_key: std::env::var("OPENCODE_ZEN_API_KEY").ok(),
             nvidia_key: std::env::var("NVIDIA_API_KEY").ok(),
             minimax_key: std::env::var("MINIMAX_API_KEY").ok(),
+            minimax_cn_key: std::env::var("MINIMAX_CN_API_KEY").ok(),
             moonshot_key: std::env::var("MOONSHOT_API_KEY").ok(),
             zai_coding_plan_key: std::env::var("ZAI_CODING_PLAN_API_KEY").ok(),
             providers: HashMap::new(),
@@ -1790,11 +2103,13 @@ impl Config {
 
         // Populate providers from env vars (same as from_toml does)
         if let Some(anthropic_key) = llm.anthropic_key.clone() {
+            let base_url = std::env::var("ANTHROPIC_BASE_URL")
+                .unwrap_or_else(|_| ANTHROPIC_PROVIDER_BASE_URL.to_string());
             llm.providers
                 .entry("anthropic".to_string())
                 .or_insert_with(|| ProviderConfig {
                     api_type: ApiType::Anthropic,
-                    base_url: ANTHROPIC_PROVIDER_BASE_URL.to_string(),
+                    base_url,
                     api_key: anthropic_key,
                     name: None,
                 });
@@ -1866,6 +2181,17 @@ impl Config {
                 });
         }
 
+        if let Some(minimax_cn_key) = llm.minimax_cn_key.clone() {
+            llm.providers
+                .entry("minimax-cn".to_string())
+                .or_insert_with(|| ProviderConfig {
+                    api_type: ApiType::Anthropic,
+                    base_url: MINIMAX_CN_PROVIDER_BASE_URL.to_string(),
+                    api_key: minimax_cn_key,
+                    name: None,
+                });
+        }
+
         if let Some(moonshot_key) = llm.moonshot_key.clone() {
             llm.providers
                 .entry("moonshot".to_string())
@@ -1888,6 +2214,17 @@ impl Config {
                 });
         }
 
+        if let Some(fireworks_key) = llm.fireworks_key.clone() {
+            llm.providers
+                .entry("fireworks".to_string())
+                .or_insert_with(|| ProviderConfig {
+                    api_type: ApiType::OpenAiCompletions,
+                    base_url: FIREWORKS_PROVIDER_BASE_URL.to_string(),
+                    api_key: fireworks_key,
+                    name: None,
+                });
+        }
+
         if let Some(gemini_key) = llm.gemini_key.clone() {
             llm.providers
                 .entry("gemini".to_string())
@@ -1902,8 +2239,16 @@ impl Config {
         // Note: We allow boot without provider keys now. System starts in setup mode.
         // Agents are initialized later when keys are added via API.
 
-        // Env-only routing: check for env overrides on channel/worker models
+        // Env-only routing: check for env overrides on channel/worker models.
+        // SPACEBOT_MODEL overrides all process types at once; specific vars take precedence.
         let mut routing = RoutingConfig::default();
+        if let Ok(model) = std::env::var("SPACEBOT_MODEL") {
+            routing.channel = model.clone();
+            routing.branch = model.clone();
+            routing.worker = model.clone();
+            routing.compactor = model.clone();
+            routing.cortex = model;
+        }
         if let Ok(channel_model) = std::env::var("SPACEBOT_CHANNEL_MODEL") {
             routing.channel = channel_model;
         }
@@ -1930,7 +2275,9 @@ impl Config {
             ingestion: None,
             cortex: None,
             browser: None,
+            mcp: None,
             brave_search_key: None,
+            cron_timezone: None,
             cron: Vec::new(),
         }];
 
@@ -2002,7 +2349,8 @@ impl Config {
                 .anthropic_key
                 .as_deref()
                 .and_then(resolve_env_value)
-                .or_else(|| std::env::var("ANTHROPIC_API_KEY").ok()),
+                .or_else(|| std::env::var("ANTHROPIC_API_KEY").ok())
+                .or_else(|| std::env::var("ANTHROPIC_AUTH_TOKEN").ok()),
             openai_key: toml
                 .llm
                 .openai_key
@@ -2093,6 +2441,12 @@ impl Config {
                 .as_deref()
                 .and_then(resolve_env_value)
                 .or_else(|| std::env::var("MINIMAX_API_KEY").ok()),
+            minimax_cn_key: toml
+                .llm
+                .minimax_cn_key
+                .as_deref()
+                .and_then(resolve_env_value)
+                .or_else(|| std::env::var("MINIMAX_CN_API_KEY").ok()),
             moonshot_key: toml
                 .llm
                 .moonshot_key
@@ -2110,26 +2464,33 @@ impl Config {
                 .providers
                 .into_iter()
                 .map(|(provider_id, config)| {
-                    (
+                    let api_key = resolve_env_value(&config.api_key).ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "failed to resolve API key for provider '{}'",
+                            provider_id
+                        )
+                    })?;
+                    Ok((
                         provider_id.to_lowercase(),
                         ProviderConfig {
                             api_type: config.api_type,
                             base_url: config.base_url,
-                            api_key: resolve_env_value(&config.api_key)
-                                .expect("Failed to resolve API key for provider"),
+                            api_key,
                             name: config.name,
                         },
-                    )
+                    ))
                 })
-                .collect(),
+                .collect::<anyhow::Result<_>>()?,
         };
 
         if let Some(anthropic_key) = llm.anthropic_key.clone() {
+            let base_url = std::env::var("ANTHROPIC_BASE_URL")
+                .unwrap_or_else(|_| ANTHROPIC_PROVIDER_BASE_URL.to_string());
             llm.providers
                 .entry("anthropic".to_string())
                 .or_insert_with(|| ProviderConfig {
                     api_type: ApiType::Anthropic,
-                    base_url: ANTHROPIC_PROVIDER_BASE_URL.to_string(),
+                    base_url,
                     api_key: anthropic_key,
                     name: None,
                 });
@@ -2201,6 +2562,17 @@ impl Config {
                 });
         }
 
+        if let Some(minimax_cn_key) = llm.minimax_cn_key.clone() {
+            llm.providers
+                .entry("minimax-cn".to_string())
+                .or_insert_with(|| ProviderConfig {
+                    api_type: ApiType::Anthropic,
+                    base_url: MINIMAX_CN_PROVIDER_BASE_URL.to_string(),
+                    api_key: minimax_cn_key,
+                    name: None,
+                });
+        }
+
         if let Some(moonshot_key) = llm.moonshot_key.clone() {
             llm.providers
                 .entry("moonshot".to_string())
@@ -2223,6 +2595,17 @@ impl Config {
                 });
         }
 
+        if let Some(fireworks_key) = llm.fireworks_key.clone() {
+            llm.providers
+                .entry("fireworks".to_string())
+                .or_insert_with(|| ProviderConfig {
+                    api_type: ApiType::OpenAiCompletions,
+                    base_url: FIREWORKS_PROVIDER_BASE_URL.to_string(),
+                    api_key: fireworks_key,
+                    name: None,
+                });
+        }
+
         if let Some(gemini_key) = llm.gemini_key.clone() {
             llm.providers
                 .entry("gemini".to_string())
@@ -2236,6 +2619,13 @@ impl Config {
 
         // Note: We allow boot without provider keys now. System starts in setup mode.
         // Agents are initialized later when keys are added via API.
+
+        let default_mcp = toml
+            .defaults
+            .mcp
+            .into_iter()
+            .map(parse_mcp_server_config)
+            .collect::<Result<Vec<_>>>()?;
 
         let base_defaults = DefaultsConfig::default();
         let defaults = DefaultsConfig {
@@ -2366,12 +2756,18 @@ impl Config {
                     }
                 })
                 .unwrap_or_else(|| base_defaults.browser.clone()),
+            mcp: default_mcp,
             brave_search_key: toml
                 .defaults
                 .brave_search_key
                 .as_deref()
                 .and_then(resolve_env_value)
                 .or_else(|| std::env::var("BRAVE_SEARCH_API_KEY").ok()),
+            cron_timezone: toml
+                .defaults
+                .cron_timezone
+                .as_deref()
+                .and_then(resolve_env_value),
             history_backfill_count: base_defaults.history_backfill_count,
             cron: Vec::new(),
             opencode: toml
@@ -2442,7 +2838,7 @@ impl Config {
         let mut agents: Vec<AgentConfig> = toml
             .agents
             .into_iter()
-            .map(|a| {
+            .map(|a| -> Result<AgentConfig> {
                 // Per-agent routing resolves against instance defaults
                 let agent_routing = a
                     .routing
@@ -2466,7 +2862,7 @@ impl Config {
                     })
                     .collect();
 
-                AgentConfig {
+                Ok(AgentConfig {
                     id: a.id,
                     default: a.default,
                     workspace: a.workspace.map(PathBuf::from),
@@ -2558,11 +2954,21 @@ impl Config {
                             .map(PathBuf::from)
                             .or_else(|| defaults.browser.screenshot_dir.clone()),
                     }),
+                    mcp: match a.mcp {
+                        Some(mcp_servers) => Some(
+                            mcp_servers
+                                .into_iter()
+                                .map(parse_mcp_server_config)
+                                .collect::<Result<Vec<_>>>()?,
+                        ),
+                        None => None,
+                    },
                     brave_search_key: a.brave_search_key.as_deref().and_then(resolve_env_value),
+                    cron_timezone: a.cron_timezone.as_deref().and_then(resolve_env_value),
                     cron,
-                }
+                })
             })
-            .collect();
+            .collect::<Result<Vec<_>>>()?;
 
         if agents.is_empty() {
             agents.push(AgentConfig {
@@ -2581,7 +2987,9 @@ impl Config {
                 ingestion: None,
                 cortex: None,
                 browser: None,
+                mcp: None,
                 brave_search_key: None,
+                cron_timezone: None,
                 cron: Vec::new(),
             });
         }
@@ -2649,6 +3057,7 @@ impl Config {
                 enabled: w.enabled,
                 port: w.port,
                 bind: w.bind,
+                auth_token: w.auth_token.as_deref().and_then(resolve_env_value),
             }),
             twitch: toml.messaging.twitch.and_then(|t| {
                 let username = t
@@ -2661,10 +3070,28 @@ impl Config {
                     .as_deref()
                     .and_then(resolve_env_value)
                     .or_else(|| std::env::var("TWITCH_OAUTH_TOKEN").ok())?;
+                let client_id = t
+                    .client_id
+                    .as_deref()
+                    .and_then(resolve_env_value)
+                    .or_else(|| std::env::var("TWITCH_CLIENT_ID").ok());
+                let client_secret = t
+                    .client_secret
+                    .as_deref()
+                    .and_then(resolve_env_value)
+                    .or_else(|| std::env::var("TWITCH_CLIENT_SECRET").ok());
+                let refresh_token = t
+                    .refresh_token
+                    .as_deref()
+                    .and_then(resolve_env_value)
+                    .or_else(|| std::env::var("TWITCH_REFRESH_TOKEN").ok());
                 Some(TwitchConfig {
                     enabled: t.enabled,
                     username,
                     oauth_token,
+                    client_id,
+                    client_secret,
+                    refresh_token,
                     channels: t.channels,
                     trigger_prefix: t.trigger_prefix,
                 })
@@ -2690,6 +3117,7 @@ impl Config {
             enabled: toml.api.enabled,
             port: toml.api.port,
             bind: hosted_api_bind(toml.api.bind),
+            auth_token: toml.api.auth_token.as_deref().and_then(resolve_env_value),
         };
 
         let metrics = MetricsConfig {
@@ -2778,8 +3206,10 @@ pub struct RuntimeConfig {
     pub max_concurrent_branches: ArcSwap<usize>,
     pub max_concurrent_workers: ArcSwap<usize>,
     pub browser_config: ArcSwap<BrowserConfig>,
+    pub mcp: ArcSwap<Vec<McpServerConfig>>,
     pub history_backfill_count: ArcSwap<usize>,
     pub brave_search_key: ArcSwap<Option<String>>,
+    pub cron_timezone: ArcSwap<Option<String>>,
     pub cortex: ArcSwap<CortexConfig>,
     /// Memory injection configuration for the pre-hook system.
     pub memory_injection: ArcSwap<MemoryInjectionConfig>,
@@ -2831,8 +3261,10 @@ impl RuntimeConfig {
             max_concurrent_branches: ArcSwap::from_pointee(agent_config.max_concurrent_branches),
             max_concurrent_workers: ArcSwap::from_pointee(agent_config.max_concurrent_workers),
             browser_config: ArcSwap::from_pointee(agent_config.browser.clone()),
+            mcp: ArcSwap::from_pointee(agent_config.mcp.clone()),
             history_backfill_count: ArcSwap::from_pointee(agent_config.history_backfill_count),
             brave_search_key: ArcSwap::from_pointee(agent_config.brave_search_key.clone()),
+            cron_timezone: ArcSwap::from_pointee(agent_config.cron_timezone.clone()),
             cortex: ArcSwap::from_pointee(agent_config.cortex),
             memory_injection: ArcSwap::from_pointee(defaults.memory_injection),
             memory_bulletin: ArcSwap::from_pointee(String::new()),
@@ -2868,7 +3300,12 @@ impl RuntimeConfig {
     /// swaps all reloadable fields. Does not handle API keys (those are
     /// reloaded via LlmManager), DB paths, messaging adapters, or agent
     /// topology.
-    pub fn reload_config(&self, config: &Config, agent_id: &str) {
+    pub async fn reload_config(
+        &self,
+        config: &Config,
+        agent_id: &str,
+        mcp_manager: &crate::mcp::McpManager,
+    ) {
         let agent = config.agents.iter().find(|a| a.id == agent_id);
         let Some(agent) = agent else {
             tracing::warn!(agent_id, "agent not found in reloaded config, skipping");
@@ -2876,6 +3313,8 @@ impl RuntimeConfig {
         };
 
         let resolved = agent.resolve(&config.instance_dir, &config.defaults);
+        let old_mcp = (**self.mcp.load()).clone();
+        let new_mcp = resolved.mcp.clone();
 
         self.routing.store(Arc::new(resolved.routing));
         self.compaction.store(Arc::new(resolved.compaction));
@@ -2892,13 +3331,17 @@ impl RuntimeConfig {
         self.max_concurrent_workers
             .store(Arc::new(resolved.max_concurrent_workers));
         self.browser_config.store(Arc::new(resolved.browser));
+        self.mcp.store(Arc::new(new_mcp.clone()));
         self.history_backfill_count
             .store(Arc::new(resolved.history_backfill_count));
         self.brave_search_key
             .store(Arc::new(resolved.brave_search_key));
+        self.cron_timezone.store(Arc::new(resolved.cron_timezone));
         self.cortex.store(Arc::new(resolved.cortex));
         self.memory_injection
             .store(Arc::new(config.defaults.memory_injection));
+
+        mcp_manager.reconcile(&old_mcp, &new_mcp).await;
 
         tracing::info!(agent_id, "runtime config reloaded");
     }
@@ -2932,7 +3375,12 @@ impl std::fmt::Debug for RuntimeConfig {
 pub fn spawn_file_watcher(
     config_path: PathBuf,
     instance_dir: PathBuf,
-    agents: Vec<(String, PathBuf, Arc<RuntimeConfig>)>,
+    agents: Vec<(
+        String,
+        PathBuf,
+        Arc<RuntimeConfig>,
+        Arc<crate::mcp::McpManager>,
+    )>,
     discord_permissions: Option<Arc<arc_swap::ArcSwap<DiscordPermissions>>>,
     slack_permissions: Option<Arc<arc_swap::ArcSwap<SlackPermissions>>>,
     telegram_permissions: Option<Arc<arc_swap::ArcSwap<TelegramPermissions>>>,
@@ -2988,10 +3436,9 @@ pub fn spawn_file_watcher(
         }
 
         // Watch per-agent workspace directories (skills, identity)
-        for (_, workspace, _) in &agents {
+        for (_, workspace, _, _) in &agents {
             {
-                let subdir = &"skills";
-                let path = workspace.join(subdir);
+                let path = workspace.join("skills");
                 if path.is_dir()
                     && let Err(error) = watcher.watch(&path, RecursiveMode::Recursive)
                 {
@@ -3139,6 +3586,7 @@ pub fn spawn_file_watcher(
                     let slack_permissions = slack_permissions.clone();
                     let telegram_permissions = telegram_permissions.clone();
                     let twitch_permissions = twitch_permissions.clone();
+                    let instance_dir = instance_dir.clone();
 
                     rt.spawn(async move {
                         // Discord: start if enabled and not already running
@@ -3216,9 +3664,14 @@ pub fn spawn_file_watcher(
                                         Arc::new(arc_swap::ArcSwap::from_pointee(perms))
                                     }
                                 };
+                                let token_path = instance_dir.join("twitch_token.json");
                                 let adapter = crate::messaging::twitch::TwitchAdapter::new(
                                     &twitch_config.username,
                                     &twitch_config.oauth_token,
+                                    twitch_config.client_id.clone(),
+                                    twitch_config.client_secret.clone(),
+                                    twitch_config.refresh_token.clone(),
+                                    Some(token_path),
                                     twitch_config.channels.clone(),
                                     twitch_config.trigger_prefix.clone(),
                                     perms,
@@ -3232,9 +3685,10 @@ pub fn spawn_file_watcher(
             }
 
             // Apply reloads to each agent's RuntimeConfig
-            for (agent_id, workspace, runtime_config) in &agents {
+            for (agent_id, workspace, runtime_config, mcp_manager) in &agents {
                 if let Some(config) = &new_config {
-                    runtime_config.reload_config(config, agent_id);
+                    let rt = tokio::runtime::Handle::current();
+                    rt.block_on(runtime_config.reload_config(config, agent_id, mcp_manager));
                 }
 
                 if identity_changed {
@@ -3582,9 +4036,10 @@ mod tests {
 
     impl EnvGuard {
         fn new() -> Self {
-            const KEYS: [&str; 20] = [
+            const KEYS: [&str; 22] = [
                 "SPACEBOT_DIR",
                 "SPACEBOT_DEPLOYMENT",
+                "SPACEBOT_CRON_TIMEZONE",
                 "ANTHROPIC_API_KEY",
                 "ANTHROPIC_OAUTH_TOKEN",
                 "OPENAI_API_KEY",
@@ -3596,6 +4051,7 @@ mod tests {
                 "DEEPSEEK_API_KEY",
                 "XAI_API_KEY",
                 "MISTRAL_API_KEY",
+                "GEMINI_API_KEY",
                 "NVIDIA_API_KEY",
                 "OLLAMA_API_KEY",
                 "OLLAMA_BASE_URL",
@@ -3724,6 +4180,9 @@ api_key = "sk-proj-xyz789"
 
     #[test]
     fn test_llm_provider_tables_parse_with_env_and_lowercase_keys() {
+        let _lock = env_test_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let _env = EnvGuard::new();
+
         let toml = r#"
 [llm.provider.MyProv]
 api_type = "openai_responses"
@@ -3937,5 +4396,86 @@ bind = "127.0.0.1"
             .expect("failed to load config from env");
 
         assert_eq!(config.api.bind, "[::]");
+    }
+
+    #[test]
+    fn test_cron_timezone_resolution_precedence() {
+        let _lock = env_test_lock()
+            .lock()
+            .expect("failed to lock env test mutex");
+        let _env = EnvGuard::new();
+
+        unsafe {
+            std::env::set_var(CRON_TIMEZONE_ENV_VAR, "Asia/Tokyo");
+        }
+
+        let toml = r#"
+[defaults]
+cron_timezone = "America/New_York"
+
+[[agents]]
+id = "main"
+cron_timezone = "Europe/Berlin"
+"#;
+
+        let parsed: TomlConfig = toml::from_str(toml).expect("failed to parse test TOML");
+        let config = Config::from_toml(parsed, PathBuf::from(".")).expect("failed to build Config");
+
+        assert_eq!(
+            config.defaults.cron_timezone.as_deref(),
+            Some("America/New_York")
+        );
+        assert_eq!(
+            config.agents[0].cron_timezone.as_deref(),
+            Some("Europe/Berlin")
+        );
+
+        let resolved = config.agents[0].resolve(&config.instance_dir, &config.defaults);
+        assert_eq!(resolved.cron_timezone.as_deref(), Some("Europe/Berlin"));
+
+        let toml_without_agent_override = r#"
+[defaults]
+cron_timezone = "America/New_York"
+
+[[agents]]
+id = "main"
+"#;
+        let parsed: TomlConfig =
+            toml::from_str(toml_without_agent_override).expect("failed to parse test TOML");
+        let config = Config::from_toml(parsed, PathBuf::from(".")).expect("failed to build Config");
+        let resolved = config.agents[0].resolve(&config.instance_dir, &config.defaults);
+        assert_eq!(resolved.cron_timezone.as_deref(), Some("America/New_York"));
+
+        let toml_without_default = r#"
+[[agents]]
+id = "main"
+"#;
+        let parsed: TomlConfig =
+            toml::from_str(toml_without_default).expect("failed to parse test TOML");
+        let config = Config::from_toml(parsed, PathBuf::from(".")).expect("failed to build Config");
+        let resolved = config.agents[0].resolve(&config.instance_dir, &config.defaults);
+        assert_eq!(resolved.cron_timezone.as_deref(), Some("Asia/Tokyo"));
+    }
+
+    #[test]
+    fn test_cron_timezone_invalid_falls_back_to_system() {
+        let _lock = env_test_lock()
+            .lock()
+            .expect("failed to lock env test mutex");
+        let _env = EnvGuard::new();
+
+        unsafe {
+            std::env::set_var(CRON_TIMEZONE_ENV_VAR, "Not/A-Real-Tz");
+        }
+
+        let toml = r#"
+[[agents]]
+id = "main"
+"#;
+
+        let parsed: TomlConfig = toml::from_str(toml).expect("failed to parse test TOML");
+        let config = Config::from_toml(parsed, PathBuf::from(".")).expect("failed to build Config");
+        let resolved = config.agents[0].resolve(&config.instance_dir, &config.defaults);
+        assert_eq!(resolved.cron_timezone, None);
     }
 }
