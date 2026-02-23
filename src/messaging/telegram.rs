@@ -312,42 +312,80 @@ impl Messaging for TelegramAdapter {
             OutboundResponse::File {
                 filename,
                 data,
-                mime_type: _,
+                mime_type,
                 caption,
             } => {
                 self.stop_typing(&message.conversation_id).await;
 
-                let input_file = InputFile::memory(data.clone()).file_name(filename.clone());
-                let sent = if let Some(ref caption_text) = caption {
-                    let html_caption = markdown_to_telegram_html(caption_text);
-                    self.bot
-                        .send_document(chat_id, input_file)
-                        .caption(&html_caption)
-                        .parse_mode(ParseMode::Html)
-                        .send()
-                        .await
-                } else {
-                    self.bot.send_document(chat_id, input_file).send().await
-                };
-
-                if let Err(error) = sent {
-                    if should_retry_plain_caption(&error) {
-                        tracing::debug!(
-                            %error,
-                            "HTML caption parse failed, retrying telegram file with plain caption"
-                        );
-                        let fallback_file = InputFile::memory(data).file_name(filename);
-                        let mut request = self.bot.send_document(chat_id, fallback_file);
-                        if let Some(caption_text) = caption {
-                            request = request.caption(caption_text);
-                        }
-                        request
+                // Use send_audio for audio files so Telegram renders an inline player.
+                // Fall back to send_document for everything else.
+                if mime_type.starts_with("audio/") {
+                    let input_file = InputFile::memory(data.clone()).file_name(filename.clone());
+                    let sent = if let Some(ref caption_text) = caption {
+                        let html_caption = markdown_to_telegram_html(caption_text);
+                        self.bot
+                            .send_audio(chat_id, input_file)
+                            .caption(&html_caption)
+                            .parse_mode(ParseMode::Html)
                             .send()
                             .await
-                            .context("failed to send telegram file")?;
                     } else {
-                        return Err(error)
-                            .context("failed to send telegram file with HTML caption")?;
+                        self.bot.send_audio(chat_id, input_file).send().await
+                    };
+
+                    if let Err(error) = sent {
+                        if should_retry_plain_caption(&error) {
+                            tracing::debug!(
+                                %error,
+                                "HTML caption parse failed, retrying telegram audio with plain caption"
+                            );
+                            let fallback_file = InputFile::memory(data).file_name(filename);
+                            let mut request = self.bot.send_audio(chat_id, fallback_file);
+                            if let Some(caption_text) = caption {
+                                request = request.caption(caption_text);
+                            }
+                            request
+                                .send()
+                                .await
+                                .context("failed to send telegram audio")?;
+                        } else {
+                            return Err(error)
+                                .context("failed to send telegram audio with HTML caption")?;
+                        }
+                    }
+                } else {
+                    let input_file = InputFile::memory(data.clone()).file_name(filename.clone());
+                    let sent = if let Some(ref caption_text) = caption {
+                        let html_caption = markdown_to_telegram_html(caption_text);
+                        self.bot
+                            .send_document(chat_id, input_file)
+                            .caption(&html_caption)
+                            .parse_mode(ParseMode::Html)
+                            .send()
+                            .await
+                    } else {
+                        self.bot.send_document(chat_id, input_file).send().await
+                    };
+
+                    if let Err(error) = sent {
+                        if should_retry_plain_caption(&error) {
+                            tracing::debug!(
+                                %error,
+                                "HTML caption parse failed, retrying telegram file with plain caption"
+                            );
+                            let fallback_file = InputFile::memory(data).file_name(filename);
+                            let mut request = self.bot.send_document(chat_id, fallback_file);
+                            if let Some(caption_text) = caption {
+                                request = request.caption(caption_text);
+                            }
+                            request
+                                .send()
+                                .await
+                                .context("failed to send telegram file")?;
+                        } else {
+                            return Err(error)
+                                .context("failed to send telegram file with HTML caption")?;
+                        }
                     }
                 }
             }
