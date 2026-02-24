@@ -61,6 +61,21 @@ pub(super) struct MemoryPersistenceSection {
 }
 
 #[derive(Serialize, Debug)]
+pub(super) struct MemoryInjectionSection {
+    enabled: bool,
+    search_limit: usize,
+    contextual_min_score: f32,
+    context_window_depth: usize,
+    semantic_threshold: f32,
+    pinned_types: Vec<String>,
+    ambient_enabled: bool,
+    pinned_limit: i64,
+    pinned_sort: String,
+    max_total: usize,
+    max_injected_blocks_in_history: usize,
+}
+
+#[derive(Serialize, Debug)]
 pub(super) struct BrowserSection {
     enabled: bool,
     headless: bool,
@@ -81,6 +96,7 @@ pub(super) struct AgentConfigResponse {
     cortex: CortexSection,
     coalesce: CoalesceSection,
     memory_persistence: MemoryPersistenceSection,
+    memory_injection: MemoryInjectionSection,
     browser: BrowserSection,
     discord: DiscordSection,
 }
@@ -105,6 +121,8 @@ pub(super) struct AgentConfigUpdateRequest {
     coalesce: Option<CoalesceUpdate>,
     #[serde(default)]
     memory_persistence: Option<MemoryPersistenceUpdate>,
+    #[serde(default)]
+    memory_injection: Option<MemoryInjectionUpdate>,
     #[serde(default)]
     browser: Option<BrowserUpdate>,
     #[serde(default)]
@@ -166,6 +184,21 @@ pub(super) struct MemoryPersistenceUpdate {
 }
 
 #[derive(Deserialize, Debug)]
+pub(super) struct MemoryInjectionUpdate {
+    enabled: Option<bool>,
+    search_limit: Option<usize>,
+    contextual_min_score: Option<f32>,
+    context_window_depth: Option<usize>,
+    semantic_threshold: Option<f32>,
+    pinned_types: Option<Vec<String>>,
+    ambient_enabled: Option<bool>,
+    pinned_limit: Option<i64>,
+    pinned_sort: Option<String>,
+    max_total: Option<usize>,
+    max_injected_blocks_in_history: Option<usize>,
+}
+
+#[derive(Deserialize, Debug)]
 pub(super) struct BrowserUpdate {
     enabled: Option<bool>,
     headless: Option<bool>,
@@ -193,6 +226,7 @@ pub(super) async fn get_agent_config(
     let cortex = rc.cortex.load();
     let coalesce = rc.coalesce.load();
     let memory_persistence = rc.memory_persistence.load();
+    let memory_injection = rc.memory_injection.load();
     let browser = rc.browser_config.load();
 
     let response = AgentConfigResponse {
@@ -237,6 +271,19 @@ pub(super) async fn get_agent_config(
         memory_persistence: MemoryPersistenceSection {
             enabled: memory_persistence.enabled,
             message_interval: memory_persistence.message_interval,
+        },
+        memory_injection: MemoryInjectionSection {
+            enabled: memory_injection.enabled,
+            search_limit: memory_injection.search_limit,
+            contextual_min_score: memory_injection.contextual_min_score,
+            context_window_depth: memory_injection.context_window_depth,
+            semantic_threshold: memory_injection.semantic_threshold,
+            pinned_types: memory_injection.pinned_types.clone(),
+            ambient_enabled: memory_injection.ambient_enabled,
+            pinned_limit: memory_injection.pinned_limit,
+            pinned_sort: memory_injection.pinned_sort.clone(),
+            max_total: memory_injection.max_total,
+            max_injected_blocks_in_history: memory_injection.max_injected_blocks_in_history,
         },
         browser: BrowserSection {
             enabled: browser.enabled,
@@ -309,6 +356,9 @@ pub(super) async fn update_agent_config(
     }
     if let Some(memory_persistence) = &request.memory_persistence {
         update_memory_persistence_table(&mut doc, agent_idx, memory_persistence)?;
+    }
+    if let Some(memory_injection) = &request.memory_injection {
+        update_memory_injection_table(&mut doc, agent_idx, memory_injection)?;
     }
     if let Some(browser) = &request.browser {
         update_browser_table(&mut doc, agent_idx, browser)?;
@@ -562,6 +612,53 @@ fn update_memory_persistence_table(
     }
     if let Some(v) = memory_persistence.message_interval {
         table["message_interval"] = toml_edit::value(v as i64);
+    }
+    Ok(())
+}
+
+fn update_memory_injection_table(
+    doc: &mut toml_edit::DocumentMut,
+    agent_idx: usize,
+    memory_injection: &MemoryInjectionUpdate,
+) -> Result<(), StatusCode> {
+    let agent = get_agent_table_mut(doc, agent_idx)?;
+    let table = get_or_create_subtable(agent, "memory_injection")?;
+    if let Some(v) = memory_injection.enabled {
+        table["enabled"] = toml_edit::value(v);
+    }
+    if let Some(v) = memory_injection.search_limit {
+        table["search_limit"] = toml_edit::value(v as i64);
+    }
+    if let Some(v) = memory_injection.contextual_min_score {
+        table["contextual_min_score"] = toml_edit::value(v as f64);
+    }
+    if let Some(v) = memory_injection.context_window_depth {
+        table["context_window_depth"] = toml_edit::value(v as i64);
+    }
+    if let Some(v) = memory_injection.semantic_threshold {
+        table["semantic_threshold"] = toml_edit::value(v as f64);
+    }
+    if let Some(v) = &memory_injection.pinned_types {
+        let mut array = toml_edit::Array::default();
+        for memory_type in v {
+            array.push(memory_type);
+        }
+        table["pinned_types"] = toml_edit::Item::Value(array.into());
+    }
+    if let Some(v) = memory_injection.ambient_enabled {
+        table["ambient_enabled"] = toml_edit::value(v);
+    }
+    if let Some(v) = memory_injection.pinned_limit {
+        table["pinned_limit"] = toml_edit::value(v);
+    }
+    if let Some(v) = &memory_injection.pinned_sort {
+        table["pinned_sort"] = toml_edit::value(v.as_str());
+    }
+    if let Some(v) = memory_injection.max_total {
+        table["max_total"] = toml_edit::value(v as i64);
+    }
+    if let Some(v) = memory_injection.max_injected_blocks_in_history {
+        table["max_injected_blocks_in_history"] = toml_edit::value(v as i64);
     }
     Ok(())
 }

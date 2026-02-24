@@ -647,6 +647,7 @@ pub struct AgentConfig {
     pub ingestion: Option<IngestionConfig>,
     pub cortex: Option<CortexConfig>,
     pub browser: Option<BrowserConfig>,
+    pub memory_injection: Option<MemoryInjectionConfig>,
     pub mcp: Option<Vec<McpServerConfig>>,
     /// Per-agent Brave Search API key override. None inherits from defaults.
     pub brave_search_key: Option<String>,
@@ -692,6 +693,7 @@ pub struct ResolvedAgentConfig {
     pub ingestion: IngestionConfig,
     pub cortex: CortexConfig,
     pub browser: BrowserConfig,
+    pub memory_injection: MemoryInjectionConfig,
     pub mcp: Vec<McpServerConfig>,
     pub brave_search_key: Option<String>,
     pub cron_timezone: Option<String>,
@@ -764,6 +766,10 @@ impl AgentConfig {
                 .browser
                 .clone()
                 .unwrap_or_else(|| defaults.browser.clone()),
+            memory_injection: self
+                .memory_injection
+                .clone()
+                .unwrap_or_else(|| defaults.memory_injection.clone()),
             mcp: resolve_mcp_configs(&defaults.mcp, self.mcp.as_deref()),
             brave_search_key: self
                 .brave_search_key
@@ -1691,6 +1697,7 @@ struct TomlAgentConfig {
     ingestion: Option<TomlIngestionConfig>,
     cortex: Option<TomlCortexConfig>,
     browser: Option<TomlBrowserConfig>,
+    memory_injection: Option<TomlMemoryInjectionConfig>,
     mcp: Option<Vec<TomlMcpServerConfig>>,
     brave_search_key: Option<String>,
     cron_timezone: Option<String>,
@@ -2295,6 +2302,7 @@ impl Config {
             ingestion: None,
             cortex: None,
             browser: None,
+            memory_injection: None,
             mcp: None,
             brave_search_key: None,
             cron_timezone: None,
@@ -3001,6 +3009,55 @@ impl Config {
                             .map(PathBuf::from)
                             .or_else(|| defaults.browser.screenshot_dir.clone()),
                     }),
+                    memory_injection: a.memory_injection.map(|mi| {
+                        let base = &defaults.memory_injection;
+                        let pinned_types = mi
+                            .pinned_types
+                            .unwrap_or_else(|| base.pinned_types.clone())
+                            .into_iter()
+                            .filter(|memory_type| {
+                                let is_valid = crate::memory::MemoryType::ALL
+                                    .iter()
+                                    .any(|candidate| candidate.to_string() == *memory_type);
+                                if !is_valid {
+                                    tracing::warn!(
+                                        memory_type = %memory_type,
+                                        "invalid agents[].memory_injection.pinned_types entry, dropping"
+                                    );
+                                }
+                                is_valid
+                            })
+                            .collect::<Vec<_>>();
+
+                        let pinned_sort = match mi.pinned_sort {
+                            Some(sort) if sort == "recent" || sort == "importance" => sort,
+                            Some(sort) => {
+                                tracing::warn!(sort = %sort, "invalid agents[].memory_injection.pinned_sort, using default");
+                                base.pinned_sort.clone()
+                            }
+                            None => base.pinned_sort.clone(),
+                        };
+
+                        MemoryInjectionConfig {
+                            enabled: mi.enabled.unwrap_or(base.enabled),
+                            search_limit: mi.search_limit.unwrap_or(base.search_limit),
+                            contextual_min_score: mi
+                                .contextual_min_score
+                                .unwrap_or(base.contextual_min_score),
+                            context_window_depth: mi
+                                .context_window_depth
+                                .unwrap_or(base.context_window_depth),
+                            semantic_threshold: mi.semantic_threshold.unwrap_or(base.semantic_threshold),
+                            pinned_types,
+                            ambient_enabled: mi.ambient_enabled.unwrap_or(base.ambient_enabled),
+                            pinned_limit: mi.pinned_limit.unwrap_or(base.pinned_limit),
+                            pinned_sort,
+                            max_total: mi.max_total.unwrap_or(base.max_total),
+                            max_injected_blocks_in_history: mi
+                                .max_injected_blocks_in_history
+                                .unwrap_or(base.max_injected_blocks_in_history),
+                        }
+                    }),
                     mcp: match a.mcp {
                         Some(mcp_servers) => Some(
                             mcp_servers
@@ -3034,6 +3091,7 @@ impl Config {
                 ingestion: None,
                 cortex: None,
                 browser: None,
+                memory_injection: None,
                 mcp: None,
                 brave_search_key: None,
                 cron_timezone: None,
@@ -3313,7 +3371,7 @@ impl RuntimeConfig {
             brave_search_key: ArcSwap::from_pointee(agent_config.brave_search_key.clone()),
             cron_timezone: ArcSwap::from_pointee(agent_config.cron_timezone.clone()),
             cortex: ArcSwap::from_pointee(agent_config.cortex),
-            memory_injection: ArcSwap::from_pointee(defaults.memory_injection.clone()),
+            memory_injection: ArcSwap::from_pointee(agent_config.memory_injection.clone()),
             memory_bulletin: ArcSwap::from_pointee(String::new()),
             prompts: ArcSwap::from_pointee(prompts),
             identity: ArcSwap::from_pointee(identity),
@@ -3386,7 +3444,7 @@ impl RuntimeConfig {
         self.cron_timezone.store(Arc::new(resolved.cron_timezone));
         self.cortex.store(Arc::new(resolved.cortex));
         self.memory_injection
-            .store(Arc::new(config.defaults.memory_injection.clone()));
+            .store(Arc::new(resolved.memory_injection));
 
         mcp_manager.reconcile(&old_mcp, &new_mcp).await;
 

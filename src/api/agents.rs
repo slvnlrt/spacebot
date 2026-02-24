@@ -294,6 +294,7 @@ pub(super) async fn create_agent(
         ingestion: None,
         cortex: None,
         browser: None,
+        memory_injection: None,
         mcp: None,
         brave_search_key: None,
         cron_timezone: None,
