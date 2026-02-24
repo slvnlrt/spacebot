@@ -1,0 +1,44 @@
+{
+    "name": "Spacebot Dev",
+    "image": "mcr.microsoft.com/devcontainers/rust:1-bookworm",
+    "remoteUser": "root",
+
+    "features": {
+        "ghcr.io/devcontainers/features/node:1": {
+            "version": "lts"
+        },
+        "ghcr.io/devcontainers/features/docker-outside-of-docker:1": {
+            "version": "latest",
+            "enableNonRootDocker": "true",
+            "moby": "true"
+        }
+    },
+
+    "mounts": [
+        {
+            "source": "devcontainer-cargo-cache-${devcontainerId}",
+            "target": "/usr/local/cargo/registry",
+            "type": "volume"
+        }
+    ],
+
+    // Installe les prérequis Rust, Bun, puis les dépendances Node.js du front-end via npm
+    "postCreateCommand": "apt-get update && apt-get install -y protobuf-compiler && npm install -g bun && cd interface && npm install",
+
+    "forwardPorts": [19898],
+
+    "customizations": {
+        "vscode": {
+            "settings": {
+                "rust-analyzer.check.command": "clippy"
+            },
+            "extensions": [
+                "rust-lang.rust-analyzer",
+                "tamasfe.even-better-toml",
+                "esbenp.prettier-vscode",
+                "dbaeumer.vscode-eslint",
+                "ms-azuretools.vscode-docker"
+            ]
+        }
+    }
+}
