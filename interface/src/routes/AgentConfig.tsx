@@ -14,7 +14,7 @@ function supportsAdaptiveThinking(modelId: string): boolean {
 		|| id.includes("sonnet-4-6") || id.includes("sonnet-4.6");
 }
 
-type SectionId = "soul" | "identity" | "user" | "routing" | "tuning" | "compaction" | "cortex" | "coalesce" | "memory" | "browser";
+type SectionId = "soul" | "identity" | "user" | "routing" | "tuning" | "compaction" | "cortex" | "coalesce" | "memory" | "memory_injection" | "browser";
 
 const SECTIONS: {
 	id: SectionId;
@@ -32,6 +32,7 @@ const SECTIONS: {
 	{ id: "cortex", label: "Cortex", group: "config", description: "System observer settings", detail: "The cortex monitors active processes and generates memory bulletins. Tick interval controls observation frequency. Timeouts determine when stuck workers or branches get cancelled. The circuit breaker auto-disables after consecutive failures." },
 	{ id: "coalesce", label: "Coalesce", group: "config", description: "Message batching", detail: "When multiple messages arrive in quick succession, coalescing batches them into a single LLM turn. This prevents the agent from responding to each message individually in fast-moving conversations." },
 	{ id: "memory", label: "Memory Persistence", group: "config", description: "Auto-save interval", detail: "Spawns a silent background branch at regular intervals to recall existing memories and save new ones from the recent conversation. Runs without blocking the channel." },
+	{ id: "memory_injection", label: "Memory Injection", group: "config", description: "Per-agent retrieval and dedup", detail: "Controls pre-hook memory retrieval for this specific agent: contextual search budget, dedup thresholds, ambient pinned types, and history block persistence for injected context." },
 	{ id: "browser", label: "Browser", group: "config", description: "Chrome automation", detail: "Controls browser automation tools available to workers. When enabled, workers can navigate web pages, take screenshots, and interact with sites. JavaScript evaluation is a separate permission." },
 ];
 
@@ -62,7 +63,7 @@ export function AgentConfig({ agentId }: AgentConfigProps) {
 	// Sync activeSection with URL search param
 	useEffect(() => {
 		if (search.tab) {
-			const validSections: SectionId[] = ["soul", "identity", "user", "routing", "tuning", "compaction", "cortex", "coalesce", "memory", "browser"];
+			const validSections: SectionId[] = ["soul", "identity", "user", "routing", "tuning", "compaction", "cortex", "coalesce", "memory", "memory_injection", "browser"];
 			if (validSections.includes(search.tab as SectionId)) {
 				setActiveSection(search.tab as SectionId);
 			}
@@ -385,7 +386,7 @@ interface ConfigSectionEditorProps {
 }
 
 function ConfigSectionEditor({ sectionId, label, description, detail, config, onDirtyChange, saveHandlerRef, onSave }: ConfigSectionEditorProps) {
-	const [localValues, setLocalValues] = useState<Record<string, string | number | boolean>>(() => {
+	const [localValues, setLocalValues] = useState<Record<string, string | number | boolean | string[]>>(() => {
 		// Initialize from config based on section
 		switch (sectionId) {
 			case "routing":
@@ -400,6 +401,8 @@ function ConfigSectionEditor({ sectionId, label, description, detail, config, on
 				return { ...config.coalesce };
 			case "memory":
 				return { ...config.memory_persistence };
+			case "memory_injection":
+				return { ...config.memory_injection };
 			case "browser":
 				return { ...config.browser };
 			default:
@@ -435,6 +438,9 @@ function ConfigSectionEditor({ sectionId, label, description, detail, config, on
 				case "memory":
 					setLocalValues({ ...config.memory_persistence });
 					break;
+				case "memory_injection":
+					setLocalValues({ ...config.memory_injection });
+					break;
 				case "browser":
 					setLocalValues({ ...config.browser });
 					break;
@@ -442,13 +448,23 @@ function ConfigSectionEditor({ sectionId, label, description, detail, config, on
 		}
 	}, [config, sectionId, localDirty]);
 
-	const handleChange = useCallback((field: string, value: string | number | boolean) => {
+	const handleChange = useCallback((field: string, value: string | number | boolean | string[]) => {
 		setLocalValues((prev) => ({ ...prev, [field]: value }));
 		setLocalDirty(true);
 	}, []);
 
 	const handleSave = useCallback(() => {
-		onSave({ [sectionId]: localValues });
+		switch (sectionId) {
+			case "memory":
+				onSave({ memory_persistence: localValues });
+				break;
+			case "memory_injection":
+				onSave({ memory_injection: localValues });
+				break;
+			default:
+				onSave({ [sectionId]: localValues });
+				break;
+		}
 		setLocalDirty(false);
 	}, [onSave, sectionId, localValues]);
 
@@ -471,6 +487,9 @@ function ConfigSectionEditor({ sectionId, label, description, detail, config, on
 				break;
 			case "memory":
 				setLocalValues({ ...config.memory_persistence });
+				break;
+			case "memory_injection":
+				setLocalValues({ ...config.memory_injection });
 				break;
 			case "browser":
 				setLocalValues({ ...config.browser });
@@ -785,6 +804,135 @@ function ConfigSectionEditor({ sectionId, label, description, detail, config, on
 						/>
 					</div>
 				);
+			case "memory_injection": {
+				const pinnedTypes = ((localValues.pinned_types as string[]) ?? []) as string[];
+				const togglePinnedType = (memoryType: string) => {
+					const next = pinnedTypes.includes(memoryType)
+						? pinnedTypes.filter((value) => value !== memoryType)
+						: [...pinnedTypes, memoryType];
+					handleChange("pinned_types", next);
+				};
+
+				const memoryTypeOptions = [
+					"identity",
+					"goal",
+					"decision",
+					"todo",
+					"preference",
+					"fact",
+					"event",
+					"observation",
+				];
+
+				return (
+					<div className="grid gap-4">
+						<ConfigToggleField
+							label="Enabled"
+							description="Enable memory injection pre-hook for this agent"
+							value={localValues.enabled as boolean}
+							onChange={(v) => handleChange("enabled", v)}
+						/>
+						<NumberStepper
+							label="Search Limit"
+							description="Maximum contextual memories retrieved by hybrid search"
+							value={localValues.search_limit as number}
+							onChange={(v) => handleChange("search_limit", v)}
+							min={1}
+							max={100}
+						/>
+						<NumberStepper
+							label="Context Min Score"
+							description="Minimum hybrid score for contextual candidates"
+							value={localValues.contextual_min_score as number}
+							onChange={(v) => handleChange("contextual_min_score", v)}
+							min={0}
+							max={0.05}
+							step={0.001}
+							type="float"
+						/>
+						<NumberStepper
+							label="Semantic Threshold"
+							description="Cosine similarity threshold for semantic deduplication"
+							value={localValues.semantic_threshold as number}
+							onChange={(v) => handleChange("semantic_threshold", v)}
+							min={0.5}
+							max={1}
+							step={0.01}
+							type="float"
+						/>
+						<NumberStepper
+							label="Re-injection Delay"
+							description="Turns before a memory can be injected again"
+							value={localValues.context_window_depth as number}
+							onChange={(v) => handleChange("context_window_depth", v)}
+							min={1}
+							max={200}
+							suffix=" turns"
+						/>
+						<NumberStepper
+							label="Max Total"
+							description="Hard cap across pinned and contextual memories"
+							value={localValues.max_total as number}
+							onChange={(v) => handleChange("max_total", v)}
+							min={1}
+							max={200}
+						/>
+						<NumberStepper
+							label="History Block Limit"
+							description="Maximum injected context blocks kept in history (0 = ephemeral)"
+							value={localValues.max_injected_blocks_in_history as number}
+							onChange={(v) => handleChange("max_injected_blocks_in_history", v)}
+							min={0}
+							max={10}
+						/>
+						<ConfigToggleField
+							label="Ambient Enabled"
+							description="Enable always-on pinned type retrieval"
+							value={localValues.ambient_enabled as boolean}
+							onChange={(v) => handleChange("ambient_enabled", v)}
+						/>
+						<NumberStepper
+							label="Pinned Limit"
+							description="Maximum memories per pinned type"
+							value={localValues.pinned_limit as number}
+							onChange={(v) => handleChange("pinned_limit", v)}
+							min={1}
+							max={20}
+						/>
+						<div className="flex flex-col gap-1.5">
+							<label className="text-sm font-medium text-ink">Pinned Sort</label>
+							<p className="text-tiny text-ink-faint">Ordering strategy for pinned memories</p>
+							<Select
+								value={(localValues.pinned_sort as string) || "recent"}
+								onValueChange={(value) => handleChange("pinned_sort", value)}
+							>
+								<SelectTrigger className="border-app-line/50 bg-app-darkBox/30">
+									<SelectValue />
+								</SelectTrigger>
+								<SelectContent>
+									<SelectItem value="recent">recent</SelectItem>
+									<SelectItem value="importance">importance</SelectItem>
+								</SelectContent>
+							</Select>
+						</div>
+						<div className="flex flex-col gap-2">
+							<label className="text-sm font-medium text-ink">Pinned Types</label>
+							<p className="text-tiny text-ink-faint">Always inject these memory types when ambient mode is enabled</p>
+							<div className="grid grid-cols-2 gap-2">
+								{memoryTypeOptions.map((memoryType) => (
+									<Button
+										key={memoryType}
+										onClick={() => togglePinnedType(memoryType)}
+										variant={pinnedTypes.includes(memoryType) ? "primary" : "secondary"}
+									>
+										{memoryType}
+									</Button>
+								))}
+							</div>
+						</div>
+					</div>
+				);
+			}
 			default:
 				return null;
 		}

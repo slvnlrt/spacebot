@@ -509,6 +509,20 @@ export interface MemoryPersistenceSection {
 	message_interval: number;
 }
 
+export interface MemoryInjectionSection {
+	enabled: boolean;
+	search_limit: number;
+	contextual_min_score: number;
+	context_window_depth: number;
+	semantic_threshold: number;
+	pinned_types: string[];
+	ambient_enabled: boolean;
+	pinned_limit: number;
+	pinned_sort: string;
+	max_total: number;
+	max_injected_blocks_in_history: number;
+}
+
 export interface BrowserSection {
 	enabled: boolean;
 	headless: boolean;
@@ -527,6 +541,7 @@ export interface AgentConfigResponse {
 	cortex: CortexSection;
 	coalesce: CoalesceSection;
 	memory_persistence: MemoryPersistenceSection;
+	memory_injection: MemoryInjectionSection;
 	browser: BrowserSection;
 	discord: DiscordSection;
 }
@@ -585,6 +600,20 @@ export interface MemoryPersistenceUpdate {
 	message_interval?: number;
 }
 
+export interface MemoryInjectionUpdate {
+	enabled?: boolean;
+	search_limit?: number;
+	contextual_min_score?: number;
+	context_window_depth?: number;
+	semantic_threshold?: number;
+	pinned_types?: string[];
+	ambient_enabled?: boolean;
+	pinned_limit?: number;
+	pinned_sort?: string;
+	max_total?: number;
+	max_injected_blocks_in_history?: number;
+}
+
 export interface BrowserUpdate {
 	enabled?: boolean;
 	headless?: boolean;
@@ -603,6 +632,7 @@ export interface AgentConfigUpdateRequest {
 	cortex?: CortexUpdate;
 	coalesce?: CoalesceUpdate;
 	memory_persistence?: MemoryPersistenceUpdate;
+	memory_injection?: MemoryInjectionUpdate;
 	browser?: BrowserUpdate;
 	discord?: DiscordUpdate;
 }
