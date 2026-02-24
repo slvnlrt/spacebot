@@ -1267,7 +1267,7 @@ function MemoryInjectionSection({settings, isLoading}: GlobalSettingsSectionProp
 												<Button
 													key={memoryType}
 													onClick={() => togglePinnedType(memoryType)}
-													variant={pinnedTypes.includes(memoryType) ? "primary" : "secondary"}
+													variant={pinnedTypes.includes(memoryType) ? "default" : "secondary"}
 												>
 													{memoryType}
 												</Button>
