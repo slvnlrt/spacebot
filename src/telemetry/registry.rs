@@ -74,6 +74,14 @@ pub struct Metrics {
     /// Memory mutation operations.
     /// Labels: agent_id, operation (save/update/delete/forget).
     pub memory_updates_total: IntCounterVec,
+
+    /// Dispatch attempts while readiness contract is not satisfied.
+    /// Labels: agent_id, dispatch_type, reason.
+    pub dispatch_while_cold_count: IntCounterVec,
+
+    /// Time-to-recovery for forced warmup passes kicked by dispatch paths, in ms.
+    /// Labels: agent_id, dispatch_type.
+    pub warmup_recovery_latency_ms: HistogramVec,
 }
 
 impl Metrics {
@@ -112,7 +120,9 @@ impl Metrics {
                 "spacebot_llm_request_duration_seconds",
                 "LLM request duration in seconds",
             )
-            .buckets(vec![0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 15.0, 30.0, 60.0, 120.0]),
+            .buckets(vec![
+                0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 15.0, 30.0, 60.0, 120.0,
+            ]),
             &["agent_id", "model", "tier"],
         )
         .expect("hardcoded metric descriptor");
@@ -167,16 +177,15 @@ impl Metrics {
                 "spacebot_worker_duration_seconds",
                 "Worker lifetime duration in seconds",
             )
-            .buckets(vec![1.0, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0, 1800.0]),
+            .buckets(vec![
+                1.0, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0, 1800.0,
+            ]),
             &["agent_id", "worker_type"],
         )
         .expect("hardcoded metric descriptor");
 
         let process_errors_total = IntCounterVec::new(
-            Opts::new(
-                "spacebot_process_errors_total",
-                "Process errors by type",
-            ),
+            Opts::new("spacebot_process_errors_total", "Process errors by type"),
             &["agent_id", "process_type", "error_type"],
         )
         .expect("hardcoded metric descriptor");
@@ -187,6 +196,27 @@ impl Metrics {
                 "Memory mutation operations",
             ),
             &["agent_id", "operation"],
+        )
+        .expect("hardcoded metric descriptor");
+
+        let dispatch_while_cold_count = IntCounterVec::new(
+            Opts::new(
+                "spacebot_dispatch_while_cold_count",
+                "Dispatch attempts while readiness contract is unsatisfied",
+            ),
+            &["agent_id", "dispatch_type", "reason"],
+        )
+        .expect("hardcoded metric descriptor");
+
+        let warmup_recovery_latency_ms = HistogramVec::new(
+            HistogramOpts::new(
+                "spacebot_warmup_recovery_latency_ms",
+                "Forced warmup recovery latency in milliseconds",
+            )
+            .buckets(vec![
+                25.0, 50.0, 100.0, 250.0, 500.0, 1000.0, 2500.0, 5000.0, 10_000.0, 30_000.0,
+            ]),
+            &["agent_id", "dispatch_type"],
         )
         .expect("hardcoded metric descriptor");
 
@@ -232,6 +262,12 @@ impl Metrics {
         registry
             .register(Box::new(memory_updates_total.clone()))
             .expect("hardcoded metric");
+        registry
+            .register(Box::new(dispatch_while_cold_count.clone()))
+            .expect("hardcoded metric");
+        registry
+            .register(Box::new(warmup_recovery_latency_ms.clone()))
+            .expect("hardcoded metric");
 
         Self {
             registry,
@@ -249,6 +285,8 @@ impl Metrics {
             worker_duration_seconds,
             process_errors_total,
             memory_updates_total,
+            dispatch_while_cold_count,
+            warmup_recovery_latency_ms,
         }
     }
 

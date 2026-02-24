@@ -5,7 +5,7 @@ use crate::llm::routing::RoutingConfig;
 use anyhow::Context as _;
 use arc_swap::ArcSwap;
 use chrono_tz::Tz;
-use serde::{Deserialize, Deserializer};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -42,6 +42,12 @@ pub struct Config {
     pub defaults: DefaultsConfig,
     /// Agent definitions.
     pub agents: Vec<AgentConfig>,
+    /// Agent communication graph links.
+    pub links: Vec<LinkDef>,
+    /// Visual grouping of agents in the topology UI.
+    pub groups: Vec<GroupDef>,
+    /// Org-level humans (real people, shown in topology graph).
+    pub humans: Vec<HumanDef>,
     /// Messaging platform credentials.
     pub messaging: MessagingConfig,
     /// Routing bindings (maps platform conversations to agents).
@@ -52,6 +58,36 @@ pub struct Config {
     pub metrics: MetricsConfig,
     /// OpenTelemetry export configuration.
     pub telemetry: TelemetryConfig,
+}
+
+/// A link definition from config, connecting two nodes (agents or humans).
+#[derive(Debug, Clone)]
+pub struct LinkDef {
+    pub from: String,
+    pub to: String,
+    pub direction: String,
+    pub kind: String,
+}
+
+/// An org-level human definition.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct HumanDef {
+    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bio: Option<String>,
+}
+
+/// A visual group definition for the topology UI.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct GroupDef {
+    pub name: String,
+    pub agent_ids: Vec<String>,
+    #[serde(default)]
+    pub color: Option<String>,
 }
 
 /// HTTP API server configuration.
@@ -177,24 +213,66 @@ pub struct LlmConfig {
 impl std::fmt::Debug for LlmConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("LlmConfig")
-            .field("anthropic_key", &self.anthropic_key.as_ref().map(|_| "[REDACTED]"))
-            .field("openai_key", &self.openai_key.as_ref().map(|_| "[REDACTED]"))
-            .field("openrouter_key", &self.openrouter_key.as_ref().map(|_| "[REDACTED]"))
+            .field(
+                "anthropic_key",
+                &self.anthropic_key.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field(
+                "openai_key",
+                &self.openai_key.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field(
+                "openrouter_key",
+                &self.openrouter_key.as_ref().map(|_| "[REDACTED]"),
+            )
             .field("zhipu_key", &self.zhipu_key.as_ref().map(|_| "[REDACTED]"))
             .field("groq_key", &self.groq_key.as_ref().map(|_| "[REDACTED]"))
-            .field("together_key", &self.together_key.as_ref().map(|_| "[REDACTED]"))
-            .field("fireworks_key", &self.fireworks_key.as_ref().map(|_| "[REDACTED]"))
-            .field("deepseek_key", &self.deepseek_key.as_ref().map(|_| "[REDACTED]"))
+            .field(
+                "together_key",
+                &self.together_key.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field(
+                "fireworks_key",
+                &self.fireworks_key.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field(
+                "deepseek_key",
+                &self.deepseek_key.as_ref().map(|_| "[REDACTED]"),
+            )
             .field("xai_key", &self.xai_key.as_ref().map(|_| "[REDACTED]"))
-            .field("mistral_key", &self.mistral_key.as_ref().map(|_| "[REDACTED]"))
-            .field("gemini_key", &self.gemini_key.as_ref().map(|_| "[REDACTED]"))
-            .field("ollama_key", &self.ollama_key.as_ref().map(|_| "[REDACTED]"))
+            .field(
+                "mistral_key",
+                &self.mistral_key.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field(
+                "gemini_key",
+                &self.gemini_key.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field(
+                "ollama_key",
+                &self.ollama_key.as_ref().map(|_| "[REDACTED]"),
+            )
             .field("ollama_base_url", &self.ollama_base_url)
-            .field("opencode_zen_key", &self.opencode_zen_key.as_ref().map(|_| "[REDACTED]"))
-            .field("nvidia_key", &self.nvidia_key.as_ref().map(|_| "[REDACTED]"))
-            .field("minimax_key", &self.minimax_key.as_ref().map(|_| "[REDACTED]"))
-            .field("moonshot_key", &self.moonshot_key.as_ref().map(|_| "[REDACTED]"))
-            .field("zai_coding_plan_key", &self.zai_coding_plan_key.as_ref().map(|_| "[REDACTED]"))
+            .field(
+                "opencode_zen_key",
+                &self.opencode_zen_key.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field(
+                "nvidia_key",
+                &self.nvidia_key.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field(
+                "minimax_key",
+                &self.minimax_key.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field(
+                "moonshot_key",
+                &self.moonshot_key.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field(
+                "zai_coding_plan_key",
+                &self.zai_coding_plan_key.as_ref().map(|_| "[REDACTED]"),
+            )
             .field("providers", &self.providers)
             .finish()
     }
@@ -236,6 +314,11 @@ const MOONSHOT_PROVIDER_BASE_URL: &str = "https://api.moonshot.ai";
 
 const ZHIPU_PROVIDER_BASE_URL: &str = "https://api.z.ai/api/paas/v4";
 const ZAI_CODING_PLAN_BASE_URL: &str = "https://api.z.ai/api/coding/paas/v4";
+const DEEPSEEK_PROVIDER_BASE_URL: &str = "https://api.deepseek.com";
+const GROQ_PROVIDER_BASE_URL: &str = "https://api.groq.com/openai";
+const TOGETHER_PROVIDER_BASE_URL: &str = "https://api.together.xyz";
+const XAI_PROVIDER_BASE_URL: &str = "https://api.x.ai";
+const MISTRAL_PROVIDER_BASE_URL: &str = "https://api.mistral.ai";
 const NVIDIA_PROVIDER_BASE_URL: &str = "https://integrate.api.nvidia.com";
 const FIREWORKS_PROVIDER_BASE_URL: &str = "https://api.fireworks.ai/inference";
 pub(crate) const GEMINI_PROVIDER_BASE_URL: &str =
@@ -255,6 +338,7 @@ pub struct DefaultsConfig {
     pub coalesce: CoalesceConfig,
     pub ingestion: IngestionConfig,
     pub cortex: CortexConfig,
+    pub warmup: WarmupConfig,
     pub browser: BrowserConfig,
     pub mcp: Vec<McpServerConfig>,
     /// Brave Search API key for web search tool. Supports "env:VAR_NAME" references.
@@ -284,9 +368,13 @@ impl std::fmt::Debug for DefaultsConfig {
             .field("coalesce", &self.coalesce)
             .field("ingestion", &self.ingestion)
             .field("cortex", &self.cortex)
+            .field("warmup", &self.warmup)
             .field("browser", &self.browser)
             .field("mcp", &self.mcp)
-            .field("brave_search_key", &self.brave_search_key.as_ref().map(|_| "[REDACTED]"))
+            .field(
+                "brave_search_key",
+                &self.brave_search_key.as_ref().map(|_| "[REDACTED]"),
+            )
             .field("history_backfill_count", &self.history_backfill_count)
             .field("cron", &self.cron)
             .field("opencode", &self.opencode)
@@ -627,11 +715,141 @@ impl Default for MemoryInjectionConfig {
     }
 }
 
+/// Warmup configuration.
+#[derive(Debug, Clone, Copy)]
+pub struct WarmupConfig {
+    /// Enable background warmup passes.
+    pub enabled: bool,
+    /// Force-load the embedding model before first recall/write workloads.
+    pub eager_embedding_load: bool,
+    /// Interval in seconds between warmup refresh passes.
+    pub refresh_secs: u64,
+    /// Startup delay before the first warmup pass.
+    pub startup_delay_secs: u64,
+}
+
+impl Default for WarmupConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            eager_embedding_load: true,
+            refresh_secs: 900,
+            startup_delay_secs: 5,
+        }
+    }
+}
+
+/// Current warmup lifecycle state.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WarmupState {
+    Cold,
+    Warming,
+    Warm,
+    Degraded,
+}
+
+/// Warmup runtime status snapshot for API and observability.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WarmupStatus {
+    pub state: WarmupState,
+    pub embedding_ready: bool,
+    pub last_refresh_unix_ms: Option<i64>,
+    pub last_error: Option<String>,
+    pub bulletin_age_secs: Option<u64>,
+}
+
+impl Default for WarmupStatus {
+    fn default() -> Self {
+        Self {
+            state: WarmupState::Cold,
+            embedding_ready: false,
+            last_refresh_unix_ms: None,
+            last_error: None,
+            bulletin_age_secs: None,
+        }
+    }
+}
+
+/// Why `ready_for_work` is currently false.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkReadinessReason {
+    StateNotWarm,
+    EmbeddingNotReady,
+    BulletinMissing,
+    BulletinStale,
+}
+
+impl WorkReadinessReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::StateNotWarm => "state_not_warm",
+            Self::EmbeddingNotReady => "embedding_not_ready",
+            Self::BulletinMissing => "bulletin_missing",
+            Self::BulletinStale => "bulletin_stale",
+        }
+    }
+}
+
+/// Derived readiness signal used to gate dispatch behavior.
+#[derive(Debug, Clone, Copy)]
+pub struct WorkReadiness {
+    pub ready: bool,
+    pub reason: Option<WorkReadinessReason>,
+    pub warmup_state: WarmupState,
+    pub embedding_ready: bool,
+    pub bulletin_age_secs: Option<u64>,
+    pub stale_after_secs: u64,
+}
+
+fn evaluate_work_readiness(
+    warmup_config: WarmupConfig,
+    status: WarmupStatus,
+    now_unix_ms: i64,
+) -> WorkReadiness {
+    let stale_after_secs = warmup_config.refresh_secs.max(1).saturating_mul(2).max(60);
+    let bulletin_age_secs = status
+        .last_refresh_unix_ms
+        .map(|refresh_ms| {
+            if now_unix_ms > refresh_ms {
+                ((now_unix_ms - refresh_ms) / 1000) as u64
+            } else {
+                0
+            }
+        })
+        .or(status.bulletin_age_secs);
+
+    let reason = if status.state != WarmupState::Warm {
+        Some(WorkReadinessReason::StateNotWarm)
+    } else if warmup_config.eager_embedding_load && !status.embedding_ready {
+        Some(WorkReadinessReason::EmbeddingNotReady)
+    } else if bulletin_age_secs.is_none() {
+        Some(WorkReadinessReason::BulletinMissing)
+    } else if bulletin_age_secs.is_some_and(|age| age > stale_after_secs) {
+        Some(WorkReadinessReason::BulletinStale)
+    } else {
+        None
+    };
+
+    WorkReadiness {
+        ready: reason.is_none(),
+        reason,
+        warmup_state: status.state,
+        embedding_ready: status.embedding_ready,
+        bulletin_age_secs,
+        stale_after_secs,
+    }
+}
+
 /// Per-agent configuration (raw, before resolution with defaults).
 #[derive(Debug, Clone)]
 pub struct AgentConfig {
     pub id: String,
     pub default: bool,
+    /// User-defined display name for the agent (shown in UI).
+    pub display_name: Option<String>,
+    /// User-defined role description (e.g. "handles tier 1 support").
+    pub role: Option<String>,
     /// Custom workspace path. If None, resolved to instance_dir/agents/{id}/workspace.
     pub workspace: Option<PathBuf>,
     /// Per-agent routing overrides. None inherits from defaults.
@@ -646,6 +864,7 @@ pub struct AgentConfig {
     pub coalesce: Option<CoalesceConfig>,
     pub ingestion: Option<IngestionConfig>,
     pub cortex: Option<CortexConfig>,
+    pub warmup: Option<WarmupConfig>,
     pub browser: Option<BrowserConfig>,
     pub memory_injection: Option<MemoryInjectionConfig>,
     pub mcp: Option<Vec<McpServerConfig>>,
@@ -653,6 +872,8 @@ pub struct AgentConfig {
     pub brave_search_key: Option<String>,
     /// Optional timezone override for cron active-hours evaluation.
     pub cron_timezone: Option<String>,
+    /// Sandbox configuration for process containment.
+    pub sandbox: Option<crate::sandbox::SandboxConfig>,
     /// Cron job definitions for this agent.
     pub cron: Vec<CronDef>,
 }
@@ -678,6 +899,8 @@ pub struct CronDef {
 #[derive(Debug, Clone)]
 pub struct ResolvedAgentConfig {
     pub id: String,
+    pub display_name: Option<String>,
+    pub role: Option<String>,
     pub workspace: PathBuf,
     pub data_dir: PathBuf,
     pub archives_dir: PathBuf,
@@ -692,11 +915,14 @@ pub struct ResolvedAgentConfig {
     pub coalesce: CoalesceConfig,
     pub ingestion: IngestionConfig,
     pub cortex: CortexConfig,
+    pub warmup: WarmupConfig,
     pub browser: BrowserConfig,
     pub memory_injection: MemoryInjectionConfig,
     pub mcp: Vec<McpServerConfig>,
     pub brave_search_key: Option<String>,
     pub cron_timezone: Option<String>,
+    /// Sandbox configuration for process containment.
+    pub sandbox: crate::sandbox::SandboxConfig,
     /// Number of messages to fetch from the platform when a new channel is created.
     pub history_backfill_count: usize,
     pub cron: Vec<CronDef>,
@@ -716,6 +942,7 @@ impl Default for DefaultsConfig {
             coalesce: CoalesceConfig::default(),
             ingestion: IngestionConfig::default(),
             cortex: CortexConfig::default(),
+            warmup: WarmupConfig::default(),
             browser: BrowserConfig::default(),
             mcp: Vec::new(),
             brave_search_key: None,
@@ -736,6 +963,8 @@ impl AgentConfig {
 
         ResolvedAgentConfig {
             id: self.id.clone(),
+            display_name: self.display_name.clone(),
+            role: self.role.clone(),
             workspace: self
                 .workspace
                 .clone()
@@ -762,6 +991,7 @@ impl AgentConfig {
             coalesce: self.coalesce.unwrap_or(defaults.coalesce),
             ingestion: self.ingestion.unwrap_or(defaults.ingestion),
             cortex: self.cortex.unwrap_or(defaults.cortex),
+            warmup: self.warmup.unwrap_or(defaults.warmup),
             browser: self
                 .browser
                 .clone()
@@ -780,6 +1010,7 @@ impl AgentConfig {
                 self.cron_timezone.as_deref(),
                 defaults.cron_timezone.as_deref(),
             ),
+            sandbox: self.sandbox.clone().unwrap_or_default(),
             history_backfill_count: defaults.history_backfill_count,
             cron: self.cron.clone(),
         }
@@ -1094,7 +1325,15 @@ impl SlackPermissions {
             filter
         };
 
-        let dm_allowed_users = slack.dm_allowed_users.clone();
+        let mut dm_allowed_users = slack.dm_allowed_users.clone();
+
+        for binding in &slack_bindings {
+            for id in &binding.dm_allowed_users {
+                if !dm_allowed_users.contains(id) {
+                    dm_allowed_users.push(id.clone());
+                }
+            }
+        }
 
         Self {
             workspace_filter,
@@ -1331,6 +1570,12 @@ struct TomlConfig {
     #[serde(default)]
     agents: Vec<TomlAgentConfig>,
     #[serde(default)]
+    links: Vec<TomlLinkDef>,
+    #[serde(default)]
+    groups: Vec<TomlGroupDef>,
+    #[serde(default)]
+    humans: Vec<TomlHumanDef>,
+    #[serde(default)]
     messaging: TomlMessagingConfig,
     #[serde(default)]
     bindings: Vec<TomlBinding>,
@@ -1340,6 +1585,43 @@ struct TomlConfig {
     metrics: TomlMetricsConfig,
     #[serde(default)]
     telemetry: TomlTelemetryConfig,
+}
+
+#[derive(Deserialize)]
+struct TomlLinkDef {
+    from: String,
+    to: String,
+    #[serde(default = "default_link_direction")]
+    direction: String,
+    #[serde(default = "default_link_kind")]
+    kind: String,
+    /// Backward compat: old configs use `relationship` instead of `kind`
+    #[serde(default)]
+    relationship: Option<String>,
+}
+
+fn default_link_direction() -> String {
+    "two_way".into()
+}
+
+fn default_link_kind() -> String {
+    "peer".into()
+}
+
+#[derive(Deserialize)]
+struct TomlGroupDef {
+    name: String,
+    #[serde(default)]
+    agent_ids: Vec<String>,
+    color: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct TomlHumanDef {
+    id: String,
+    display_name: Option<String>,
+    role: Option<String>,
+    bio: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -1545,6 +1827,7 @@ struct TomlDefaultsConfig {
     coalesce: Option<TomlCoalesceConfig>,
     ingestion: Option<TomlIngestionConfig>,
     cortex: Option<TomlCortexConfig>,
+    warmup: Option<TomlWarmupConfig>,
     browser: Option<TomlBrowserConfig>,
     #[serde(default)]
     mcp: Vec<TomlMcpServerConfig>,
@@ -1634,6 +1917,14 @@ struct TomlCortexConfig {
 }
 
 #[derive(Deserialize)]
+struct TomlWarmupConfig {
+    enabled: Option<bool>,
+    eager_embedding_load: Option<bool>,
+    refresh_secs: Option<u64>,
+    startup_delay_secs: Option<u64>,
+}
+
+#[derive(Deserialize)]
 struct TomlBrowserConfig {
     enabled: Option<bool>,
     headless: Option<bool>,
@@ -1684,6 +1975,8 @@ struct TomlAgentConfig {
     id: String,
     #[serde(default)]
     default: bool,
+    display_name: Option<String>,
+    role: Option<String>,
     workspace: Option<String>,
     routing: Option<TomlRoutingConfig>,
     max_concurrent_branches: Option<usize>,
@@ -1696,11 +1989,13 @@ struct TomlAgentConfig {
     coalesce: Option<TomlCoalesceConfig>,
     ingestion: Option<TomlIngestionConfig>,
     cortex: Option<TomlCortexConfig>,
+    warmup: Option<TomlWarmupConfig>,
     browser: Option<TomlBrowserConfig>,
     memory_injection: Option<TomlMemoryInjectionConfig>,
     mcp: Option<Vec<TomlMcpServerConfig>>,
     brave_search_key: Option<String>,
     cron_timezone: Option<String>,
+    sandbox: Option<crate::sandbox::SandboxConfig>,
     #[serde(default)]
     cron: Vec<TomlCronDef>,
 }
@@ -1846,9 +2141,7 @@ fn resolve_cron_timezone(
                 .and_then(|value| normalize_timezone(&value))
         });
 
-    let Some(timezone) = timezone else {
-        return None;
-    };
+    let timezone = timezone?;
 
     if timezone.parse::<Tz>().is_err() {
         tracing::warn!(
@@ -2028,7 +2321,9 @@ impl Config {
         }
 
         // OAuth credentials count as configured
-        if crate::auth::credentials_path(&instance_dir).exists() {
+        if crate::auth::credentials_path(&instance_dir).exists()
+            || crate::openai_auth::credentials_path(&instance_dir).exists()
+        {
             return false;
         }
 
@@ -2252,6 +2547,17 @@ impl Config {
                 });
         }
 
+        if let Some(deepseek_key) = llm.deepseek_key.clone() {
+            llm.providers
+                .entry("deepseek".to_string())
+                .or_insert_with(|| ProviderConfig {
+                    api_type: ApiType::OpenAiCompletions,
+                    base_url: DEEPSEEK_PROVIDER_BASE_URL.to_string(),
+                    api_key: deepseek_key,
+                    name: None,
+                });
+        }
+
         if let Some(gemini_key) = llm.gemini_key.clone() {
             llm.providers
                 .entry("gemini".to_string())
@@ -2259,6 +2565,64 @@ impl Config {
                     api_type: ApiType::Gemini,
                     base_url: GEMINI_PROVIDER_BASE_URL.to_string(),
                     api_key: gemini_key,
+                    name: None,
+                });
+        }
+
+        if let Some(groq_key) = llm.groq_key.clone() {
+            llm.providers
+                .entry("groq".to_string())
+                .or_insert_with(|| ProviderConfig {
+                    api_type: ApiType::OpenAiCompletions,
+                    base_url: GROQ_PROVIDER_BASE_URL.to_string(),
+                    api_key: groq_key,
+                    name: None,
+                });
+        }
+
+        if let Some(together_key) = llm.together_key.clone() {
+            llm.providers
+                .entry("together".to_string())
+                .or_insert_with(|| ProviderConfig {
+                    api_type: ApiType::OpenAiCompletions,
+                    base_url: TOGETHER_PROVIDER_BASE_URL.to_string(),
+                    api_key: together_key,
+                    name: None,
+                });
+        }
+
+        if let Some(xai_key) = llm.xai_key.clone() {
+            llm.providers
+                .entry("xai".to_string())
+                .or_insert_with(|| ProviderConfig {
+                    api_type: ApiType::OpenAiCompletions,
+                    base_url: XAI_PROVIDER_BASE_URL.to_string(),
+                    api_key: xai_key,
+                    name: None,
+                });
+        }
+
+        if let Some(mistral_key) = llm.mistral_key.clone() {
+            llm.providers
+                .entry("mistral".to_string())
+                .or_insert_with(|| ProviderConfig {
+                    api_type: ApiType::OpenAiCompletions,
+                    base_url: MISTRAL_PROVIDER_BASE_URL.to_string(),
+                    api_key: mistral_key,
+                    name: None,
+                });
+        }
+
+        if llm.ollama_base_url.is_some() || llm.ollama_key.is_some() {
+            llm.providers
+                .entry("ollama".to_string())
+                .or_insert_with(|| ProviderConfig {
+                    api_type: ApiType::OpenAiCompletions,
+                    base_url: llm
+                        .ollama_base_url
+                        .clone()
+                        .unwrap_or_else(|| "http://localhost:11434".to_string()),
+                    api_key: llm.ollama_key.clone().unwrap_or_default(),
                     name: None,
                 });
         }
@@ -2289,6 +2653,8 @@ impl Config {
         let agents = vec![AgentConfig {
             id: "main".into(),
             default: true,
+            display_name: None,
+            role: None,
             workspace: None,
             routing: Some(routing),
             max_concurrent_branches: None,
@@ -2301,11 +2667,13 @@ impl Config {
             coalesce: None,
             ingestion: None,
             cortex: None,
+            warmup: None,
             browser: None,
             memory_injection: None,
             mcp: None,
             brave_search_key: None,
             cron_timezone: None,
+            sandbox: None,
             cron: Vec::new(),
         }];
 
@@ -2317,6 +2685,14 @@ impl Config {
             llm,
             defaults: DefaultsConfig::default(),
             agents,
+            links: Vec::new(),
+            groups: Vec::new(),
+            humans: vec![HumanDef {
+                id: "admin".into(),
+                display_name: None,
+                role: None,
+                bio: None,
+            }],
             messaging: MessagingConfig::default(),
             bindings: Vec::new(),
             api,
@@ -2493,10 +2869,7 @@ impl Config {
                 .into_iter()
                 .map(|(provider_id, config)| {
                     let api_key = resolve_env_value(&config.api_key).ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "failed to resolve API key for provider '{}'",
-                            provider_id
-                        )
+                        anyhow::anyhow!("failed to resolve API key for provider '{}'", provider_id)
                     })?;
                     Ok((
                         provider_id.to_lowercase(),
@@ -2634,6 +3007,17 @@ impl Config {
                 });
         }
 
+        if let Some(deepseek_key) = llm.deepseek_key.clone() {
+            llm.providers
+                .entry("deepseek".to_string())
+                .or_insert_with(|| ProviderConfig {
+                    api_type: ApiType::OpenAiCompletions,
+                    base_url: DEEPSEEK_PROVIDER_BASE_URL.to_string(),
+                    api_key: deepseek_key,
+                    name: None,
+                });
+        }
+
         if let Some(gemini_key) = llm.gemini_key.clone() {
             llm.providers
                 .entry("gemini".to_string())
@@ -2641,6 +3025,64 @@ impl Config {
                     api_type: ApiType::Gemini,
                     base_url: GEMINI_PROVIDER_BASE_URL.to_string(),
                     api_key: gemini_key,
+                    name: None,
+                });
+        }
+
+        if let Some(groq_key) = llm.groq_key.clone() {
+            llm.providers
+                .entry("groq".to_string())
+                .or_insert_with(|| ProviderConfig {
+                    api_type: ApiType::OpenAiCompletions,
+                    base_url: GROQ_PROVIDER_BASE_URL.to_string(),
+                    api_key: groq_key,
+                    name: None,
+                });
+        }
+
+        if let Some(together_key) = llm.together_key.clone() {
+            llm.providers
+                .entry("together".to_string())
+                .or_insert_with(|| ProviderConfig {
+                    api_type: ApiType::OpenAiCompletions,
+                    base_url: TOGETHER_PROVIDER_BASE_URL.to_string(),
+                    api_key: together_key,
+                    name: None,
+                });
+        }
+
+        if let Some(xai_key) = llm.xai_key.clone() {
+            llm.providers
+                .entry("xai".to_string())
+                .or_insert_with(|| ProviderConfig {
+                    api_type: ApiType::OpenAiCompletions,
+                    base_url: XAI_PROVIDER_BASE_URL.to_string(),
+                    api_key: xai_key,
+                    name: None,
+                });
+        }
+
+        if let Some(mistral_key) = llm.mistral_key.clone() {
+            llm.providers
+                .entry("mistral".to_string())
+                .or_insert_with(|| ProviderConfig {
+                    api_type: ApiType::OpenAiCompletions,
+                    base_url: MISTRAL_PROVIDER_BASE_URL.to_string(),
+                    api_key: mistral_key,
+                    name: None,
+                });
+        }
+
+        if llm.ollama_base_url.is_some() || llm.ollama_key.is_some() {
+            llm.providers
+                .entry("ollama".to_string())
+                .or_insert_with(|| ProviderConfig {
+                    api_type: ApiType::OpenAiCompletions,
+                    base_url: llm
+                        .ollama_base_url
+                        .clone()
+                        .unwrap_or_else(|| "http://localhost:11434".to_string()),
+                    api_key: llm.ollama_key.clone().unwrap_or_default(),
                     name: None,
                 });
         }
@@ -2767,6 +3209,20 @@ impl Config {
                         .unwrap_or(base_defaults.cortex.association_max_per_pass),
                 })
                 .unwrap_or(base_defaults.cortex),
+            warmup: toml
+                .defaults
+                .warmup
+                .map(|w| WarmupConfig {
+                    enabled: w.enabled.unwrap_or(base_defaults.warmup.enabled),
+                    eager_embedding_load: w
+                        .eager_embedding_load
+                        .unwrap_or(base_defaults.warmup.eager_embedding_load),
+                    refresh_secs: w.refresh_secs.unwrap_or(base_defaults.warmup.refresh_secs),
+                    startup_delay_secs: w
+                        .startup_delay_secs
+                        .unwrap_or(base_defaults.warmup.startup_delay_secs),
+                })
+                .unwrap_or(base_defaults.warmup),
             browser: toml
                 .defaults
                 .browser
@@ -2920,6 +3376,8 @@ impl Config {
                 Ok(AgentConfig {
                     id: a.id,
                     default: a.default,
+                    display_name: a.display_name,
+                    role: a.role,
                     workspace: a.workspace.map(PathBuf::from),
                     routing: agent_routing,
                     max_concurrent_branches: a.max_concurrent_branches,
@@ -2995,6 +3453,16 @@ impl Config {
                             .association_max_per_pass
                             .unwrap_or(defaults.cortex.association_max_per_pass),
                     }),
+                    warmup: a.warmup.map(|w| WarmupConfig {
+                        enabled: w.enabled.unwrap_or(defaults.warmup.enabled),
+                        eager_embedding_load: w
+                            .eager_embedding_load
+                            .unwrap_or(defaults.warmup.eager_embedding_load),
+                        refresh_secs: w.refresh_secs.unwrap_or(defaults.warmup.refresh_secs),
+                        startup_delay_secs: w
+                            .startup_delay_secs
+                            .unwrap_or(defaults.warmup.startup_delay_secs),
+                    }),
                     browser: a.browser.map(|b| BrowserConfig {
                         enabled: b.enabled.unwrap_or(defaults.browser.enabled),
                         headless: b.headless.unwrap_or(defaults.browser.headless),
@@ -3069,6 +3537,7 @@ impl Config {
                     },
                     brave_search_key: a.brave_search_key.as_deref().and_then(resolve_env_value),
                     cron_timezone: a.cron_timezone.as_deref().and_then(resolve_env_value),
+                    sandbox: a.sandbox,
                     cron,
                 })
             })
@@ -3078,6 +3547,8 @@ impl Config {
             agents.push(AgentConfig {
                 id: "main".into(),
                 default: true,
+                display_name: None,
+                role: None,
                 workspace: None,
                 routing: None,
                 max_concurrent_branches: None,
@@ -3090,11 +3561,13 @@ impl Config {
                 coalesce: None,
                 ingestion: None,
                 cortex: None,
+                warmup: None,
                 browser: None,
                 memory_injection: None,
                 mcp: None,
                 brave_search_key: None,
                 cron_timezone: None,
+                sandbox: None,
                 cron: Vec::new(),
             });
         }
@@ -3254,11 +3727,64 @@ impl Config {
             }
         };
 
+        let links = toml
+            .links
+            .into_iter()
+            .map(|l| {
+                // Backward compat: use `relationship` field if `kind` is default and `relationship` is set
+                let kind = if l.kind == "peer" {
+                    l.relationship.unwrap_or(l.kind)
+                } else {
+                    l.kind
+                };
+                LinkDef {
+                    from: l.from,
+                    to: l.to,
+                    direction: l.direction,
+                    kind,
+                }
+            })
+            .collect();
+
+        let groups = toml
+            .groups
+            .into_iter()
+            .map(|g| GroupDef {
+                name: g.name,
+                agent_ids: g.agent_ids,
+                color: g.color,
+            })
+            .collect();
+
+        let mut humans: Vec<HumanDef> = toml
+            .humans
+            .into_iter()
+            .map(|h| HumanDef {
+                id: h.id,
+                display_name: h.display_name,
+                role: h.role,
+                bio: h.bio,
+            })
+            .collect();
+
+        // Default admin human if none defined
+        if humans.is_empty() {
+            humans.push(HumanDef {
+                id: "admin".into(),
+                display_name: None,
+                role: None,
+                bio: None,
+            });
+        }
+
         Ok(Config {
             instance_dir,
             llm,
             defaults,
             agents,
+            links,
+            groups,
+            humans,
             messaging,
             bindings,
             api,
@@ -3318,6 +3844,11 @@ pub struct RuntimeConfig {
     pub cortex: ArcSwap<CortexConfig>,
     /// Memory injection configuration for the pre-hook system.
     pub memory_injection: ArcSwap<MemoryInjectionConfig>,
+    pub warmup: ArcSwap<WarmupConfig>,
+    /// Current warmup lifecycle status for API and observability.
+    pub warmup_status: ArcSwap<WarmupStatus>,
+    /// Synchronizes warmup passes so periodic and API-triggered runs don't overlap.
+    pub warmup_lock: Arc<tokio::sync::Mutex<()>>,
     /// Cached memory bulletin generated by the cortex. Injected into every
     /// channel's system prompt. Empty string until the first cortex run.
     pub memory_bulletin: ArcSwap<String>,
@@ -3333,6 +3864,8 @@ pub struct RuntimeConfig {
     pub cron_scheduler: ArcSwap<Option<Arc<crate::cron::Scheduler>>>,
     /// Settings store for agent-specific configuration.
     pub settings: ArcSwap<Option<Arc<crate::settings::SettingsStore>>>,
+    /// Sandbox configuration for process containment.
+    pub sandbox: ArcSwap<crate::sandbox::SandboxConfig>,
 }
 
 impl RuntimeConfig {
@@ -3372,6 +3905,9 @@ impl RuntimeConfig {
             cron_timezone: ArcSwap::from_pointee(agent_config.cron_timezone.clone()),
             cortex: ArcSwap::from_pointee(agent_config.cortex),
             memory_injection: ArcSwap::from_pointee(agent_config.memory_injection.clone()),
+            warmup: ArcSwap::from_pointee(agent_config.warmup),
+            warmup_status: ArcSwap::from_pointee(WarmupStatus::default()),
+            warmup_lock: Arc::new(tokio::sync::Mutex::new(())),
             memory_bulletin: ArcSwap::from_pointee(String::new()),
             prompts: ArcSwap::from_pointee(prompts),
             identity: ArcSwap::from_pointee(identity),
@@ -3381,6 +3917,7 @@ impl RuntimeConfig {
             cron_store: ArcSwap::from_pointee(None),
             cron_scheduler: ArcSwap::from_pointee(None),
             settings: ArcSwap::from_pointee(None),
+            sandbox: ArcSwap::from_pointee(agent_config.sandbox.clone()),
         }
     }
 
@@ -3397,6 +3934,18 @@ impl RuntimeConfig {
     /// Set the settings store after initialization.
     pub fn set_settings(&self, settings: Arc<crate::settings::SettingsStore>) {
         self.settings.store(Arc::new(Some(settings)));
+    }
+
+    /// Compute the current dispatch-readiness signal.
+    pub fn work_readiness(&self) -> WorkReadiness {
+        let warmup_config = **self.warmup.load();
+        let status = self.warmup_status.load().as_ref().clone();
+        evaluate_work_readiness(warmup_config, status, chrono::Utc::now().timestamp_millis())
+    }
+
+    /// True when branch/worker/cron dispatches should run in fully-ready mode.
+    pub fn ready_for_work(&self) -> bool {
+        self.work_readiness().ready
     }
 
     /// Reload tunable config values from a freshly parsed Config.
@@ -3445,6 +3994,10 @@ impl RuntimeConfig {
         self.cortex.store(Arc::new(resolved.cortex));
         self.memory_injection
             .store(Arc::new(resolved.memory_injection));
+        self.warmup.store(Arc::new(resolved.warmup));
+        // sandbox config is not hot-reloaded here because the Sandbox instance
+        // is constructed once at startup and shared via Arc. Changing sandbox
+        // settings requires an agent restart.
 
         mcp_manager.reconcile(&old_mcp, &new_mcp).await;
 
@@ -3493,6 +4046,7 @@ pub fn spawn_file_watcher(
     bindings: Arc<arc_swap::ArcSwap<Vec<Binding>>>,
     messaging_manager: Option<Arc<crate::messaging::MessagingManager>>,
     llm_manager: Arc<crate::llm::LlmManager>,
+    agent_links: Arc<arc_swap::ArcSwap<Vec<crate::links::AgentLink>>>,
 ) -> tokio::task::JoinHandle<()> {
     use notify::{Event, RecursiveMode, Watcher};
     use std::time::Duration;
@@ -3582,7 +4136,7 @@ pub fn spawn_file_watcher(
             let mut config_changed = changed_paths.iter().any(|p| p.ends_with("config.toml"));
             let identity_changed = changed_paths.iter().any(|p| {
                 let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                matches!(name, "SOUL.md" | "IDENTITY.md" | "USER.md")
+                matches!(name, "SOUL.md" | "IDENTITY.md" | "USER.md" | "ROLE.md")
             });
             let skills_changed = changed_paths
                 .iter()
@@ -3647,6 +4201,16 @@ pub fn spawn_file_watcher(
 
                 bindings.store(Arc::new(config.bindings.clone()));
                 tracing::info!("bindings reloaded ({} entries)", config.bindings.len());
+
+                match crate::links::AgentLink::from_config(&config.links) {
+                    Ok(links) => {
+                        agent_links.store(Arc::new(links));
+                        tracing::info!("agent links reloaded ({} entries)", config.links.len());
+                    }
+                    Err(error) => {
+                        tracing::error!(%error, "failed to parse links from reloaded config");
+                    }
+                }
 
                 if let Some(ref perms) = discord_permissions
                     && let Some(discord_config) = &config.messaging.discord
@@ -4441,6 +5005,26 @@ name = "Custom OpenAI"
     }
 
     #[test]
+    fn test_needs_onboarding_false_with_openai_oauth_credentials() {
+        let _lock = env_test_lock()
+            .lock()
+            .expect("failed to lock env test mutex");
+        let _env = EnvGuard::new();
+
+        let instance_dir = Config::default_instance_dir();
+        let creds = crate::openai_auth::OAuthCredentials {
+            access_token: "openai-access-token-test".to_string(),
+            refresh_token: "openai-refresh-token-test".to_string(),
+            expires_at: chrono::Utc::now().timestamp_millis() + 3_600_000,
+            account_id: Some("acct_test_123".to_string()),
+        };
+        crate::openai_auth::save_credentials(&instance_dir, &creds)
+            .expect("failed to save OpenAI OAuth credentials");
+
+        assert!(!Config::needs_onboarding());
+    }
+
+    #[test]
     fn test_load_from_env_populates_legacy_key_and_provider() {
         let _lock = env_test_lock()
             .lock()
@@ -4501,6 +5085,105 @@ bind = "127.0.0.1"
             .expect("failed to load config from env");
 
         assert_eq!(config.api.bind, "[::]");
+    }
+
+    /// Helper to build a minimal `SlackConfig` for permission tests.
+    fn slack_config_with_dm_users(dm_allowed_users: Vec<String>) -> SlackConfig {
+        SlackConfig {
+            enabled: true,
+            bot_token: "xoxb-test".into(),
+            app_token: "xapp-test".into(),
+            dm_allowed_users,
+            commands: vec![],
+        }
+    }
+
+    /// Helper to build a Slack binding with optional dm_allowed_users.
+    fn slack_binding(workspace_id: Option<&str>, dm_allowed_users: Vec<String>) -> Binding {
+        Binding {
+            agent_id: "test-agent".into(),
+            channel: "slack".into(),
+            guild_id: None,
+            workspace_id: workspace_id.map(String::from),
+            chat_id: None,
+            channel_ids: vec![],
+            require_mention: false,
+            dm_allowed_users,
+        }
+    }
+
+    #[test]
+    fn slack_permissions_merges_dm_users_from_config_and_bindings() {
+        let config = slack_config_with_dm_users(vec!["U001".into(), "U002".into()]);
+        let bindings = vec![slack_binding(
+            Some("T1"),
+            vec!["U003".into(), "U004".into()],
+        )];
+        let perms = SlackPermissions::from_config(&config, &bindings);
+        assert_eq!(perms.dm_allowed_users, vec!["U001", "U002", "U003", "U004"]);
+    }
+
+    #[test]
+    fn slack_permissions_deduplicates_dm_users() {
+        let config = slack_config_with_dm_users(vec!["U001".into(), "U002".into()]);
+        let bindings = vec![slack_binding(
+            Some("T1"),
+            vec!["U002".into(), "U003".into()],
+        )];
+        let perms = SlackPermissions::from_config(&config, &bindings);
+        // U002 appears in both config and binding — should appear only once
+        assert_eq!(perms.dm_allowed_users, vec!["U001", "U002", "U003"]);
+    }
+
+    #[test]
+    fn slack_permissions_empty_dm_users_stays_empty() {
+        let config = slack_config_with_dm_users(vec![]);
+        let bindings = vec![slack_binding(Some("T1"), vec![])];
+        let perms = SlackPermissions::from_config(&config, &bindings);
+        assert!(perms.dm_allowed_users.is_empty());
+    }
+
+    #[test]
+    fn slack_permissions_merges_dm_users_from_multiple_bindings() {
+        let config = slack_config_with_dm_users(vec!["U001".into()]);
+        let bindings = vec![
+            slack_binding(Some("T1"), vec!["U002".into()]),
+            slack_binding(Some("T2"), vec!["U003".into()]),
+        ];
+        let perms = SlackPermissions::from_config(&config, &bindings);
+        assert_eq!(perms.dm_allowed_users, vec!["U001", "U002", "U003"]);
+    }
+
+    #[test]
+    fn slack_permissions_ignores_non_slack_bindings() {
+        let config = slack_config_with_dm_users(vec!["U001".into()]);
+        let mut discord_binding = slack_binding(Some("T1"), vec!["U099".into()]);
+        discord_binding.channel = "discord".into();
+        let perms = SlackPermissions::from_config(&config, &[discord_binding]);
+        // U099 should not appear — that binding is for discord, not slack
+        assert_eq!(perms.dm_allowed_users, vec!["U001"]);
+    }
+
+    #[test]
+    fn slack_permissions_workspace_filter_from_bindings() {
+        let config = slack_config_with_dm_users(vec![]);
+        let bindings = vec![
+            slack_binding(Some("T1"), vec![]),
+            slack_binding(Some("T2"), vec![]),
+        ];
+        let perms = SlackPermissions::from_config(&config, &bindings);
+        assert_eq!(
+            perms.workspace_filter,
+            Some(vec!["T1".to_string(), "T2".to_string()])
+        );
+    }
+
+    #[test]
+    fn slack_permissions_no_workspace_filter_when_none_specified() {
+        let config = slack_config_with_dm_users(vec![]);
+        let bindings = vec![slack_binding(None, vec![])];
+        let perms = SlackPermissions::from_config(&config, &bindings);
+        assert!(perms.workspace_filter.is_none());
     }
 
     #[test]
@@ -4582,5 +5265,373 @@ id = "main"
         let config = Config::from_toml(parsed, PathBuf::from(".")).expect("failed to build Config");
         let resolved = config.agents[0].resolve(&config.instance_dir, &config.defaults);
         assert_eq!(resolved.cron_timezone, None);
+    }
+
+    #[test]
+    fn ollama_base_url_registers_provider() {
+        let toml = r#"
+[llm]
+ollama_base_url = "http://localhost:11434"
+
+[[agents]]
+id = "main"
+"#;
+        let parsed: TomlConfig = toml::from_str(toml).expect("failed to parse test TOML");
+        let config = Config::from_toml(parsed, PathBuf::from(".")).expect("failed to build Config");
+        let provider = config
+            .llm
+            .providers
+            .get("ollama")
+            .expect("ollama provider should be registered");
+        assert_eq!(provider.base_url, "http://localhost:11434");
+        assert_eq!(provider.api_type, ApiType::OpenAiCompletions);
+        assert_eq!(provider.api_key, "");
+    }
+
+    #[test]
+    fn ollama_key_alone_registers_provider_with_default_url() {
+        let toml = r#"
+[llm]
+ollama_key = "test-key"
+
+[[agents]]
+id = "main"
+"#;
+        let parsed: TomlConfig = toml::from_str(toml).expect("failed to parse test TOML");
+        let config = Config::from_toml(parsed, PathBuf::from(".")).expect("failed to build Config");
+        let provider = config
+            .llm
+            .providers
+            .get("ollama")
+            .expect("ollama provider should be registered");
+        assert_eq!(provider.base_url, "http://localhost:11434");
+        assert_eq!(provider.api_key, "test-key");
+    }
+
+    #[test]
+    fn ollama_custom_provider_takes_precedence_over_shorthand() {
+        // Custom provider block should win over shorthand keys (or_insert_with semantics)
+        let toml = r#"
+[llm]
+ollama_base_url = "http://localhost:11434"
+
+[llm.providers.ollama]
+api_type = "openai_completions"
+base_url = "http://remote-ollama:11434"
+api_key = ""
+
+[[agents]]
+id = "main"
+"#;
+        let parsed: TomlConfig = toml::from_str(toml).expect("failed to parse test TOML");
+        let config = Config::from_toml(parsed, PathBuf::from(".")).expect("failed to build Config");
+        let provider = config
+            .llm
+            .providers
+            .get("ollama")
+            .expect("ollama provider should be registered");
+        assert_eq!(provider.base_url, "http://remote-ollama:11434");
+    }
+
+    #[test]
+    fn test_warmup_defaults_applied_when_not_configured() {
+        let toml = r#"
+[[agents]]
+id = "main"
+"#;
+        let parsed: TomlConfig = toml::from_str(toml).expect("failed to parse test TOML");
+        let config = Config::from_toml(parsed, PathBuf::from(".")).expect("failed to build Config");
+        let resolved = config.agents[0].resolve(&config.instance_dir, &config.defaults);
+
+        assert!(config.defaults.warmup.enabled);
+        assert!(config.defaults.warmup.eager_embedding_load);
+        assert_eq!(config.defaults.warmup.refresh_secs, 900);
+        assert_eq!(config.defaults.warmup.startup_delay_secs, 5);
+
+        assert_eq!(resolved.warmup.enabled, config.defaults.warmup.enabled);
+        assert_eq!(
+            resolved.warmup.eager_embedding_load,
+            config.defaults.warmup.eager_embedding_load
+        );
+        assert_eq!(
+            resolved.warmup.refresh_secs,
+            config.defaults.warmup.refresh_secs
+        );
+        assert_eq!(
+            resolved.warmup.startup_delay_secs,
+            config.defaults.warmup.startup_delay_secs
+        );
+    }
+
+    #[test]
+    fn test_warmup_default_and_agent_override_resolution() {
+        let toml = r#"
+[defaults.warmup]
+enabled = false
+eager_embedding_load = false
+refresh_secs = 120
+startup_delay_secs = 9
+
+[[agents]]
+id = "main"
+
+[agents.warmup]
+enabled = true
+startup_delay_secs = 2
+"#;
+        let parsed: TomlConfig = toml::from_str(toml).expect("failed to parse test TOML");
+        let config = Config::from_toml(parsed, PathBuf::from(".")).expect("failed to build Config");
+        let resolved = config.agents[0].resolve(&config.instance_dir, &config.defaults);
+
+        assert!(!config.defaults.warmup.enabled);
+        assert!(!config.defaults.warmup.eager_embedding_load);
+        assert_eq!(config.defaults.warmup.refresh_secs, 120);
+        assert_eq!(config.defaults.warmup.startup_delay_secs, 9);
+
+        assert!(resolved.warmup.enabled);
+        assert!(!resolved.warmup.eager_embedding_load);
+        assert_eq!(resolved.warmup.refresh_secs, 120);
+        assert_eq!(resolved.warmup.startup_delay_secs, 2);
+    }
+
+    #[test]
+    fn test_work_readiness_requires_warm_state() {
+        let readiness = evaluate_work_readiness(
+            WarmupConfig::default(),
+            WarmupStatus {
+                state: WarmupState::Cold,
+                embedding_ready: true,
+                last_refresh_unix_ms: Some(1_000),
+                last_error: None,
+                bulletin_age_secs: None,
+            },
+            2_000,
+        );
+
+        assert!(!readiness.ready);
+        assert_eq!(readiness.reason, Some(WorkReadinessReason::StateNotWarm));
+    }
+
+    #[test]
+    fn test_work_readiness_requires_embedding_ready() {
+        let readiness = evaluate_work_readiness(
+            WarmupConfig::default(),
+            WarmupStatus {
+                state: WarmupState::Warm,
+                embedding_ready: false,
+                last_refresh_unix_ms: Some(1_000),
+                last_error: None,
+                bulletin_age_secs: None,
+            },
+            2_000,
+        );
+
+        assert!(!readiness.ready);
+        assert_eq!(
+            readiness.reason,
+            Some(WorkReadinessReason::EmbeddingNotReady)
+        );
+    }
+
+    #[test]
+    fn test_work_readiness_does_not_require_embedding_when_eager_load_disabled() {
+        let readiness = evaluate_work_readiness(
+            WarmupConfig {
+                eager_embedding_load: false,
+                ..Default::default()
+            },
+            WarmupStatus {
+                state: WarmupState::Warm,
+                embedding_ready: false,
+                last_refresh_unix_ms: Some(1_000),
+                last_error: None,
+                bulletin_age_secs: None,
+            },
+            2_000,
+        );
+
+        assert!(readiness.ready);
+        assert_eq!(readiness.reason, None);
+    }
+
+    #[test]
+    fn test_work_readiness_requires_bulletin_timestamp() {
+        let readiness = evaluate_work_readiness(
+            WarmupConfig::default(),
+            WarmupStatus {
+                state: WarmupState::Warm,
+                embedding_ready: true,
+                last_refresh_unix_ms: None,
+                last_error: None,
+                bulletin_age_secs: None,
+            },
+            2_000,
+        );
+
+        assert!(!readiness.ready);
+        assert_eq!(readiness.reason, Some(WorkReadinessReason::BulletinMissing));
+    }
+
+    #[test]
+    fn test_work_readiness_rejects_stale_bulletin() {
+        let readiness = evaluate_work_readiness(
+            WarmupConfig {
+                refresh_secs: 60,
+                ..Default::default()
+            },
+            WarmupStatus {
+                state: WarmupState::Warm,
+                embedding_ready: true,
+                last_refresh_unix_ms: Some(1_000),
+                last_error: None,
+                bulletin_age_secs: None,
+            },
+            122_000,
+        );
+
+        assert_eq!(readiness.stale_after_secs, 120);
+        assert_eq!(readiness.bulletin_age_secs, Some(121));
+        assert!(!readiness.ready);
+        assert_eq!(readiness.reason, Some(WorkReadinessReason::BulletinStale));
+    }
+
+    #[test]
+    fn test_work_readiness_ready_when_all_constraints_hold() {
+        let readiness = evaluate_work_readiness(
+            WarmupConfig {
+                refresh_secs: 120,
+                ..Default::default()
+            },
+            WarmupStatus {
+                state: WarmupState::Warm,
+                embedding_ready: true,
+                last_refresh_unix_ms: Some(200_000),
+                last_error: None,
+                bulletin_age_secs: None,
+            },
+            310_000,
+        );
+
+        assert!(readiness.ready);
+        assert_eq!(readiness.reason, None);
+        assert_eq!(readiness.bulletin_age_secs, Some(110));
+    }
+
+    /// Verify that every shorthand key field in `LlmConfig` actually registers a provider.
+    ///
+    /// This is a regression test for the recurring "unknown provider: X" bug pattern
+    /// (nvidia #82, ollama #175, deepseek #179). If a new shorthand key is added to
+    /// `LlmConfig` without wiring it up in `load_from_env` / `from_toml`, this test fails.
+    #[test]
+    fn all_shorthand_keys_register_providers_via_toml() {
+        // (toml_key, toml_value, provider_name, expected_base_url_substring)
+        let cases: &[(&str, &str, &str, &str)] = &[
+            ("anthropic_key", "test-key", "anthropic", "anthropic.com"),
+            ("openai_key", "test-key", "openai", "openai.com"),
+            ("openrouter_key", "test-key", "openrouter", "openrouter.ai"),
+            ("deepseek_key", "test-key", "deepseek", "deepseek.com"),
+            ("minimax_key", "test-key", "minimax", "minimax.io"),
+            ("minimax_cn_key", "test-key", "minimax-cn", "minimaxi.com"),
+            ("moonshot_key", "test-key", "moonshot", "moonshot.ai"),
+            ("nvidia_key", "test-key", "nvidia", "nvidia.com"),
+            ("fireworks_key", "test-key", "fireworks", "fireworks.ai"),
+            ("zhipu_key", "test-key", "zhipu", "z.ai"),
+            ("gemini_key", "test-key", "gemini", "google"),
+            ("groq_key", "test-key", "groq", "groq.com"),
+            ("together_key", "test-key", "together", "together"),
+            ("xai_key", "test-key", "xai", "x.ai"),
+            ("mistral_key", "test-key", "mistral", "mistral.ai"),
+            (
+                "ollama_base_url",
+                "http://localhost:11434",
+                "ollama",
+                "localhost:11434",
+            ),
+        ];
+
+        for (toml_key, toml_value, provider_name, url_substr) in cases {
+            let toml_str =
+                format!("[llm]\n{toml_key} = \"{toml_value}\"\n\n[[agents]]\nid = \"main\"\n");
+
+            let parsed: TomlConfig = toml::from_str(&toml_str)
+                .unwrap_or_else(|e| panic!("failed to parse toml for {toml_key}: {e}"));
+            let config = Config::from_toml(parsed, PathBuf::from("."))
+                .unwrap_or_else(|e| panic!("failed to build config for {toml_key}: {e}"));
+
+            let provider = config.llm.providers.get(*provider_name).unwrap_or_else(|| {
+                panic!(
+                    "provider '{provider_name}' not registered when '{toml_key}' is set — \
+                     add an .entry(\"{provider_name}\").or_insert_with(...) block in from_toml()"
+                )
+            });
+
+            assert!(
+                provider.base_url.contains(url_substr),
+                "provider '{provider_name}' base_url '{}' does not contain '{url_substr}'",
+                provider.base_url
+            );
+        }
+    }
+
+    #[test]
+    fn all_shorthand_keys_register_providers_via_env() {
+        let _lock = env_test_lock().lock().unwrap();
+
+        // (env_var, env_value, provider_name, expected_base_url_substring)
+        let cases: &[(&str, &str, &str, &str)] = &[
+            (
+                "ANTHROPIC_API_KEY",
+                "test-key",
+                "anthropic",
+                "anthropic.com",
+            ),
+            ("OPENAI_API_KEY", "test-key", "openai", "openai.com"),
+            (
+                "OPENROUTER_API_KEY",
+                "test-key",
+                "openrouter",
+                "openrouter.ai",
+            ),
+            ("DEEPSEEK_API_KEY", "test-key", "deepseek", "deepseek.com"),
+            ("MINIMAX_API_KEY", "test-key", "minimax", "minimax.io"),
+            ("NVIDIA_API_KEY", "test-key", "nvidia", "nvidia.com"),
+            ("FIREWORKS_API_KEY", "test-key", "fireworks", "fireworks.ai"),
+            ("ZHIPU_API_KEY", "test-key", "zhipu", "z.ai"),
+            ("GEMINI_API_KEY", "test-key", "gemini", "google"),
+            ("GROQ_API_KEY", "test-key", "groq", "groq.com"),
+            ("TOGETHER_API_KEY", "test-key", "together", "together"),
+            ("XAI_API_KEY", "test-key", "xai", "x.ai"),
+            ("MISTRAL_API_KEY", "test-key", "mistral", "mistral.ai"),
+            (
+                "OLLAMA_BASE_URL",
+                "http://localhost:11434",
+                "ollama",
+                "localhost:11434",
+            ),
+        ];
+
+        for (env_var, env_value, provider_name, url_substr) in cases {
+            let guard = EnvGuard::new();
+            unsafe {
+                std::env::set_var(env_var, env_value);
+            }
+
+            let config = Config::load_from_env(&guard.test_dir)
+                .unwrap_or_else(|e| panic!("load_from_env failed for {env_var}: {e}"));
+            drop(guard);
+
+            let provider = config.llm.providers.get(*provider_name).unwrap_or_else(|| {
+                panic!(
+                    "provider '{provider_name}' not registered when '{env_var}' is set — \
+                     add an .entry(\"{provider_name}\").or_insert_with(...) block in load_from_env()"
+                )
+            });
+
+            assert!(
+                provider.base_url.contains(url_substr),
+                "provider '{provider_name}' base_url '{}' does not contain '{url_substr}'",
+                provider.base_url
+            );
+        }
     }
 }

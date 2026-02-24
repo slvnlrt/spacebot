@@ -8,7 +8,7 @@ use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
 use sqlx::Row as _;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 fn hosted_agent_limit() -> Option<usize> {
@@ -127,6 +127,15 @@ pub(super) struct AgentOverviewQuery {
 #[derive(Deserialize)]
 pub(super) struct CreateAgentRequest {
     agent_id: String,
+    display_name: Option<String>,
+    role: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub(super) struct UpdateAgentRequest {
+    agent_id: String,
+    display_name: Option<String>,
+    role: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -148,6 +157,108 @@ pub(super) struct ReconnectMcpRequest {
 #[derive(Serialize)]
 pub(super) struct AgentMcpResponse {
     servers: Vec<crate::mcp::McpServerStatus>,
+}
+
+#[derive(Deserialize)]
+pub(super) struct WarmupQuery {
+    agent_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub(super) struct WarmupTriggerRequest {
+    agent_id: Option<String>,
+    #[serde(default)]
+    force: bool,
+}
+
+#[derive(Serialize)]
+pub(super) struct WarmupStatusEntry {
+    agent_id: String,
+    status: crate::config::WarmupStatus,
+}
+
+#[derive(Serialize)]
+pub(super) struct WarmupStatusResponse {
+    statuses: Vec<WarmupStatusEntry>,
+}
+
+#[derive(Serialize)]
+pub(super) struct WarmupTriggerResponse {
+    status: &'static str,
+    forced: bool,
+    accepted_agents: Vec<String>,
+}
+
+fn hydrate_warmup_status(
+    runtime_config: &crate::config::RuntimeConfig,
+) -> crate::config::WarmupStatus {
+    let mut status = runtime_config.warmup_status.load().as_ref().clone();
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    status.bulletin_age_secs = compute_bulletin_age_secs(status.last_refresh_unix_ms, now_ms);
+    status
+}
+
+fn compute_bulletin_age_secs(last_refresh_unix_ms: Option<i64>, now_unix_ms: i64) -> Option<u64> {
+    last_refresh_unix_ms.map(|refresh_ms| {
+        if now_unix_ms > refresh_ms {
+            ((now_unix_ms - refresh_ms) / 1000) as u64
+        } else {
+            0
+        }
+    })
+}
+
+fn resolve_warmup_agent_ids(
+    requested_agent_id: Option<&str>,
+    runtime_config_ids: &HashSet<String>,
+    memory_search_ids: &HashSet<String>,
+    mcp_manager_ids: &HashSet<String>,
+    sqlite_pool_ids: &HashSet<String>,
+) -> Result<Vec<String>, StatusCode> {
+    let target_agent_ids = if let Some(agent_id) = requested_agent_id {
+        vec![agent_id.to_string()]
+    } else {
+        runtime_config_ids.iter().cloned().collect::<Vec<_>>()
+    };
+    let single_target = requested_agent_id.is_some();
+
+    let mut accepted_agents = Vec::new();
+    for agent_id in target_agent_ids {
+        if !runtime_config_ids.contains(&agent_id) {
+            if single_target {
+                return Err(StatusCode::NOT_FOUND);
+            }
+            continue;
+        }
+
+        if !memory_search_ids.contains(&agent_id) {
+            tracing::warn!(agent_id = %agent_id, "missing memory search for warmup trigger");
+            if single_target {
+                return Err(StatusCode::INTERNAL_SERVER_ERROR);
+            }
+            continue;
+        }
+
+        if !mcp_manager_ids.contains(&agent_id) {
+            tracing::warn!(agent_id = %agent_id, "missing mcp manager for warmup trigger");
+            if single_target {
+                return Err(StatusCode::INTERNAL_SERVER_ERROR);
+            }
+            continue;
+        }
+
+        if !sqlite_pool_ids.contains(&agent_id) {
+            tracing::warn!(agent_id = %agent_id, "missing sqlite pool for warmup trigger");
+            if single_target {
+                return Err(StatusCode::INTERNAL_SERVER_ERROR);
+            }
+            continue;
+        }
+
+        accepted_agents.push(agent_id);
+    }
+
+    Ok(accepted_agents)
 }
 
 /// List all configured agents with their config summaries.
@@ -201,6 +312,115 @@ pub(super) async fn reconnect_agent_mcp(
         "agent_id": request.agent_id,
         "server_name": request.server_name
     })))
+}
+
+/// Get warmup status for one agent or all agents.
+pub(super) async fn get_warmup_status(
+    State(state): State<Arc<ApiState>>,
+    Query(query): Query<WarmupQuery>,
+) -> Result<Json<WarmupStatusResponse>, StatusCode> {
+    let runtime_configs = state.runtime_configs.load();
+
+    let mut statuses = if let Some(agent_id) = query.agent_id {
+        let runtime_config = runtime_configs
+            .get(&agent_id)
+            .ok_or(StatusCode::NOT_FOUND)?;
+        vec![WarmupStatusEntry {
+            agent_id,
+            status: hydrate_warmup_status(runtime_config),
+        }]
+    } else {
+        runtime_configs
+            .iter()
+            .map(|(agent_id, runtime_config)| WarmupStatusEntry {
+                agent_id: agent_id.clone(),
+                status: hydrate_warmup_status(runtime_config),
+            })
+            .collect::<Vec<_>>()
+    };
+
+    statuses.sort_by(|left, right| left.agent_id.cmp(&right.agent_id));
+    Ok(Json(WarmupStatusResponse { statuses }))
+}
+
+/// Trigger warmup for one agent or all agents.
+pub(super) async fn trigger_warmup(
+    State(state): State<Arc<ApiState>>,
+    Json(request): Json<WarmupTriggerRequest>,
+) -> Result<Json<WarmupTriggerResponse>, StatusCode> {
+    let llm_manager = {
+        let guard = state.llm_manager.read().await;
+        guard.as_ref().cloned().ok_or_else(|| {
+            tracing::error!("LLM manager not available for warmup trigger");
+            StatusCode::SERVICE_UNAVAILABLE
+        })?
+    };
+
+    let runtime_configs = state.runtime_configs.load();
+    let memory_searches = state.memory_searches.load();
+    let mcp_managers = state.mcp_managers.load();
+    let pools = state.agent_pools.load();
+    let sandboxes = state.sandboxes.load();
+
+    let runtime_config_ids = runtime_configs.keys().cloned().collect::<HashSet<_>>();
+    let memory_search_ids = memory_searches.keys().cloned().collect::<HashSet<_>>();
+    let mcp_manager_ids = mcp_managers.keys().cloned().collect::<HashSet<_>>();
+    let sqlite_pool_ids = pools.keys().cloned().collect::<HashSet<_>>();
+
+    let accepted_agents = resolve_warmup_agent_ids(
+        request.agent_id.as_deref(),
+        &runtime_config_ids,
+        &memory_search_ids,
+        &mcp_manager_ids,
+        &sqlite_pool_ids,
+    )?;
+
+    for agent_id in accepted_agents.iter() {
+        let Some(runtime_config) = runtime_configs.get(agent_id).cloned() else {
+            continue;
+        };
+        let Some(memory_search) = memory_searches.get(agent_id).cloned() else {
+            continue;
+        };
+        let Some(mcp_manager) = mcp_managers.get(agent_id).cloned() else {
+            continue;
+        };
+        let Some(sqlite_pool) = pools.get(agent_id).cloned() else {
+            continue;
+        };
+        let Some(sandbox) = sandboxes.get(agent_id).cloned() else {
+            continue;
+        };
+
+        let llm_manager = llm_manager.clone();
+        let force = request.force;
+        let agent_id = agent_id.clone();
+        tokio::spawn(async move {
+            let (event_tx, _event_rx) = tokio::sync::broadcast::channel(16);
+            let deps = crate::AgentDeps {
+                agent_id: Arc::from(agent_id.as_str()),
+                memory_search,
+                llm_manager,
+                mcp_manager,
+                cron_tool: None,
+                runtime_config,
+                event_tx,
+                sqlite_pool: sqlite_pool.clone(),
+                messaging_manager: None,
+                sandbox,
+                links: Arc::new(arc_swap::ArcSwap::from_pointee(Vec::new())),
+                agent_names: Arc::new(std::collections::HashMap::new()),
+            };
+            let logger = CortexLogger::new(sqlite_pool);
+            crate::agent::cortex::run_warmup_once(&deps, &logger, "api_trigger", force).await;
+        });
+    }
+
+    Ok(Json(WarmupTriggerResponse {
+        status: "warming",
+        forced: request.force,
+        accepted_agents,
+    }))
 }
 
 /// Create a new agent and initialize it live (directories, databases, memory, identity, cron, cortex).
@@ -263,6 +483,16 @@ pub(super) async fn create_agent(
 
     let mut new_table = toml_edit::Table::new();
     new_table["id"] = toml_edit::value(&agent_id);
+    if let Some(display_name) = &request.display_name
+        && !display_name.is_empty()
+    {
+        new_table["display_name"] = toml_edit::value(display_name.as_str());
+    }
+    if let Some(role) = &request.role
+        && !role.is_empty()
+    {
+        new_table["role"] = toml_edit::value(role.as_str());
+    }
     agents_array.push(new_table);
 
     tokio::fs::write(&config_path, doc.to_string())
@@ -281,6 +511,8 @@ pub(super) async fn create_agent(
     let raw_config = crate::config::AgentConfig {
         id: agent_id.clone(),
         default: false,
+        display_name: request.display_name.clone().filter(|s| !s.is_empty()),
+        role: request.role.clone().filter(|s| !s.is_empty()),
         workspace: None,
         routing: None,
         max_concurrent_branches: None,
@@ -293,11 +525,13 @@ pub(super) async fn create_agent(
         coalesce: None,
         ingestion: None,
         cortex: None,
+        warmup: None,
         browser: None,
         memory_injection: None,
         mcp: None,
         brave_search_key: None,
         cron_timezone: None,
+        sandbox: None,
         cron: Vec::new(),
     };
     let agent_config = raw_config.resolve(&instance_dir, defaults);
@@ -421,6 +655,16 @@ pub(super) async fn create_agent(
     let mcp_manager = std::sync::Arc::new(crate::mcp::McpManager::new(agent_config.mcp.clone()));
     mcp_manager.connect_all().await;
 
+    let sandbox = std::sync::Arc::new(
+        crate::sandbox::Sandbox::new(
+            &agent_config.sandbox,
+            agent_config.workspace.clone(),
+            &instance_dir,
+            agent_config.data_dir.clone(),
+        )
+        .await,
+    );
+
     let deps = crate::AgentDeps {
         agent_id: arc_agent_id.clone(),
         memory_search: memory_search.clone(),
@@ -433,6 +677,30 @@ pub(super) async fn create_agent(
         messaging_manager: {
             let guard = state.messaging_manager.read().await;
             guard.as_ref().cloned()
+        },
+        sandbox: sandbox.clone(),
+        links: Arc::new(arc_swap::ArcSwap::from_pointee(
+            (**state.agent_links.load()).clone(),
+        )),
+        agent_names: {
+            let configs = state.agent_configs.load();
+            let mut names: std::collections::HashMap<String, String> = configs
+                .iter()
+                .map(|c| {
+                    (
+                        c.id.clone(),
+                        c.display_name.clone().unwrap_or_else(|| c.id.clone()),
+                    )
+                })
+                .collect();
+            names.entry(agent_id.clone()).or_insert_with(|| {
+                request
+                    .display_name
+                    .clone()
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| agent_id.clone())
+            });
+            Arc::new(names)
         },
     };
 
@@ -463,6 +731,7 @@ pub(super) async fn create_agent(
     let conversation_logger =
         crate::conversation::history::ConversationLogger::new(db.sqlite.clone());
     let channel_store = crate::conversation::ChannelStore::new(db.sqlite.clone());
+
     let cortex_tool_server = crate::tools::create_cortex_chat_tool_server(
         memory_search.clone(),
         conversation_logger,
@@ -471,7 +740,7 @@ pub(super) async fn create_agent(
         agent_config.screenshot_dir(),
         brave_search_key,
         runtime_config.workspace_dir.clone(),
-        runtime_config.instance_dir.clone(),
+        sandbox.clone(),
     );
     let cortex_store = crate::agent::cortex_chat::CortexChatStore::new(db.sqlite.clone());
     let cortex_session = crate::agent::cortex_chat::CortexChatSession::new(
@@ -481,6 +750,7 @@ pub(super) async fn create_agent(
     );
 
     let cortex_logger = crate::agent::cortex::CortexLogger::new(db.sqlite.clone());
+    let _warmup_loop = crate::agent::cortex::spawn_warmup_loop(deps.clone(), cortex_logger.clone());
     let _bulletin_loop =
         crate::agent::cortex::spawn_bulletin_loop(deps.clone(), cortex_logger.clone());
     let _association_loop =
@@ -527,9 +797,15 @@ pub(super) async fn create_agent(
         mcp_managers.insert(agent_id.clone(), mcp_manager);
         state.mcp_managers.store(std::sync::Arc::new(mcp_managers));
 
+        let mut sandboxes = (**state.sandboxes.load()).clone();
+        sandboxes.insert(agent_id.clone(), sandbox);
+        state.sandboxes.store(std::sync::Arc::new(sandboxes));
+
         let mut agent_infos = (**state.agent_configs.load()).clone();
         agent_infos.push(AgentInfo {
             id: agent_config.id.clone(),
+            display_name: agent_config.display_name.clone(),
+            role: agent_config.role.clone(),
             workspace: agent_config.workspace.clone(),
             context_window: agent_config.context_window,
             max_turns: agent_config.max_turns,
@@ -561,6 +837,97 @@ pub(super) async fn create_agent(
         "success": true,
         "agent_id": agent_id,
         "message": format!("Agent '{agent_id}' created and running")
+    })))
+}
+
+/// Update an agent's display_name and role in config.toml.
+pub(super) async fn update_agent(
+    State(state): State<Arc<ApiState>>,
+    Json(request): Json<UpdateAgentRequest>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let agent_id = request.agent_id.trim().to_string();
+    if agent_id.is_empty() {
+        return Ok(Json(serde_json::json!({
+            "success": false,
+            "message": "Agent ID cannot be empty"
+        })));
+    }
+
+    let existing = state.agent_configs.load();
+    let index = existing
+        .iter()
+        .position(|a| a.id == agent_id)
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    let config_path = state.config_path.read().await.clone();
+    let content = tokio::fs::read_to_string(&config_path)
+        .await
+        .map_err(|error| {
+            tracing::warn!(%error, "failed to read config.toml");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+    let mut doc: toml_edit::DocumentMut = content.parse().map_err(|error| {
+        tracing::warn!(%error, "failed to parse config.toml");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    if let Some(agents_array) = doc
+        .get_mut("agents")
+        .and_then(|a| a.as_array_of_tables_mut())
+    {
+        for table in agents_array.iter_mut() {
+            let table_id = table.get("id").and_then(|v| v.as_str());
+            if table_id == Some(&agent_id) {
+                if let Some(display_name) = &request.display_name {
+                    if display_name.is_empty() {
+                        table.remove("display_name");
+                    } else {
+                        table["display_name"] = toml_edit::value(display_name.as_str());
+                    }
+                }
+                if let Some(role) = &request.role {
+                    if role.is_empty() {
+                        table.remove("role");
+                    } else {
+                        table["role"] = toml_edit::value(role.as_str());
+                    }
+                }
+                break;
+            }
+        }
+    }
+
+    tokio::fs::write(&config_path, doc.to_string())
+        .await
+        .map_err(|error| {
+            tracing::warn!(%error, "failed to write config.toml");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    let mut configs = (**existing).clone();
+    let info = &mut configs[index];
+    if let Some(display_name) = &request.display_name {
+        info.display_name = if display_name.is_empty() {
+            None
+        } else {
+            Some(display_name.clone())
+        };
+    }
+    if let Some(role) = &request.role {
+        info.role = if role.is_empty() {
+            None
+        } else {
+            Some(role.clone())
+        };
+    }
+    state.set_agent_configs(configs);
+
+    tracing::info!(agent_id = %agent_id, "agent updated via API");
+
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "agent_id": agent_id,
+        "message": format!("Agent '{agent_id}' updated")
     })))
 }
 
@@ -662,6 +1029,10 @@ pub(super) async fn delete_agent(
         let mut configs = (**state.runtime_configs.load()).clone();
         configs.remove(&agent_id);
         state.runtime_configs.store(std::sync::Arc::new(configs));
+
+        let mut sandboxes = (**state.sandboxes.load()).clone();
+        sandboxes.remove(&agent_id);
+        state.sandboxes.store(std::sync::Arc::new(sandboxes));
 
         let mut agent_infos = (**state.agent_configs.load()).clone();
         agent_infos.retain(|a| a.id != agent_id);
@@ -1039,4 +1410,182 @@ pub(super) async fn update_identity(
         identity: updated.identity,
         user: updated.user,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        ApiState, WarmupQuery, WarmupTriggerRequest, compute_bulletin_age_secs, get_warmup_status,
+        resolve_warmup_agent_ids, trigger_warmup,
+    };
+    use crate::config::{Config, RuntimeConfig, WarmupState, WarmupStatus};
+    use crate::identity::Identity;
+    use crate::prompts::PromptEngine;
+    use crate::skills::SkillSet;
+    use axum::Json;
+    use axum::extract::{Query, State};
+    use axum::http::StatusCode;
+    use std::collections::{HashMap, HashSet};
+    use std::sync::Arc;
+
+    fn test_api_state() -> Arc<ApiState> {
+        let (provider_setup_tx, _provider_setup_rx) = tokio::sync::mpsc::channel(1);
+        let (agent_tx, _agent_rx) = tokio::sync::mpsc::channel(1);
+        let (agent_remove_tx, _agent_remove_rx) = tokio::sync::mpsc::channel(1);
+
+        Arc::new(ApiState::new_with_provider_sender(
+            provider_setup_tx,
+            agent_tx,
+            agent_remove_tx,
+        ))
+    }
+
+    fn test_runtime_config(instance_dir: &std::path::Path) -> Arc<RuntimeConfig> {
+        let config = Config::load_from_env(instance_dir).expect("failed to build config");
+        let resolved = config
+            .resolve_agents()
+            .into_iter()
+            .next()
+            .expect("missing resolved agent config");
+        let prompts = PromptEngine::new("en").expect("failed to build prompt engine");
+
+        Arc::new(RuntimeConfig::new(
+            instance_dir,
+            &resolved,
+            &config.defaults,
+            prompts,
+            Identity::default(),
+            SkillSet::default(),
+        ))
+    }
+
+    #[test]
+    fn test_compute_bulletin_age_secs_none_stays_none() {
+        assert_eq!(compute_bulletin_age_secs(None, 1_000), None);
+    }
+
+    #[test]
+    fn test_compute_bulletin_age_secs_rounds_down_to_seconds() {
+        let age = compute_bulletin_age_secs(Some(1_000), 4_999);
+        assert_eq!(age, Some(3));
+    }
+
+    #[test]
+    fn test_compute_bulletin_age_secs_future_timestamp_clamps_to_zero() {
+        let age = compute_bulletin_age_secs(Some(10_000), 9_000);
+        assert_eq!(age, Some(0));
+    }
+
+    #[tokio::test]
+    async fn test_get_warmup_status_sorts_agent_ids_and_hydrates_age() {
+        let state = test_api_state();
+        let tempdir = tempfile::tempdir().expect("failed to create tempdir");
+        let refresh_ms = chrono::Utc::now().timestamp_millis() - 3_500;
+
+        let alpha_config = test_runtime_config(tempdir.path());
+        alpha_config.warmup_status.store(Arc::new(WarmupStatus {
+            state: WarmupState::Warm,
+            embedding_ready: true,
+            last_refresh_unix_ms: Some(refresh_ms),
+            bulletin_age_secs: None,
+            last_error: None,
+        }));
+        let zeta_config = test_runtime_config(tempdir.path());
+
+        let mut runtime_configs = HashMap::new();
+        runtime_configs.insert("zeta".to_string(), zeta_config);
+        runtime_configs.insert("alpha".to_string(), alpha_config);
+        state.runtime_configs.store(Arc::new(runtime_configs));
+
+        let response = get_warmup_status(State(state), Query(WarmupQuery { agent_id: None }))
+            .await
+            .expect("warmup status request failed")
+            .0;
+
+        assert_eq!(response.statuses.len(), 2);
+        assert_eq!(response.statuses[0].agent_id, "alpha");
+        assert_eq!(response.statuses[1].agent_id, "zeta");
+        assert_eq!(response.statuses[0].status.state, WarmupState::Warm);
+        assert!(
+            response.statuses[0]
+                .status
+                .bulletin_age_secs
+                .expect("missing bulletin age")
+                >= 3
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_warmup_status_single_agent_not_found() {
+        let state = test_api_state();
+
+        let result = get_warmup_status(
+            State(state),
+            Query(WarmupQuery {
+                agent_id: Some("missing".to_string()),
+            }),
+        )
+        .await;
+
+        assert!(matches!(result, Err(StatusCode::NOT_FOUND)));
+    }
+
+    #[tokio::test]
+    async fn test_trigger_warmup_requires_llm_manager() {
+        let state = test_api_state();
+
+        let result = trigger_warmup(
+            State(state),
+            Json(WarmupTriggerRequest {
+                agent_id: None,
+                force: false,
+            }),
+        )
+        .await;
+
+        assert!(matches!(result, Err(StatusCode::SERVICE_UNAVAILABLE)));
+    }
+
+    #[tokio::test]
+    async fn test_trigger_warmup_single_agent_not_found_when_llm_manager_is_ready() {
+        let state = test_api_state();
+        let tempdir = tempfile::tempdir().expect("failed to create tempdir");
+        let config = Config::load_from_env(tempdir.path()).expect("failed to build config");
+        let llm_manager = Arc::new(
+            crate::llm::LlmManager::new(config.llm.clone())
+                .await
+                .expect("failed to build llm manager"),
+        );
+        *state.llm_manager.write().await = Some(llm_manager);
+
+        let result = trigger_warmup(
+            State(state),
+            Json(WarmupTriggerRequest {
+                agent_id: Some("missing".to_string()),
+                force: false,
+            }),
+        )
+        .await;
+
+        assert!(matches!(result, Err(StatusCode::NOT_FOUND)));
+    }
+
+    #[test]
+    fn test_resolve_warmup_agent_ids_accepts_single_agent_when_deps_present() {
+        let runtime_config_ids = HashSet::from([String::from("main")]);
+        let memory_search_ids = HashSet::from([String::from("main")]);
+        let mcp_manager_ids = HashSet::from([String::from("main")]);
+        let sqlite_pool_ids = HashSet::from([String::from("main")]);
+
+        let accepted = resolve_warmup_agent_ids(
+            Some("main"),
+            &runtime_config_ids,
+            &memory_search_ids,
+            &mcp_manager_ids,
+            &sqlite_pool_ids,
+        )
+        .expect("expected warmup target acceptance");
+
+        assert_eq!(accepted, vec![String::from("main")]);
+    }
 }

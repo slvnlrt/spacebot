@@ -91,6 +91,13 @@ worker_timeout_secs = 300
 branch_timeout_secs = 60
 circuit_breaker_threshold = 3  # consecutive failures before auto-disable
 
+# Warmup controls for cold-start behavior and manual rewarm.
+[defaults.warmup]
+enabled = true
+eager_embedding_load = true
+refresh_secs = 900
+startup_delay_secs = 5
+
 # Browser automation for workers.
 [defaults.browser]
 enabled = true
@@ -111,6 +118,11 @@ cron_timezone = "America/Los_Angeles"  # optional per-agent cron timezone overri
 # Per-agent routing overrides (merges with defaults).
 [agents.routing]
 channel = "anthropic/claude-opus-4-20250514"
+
+# Per-agent sandbox configuration.
+[agents.sandbox]
+mode = "enabled"                               # "enabled" (default) or "disabled"
+writable_paths = ["/home/user/projects/myapp"] # additional writable directories
 
 # Per-agent cron jobs.
 [[agents.cron]]
@@ -214,6 +226,7 @@ Most config values are hot-reloaded when their files change. Spacebot watches `c
 | `context_window` | Yes | Next compaction/worker check uses new size |
 | `max_concurrent_branches` | Yes | Next branch spawn checks new limit |
 | Browser config | Yes | Next worker spawn uses new config |
+| Warmup config | Yes | Next warmup pass uses new values |
 | Identity files (SOUL.md, etc.) | Yes | Next channel message renders new identity |
 | Skills (SKILL.md files) | Yes | Next message / worker spawn sees new skills |
 | Bindings | Yes | Next message routes using new bindings |
@@ -467,6 +480,23 @@ Thresholds are fractions of `context_window`.
 | `branch_timeout_secs` | integer | 60 | Branch timeout before cancellation |
 | `circuit_breaker_threshold` | integer | 3 | Consecutive failures before auto-disable |
 
+### `[defaults.warmup]`
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `enabled` | bool | true | Enable background warmup loop |
+| `eager_embedding_load` | bool | true | Warm embedding model before first recall/write workload |
+| `refresh_secs` | integer | 900 | Seconds between background warmup passes |
+| `startup_delay_secs` | integer | 5 | Delay before first warmup pass after boot |
+
+Dispatch readiness is derived from warmup runtime state:
+
+- warmup state must be `warm`
+- embedding must be ready
+- bulletin age must be fresh (<= `max(60s, refresh_secs * 2)`)
+
+When branch/worker/cron dispatch happens before readiness is satisfied, Spacebot still dispatches, increments cold-dispatch metrics, and queues a forced warmup pass in the background.
+
 ### `[defaults.browser]`
 
 | Key | Type | Default | Description |
@@ -490,6 +520,34 @@ Thresholds are fractions of `context_window`.
 | `context_window` | integer | inherits | Override instance default |
 
 Agent-specific routing is set via `[agents.routing]` with the same keys as `[defaults.routing]`.
+
+### `[agents.sandbox]`
+
+OS-level filesystem containment for shell and exec tool subprocesses. Uses bubblewrap (Linux) or sandbox-exec (macOS) to enforce read-only access to everything outside the workspace.
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `mode` | string | `"enabled"` | `"enabled"` for kernel-enforced containment, `"disabled"` for full host access |
+| `writable_paths` | string[] | `[]` | Additional directories the agent can write to beyond its workspace |
+
+When `mode = "enabled"`, shell and exec commands run inside a mount namespace where the entire filesystem is read-only except:
+
+- The agent's workspace directory
+- `/tmp` (private per invocation)
+- `/dev` (standard device nodes)
+- Any paths listed in `writable_paths`
+
+The agent's data directory (databases, config) is explicitly re-mounted read-only even if it would otherwise be writable due to path overlap.
+
+When `SPACEBOT_DEPLOYMENT=hosted`, sandbox mode is always `"enabled"` regardless of config.
+
+If the sandbox backend isn't available (e.g. bubblewrap not installed), processes run unsandboxed with a warning at startup.
+
+```toml
+[agents.sandbox]
+mode = "enabled"
+writable_paths = ["/home/user/projects/myapp", "/var/data/shared"]
+```
 
 ### `[[agents.cron]]`
 

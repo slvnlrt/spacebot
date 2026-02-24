@@ -185,16 +185,16 @@ const PROVIDERS = [
 	{
 		id: "minimax",
 		name: "MiniMax",
-		description: "MiniMax M1 (Anthropic message format)",
-		placeholder: "eyJ...",
+		description: "MiniMax (Anthropic message format)",
+		placeholder: "sk-...",
 		envVar: "MINIMAX_API_KEY",
-		defaultModel: "minimax/MiniMax-M1-80k",
+		defaultModel: "minimax/MiniMax-M2.5",
 	},
 	{
 		id: "minimax-cn",
 		name: "MiniMax CN",
-		description: "MiniMax M2.5 (Anthropic message format)",
-		placeholder: "eyJ...",
+		description: "MiniMax China (Anthropic message format)",
+		placeholder: "sk-...",
 		envVar: "MINIMAX_CN_API_KEY",
 		defaultModel: "minimax-cn/MiniMax-M2.5",
 	},
@@ -215,6 +215,8 @@ const PROVIDERS = [
 		defaultModel: "ollama/llama3.2",
 	},
 ] as const;
+
+const CHATGPT_OAUTH_DEFAULT_MODEL = "openai-chatgpt/gpt-5.3-codex";
 
 export function Settings() {
 	const queryClient = useQueryClient();
@@ -242,6 +244,17 @@ export function Settings() {
 		message: string;
 		sample?: string | null;
 	} | null>(null);
+	const [isPollingOpenAiBrowserOAuth, setIsPollingOpenAiBrowserOAuth] = useState(false);
+	const [openAiBrowserOAuthMessage, setOpenAiBrowserOAuthMessage] = useState<{
+		text: string;
+		type: "success" | "error";
+	} | null>(null);
+	const [openAiOAuthDialogOpen, setOpenAiOAuthDialogOpen] = useState(false);
+	const [deviceCodeInfo, setDeviceCodeInfo] = useState<{
+		userCode: string;
+		verificationUrl: string;
+	} | null>(null);
+	const [deviceCodeCopied, setDeviceCodeCopied] = useState(false);
 	const [message, setMessage] = useState<{
 		text: string;
 		type: "success" | "error";
@@ -293,6 +306,9 @@ export function Settings() {
 		mutationFn: ({ provider, apiKey, model }: { provider: string; apiKey: string; model: string }) =>
 			api.testProviderModel(provider, apiKey, model),
 	});
+	const startOpenAiBrowserOAuthMutation = useMutation({
+		mutationFn: (params: { model: string }) => api.startOpenAiOAuthBrowser(params),
+	});
 
 	const removeMutation = useMutation({
 		mutationFn: (provider: string) => api.removeProvider(provider),
@@ -312,6 +328,9 @@ export function Settings() {
 	const editingProviderData = PROVIDERS.find((p) => p.id === editingProvider);
 
 	const currentSignature = `${editingProvider ?? ""}|${keyInput.trim()}|${modelInput.trim()}`;
+
+	const oauthAutoStartRef = useRef(false);
+	const oauthAbortRef = useRef<AbortController | null>(null);
 
 	const handleTestModel = async (): Promise<boolean> => {
 		if (!editingProvider || !keyInput.trim() || !modelInput.trim()) return false;
@@ -351,6 +370,148 @@ export function Settings() {
 			apiKey: keyInput.trim(),
 			model: modelInput.trim(),
 		});
+	};
+
+	const monitorOpenAiBrowserOAuth = async (stateToken: string, signal: AbortSignal) => {
+		setIsPollingOpenAiBrowserOAuth(true);
+		setOpenAiBrowserOAuthMessage(null);
+		try {
+			for (let attempt = 0; attempt < 360; attempt += 1) {
+				if (signal.aborted) return;
+				const status = await api.openAiOAuthBrowserStatus(stateToken);
+				if (signal.aborted) return;
+				if (status.done) {
+					setDeviceCodeInfo(null);
+					setDeviceCodeCopied(false);
+					if (status.success) {
+						setOpenAiBrowserOAuthMessage({
+							text: status.message || "ChatGPT OAuth configured.",
+							type: "success",
+						});
+						queryClient.invalidateQueries({queryKey: ["providers"]});
+						setTimeout(() => {
+							queryClient.invalidateQueries({queryKey: ["agents"]});
+							queryClient.invalidateQueries({queryKey: ["overview"]});
+						}, 3000);
+					} else {
+						setOpenAiBrowserOAuthMessage({
+							text: status.message || "Sign-in failed.",
+							type: "error",
+						});
+					}
+					return;
+				}
+				await new Promise((resolve) => {
+					const onAbort = () => {
+						clearTimeout(timer);
+						resolve(undefined);
+					};
+					const timer = setTimeout(() => {
+						signal.removeEventListener("abort", onAbort);
+						resolve(undefined);
+					}, 2000);
+					signal.addEventListener("abort", onAbort, { once: true });
+				});
+			}
+			if (signal.aborted) return;
+			setDeviceCodeInfo(null);
+			setDeviceCodeCopied(false);
+			setOpenAiBrowserOAuthMessage({
+				text: "Sign-in timed out. Please try again.",
+				type: "error",
+			});
+		} catch (error: any) {
+			if (signal.aborted) return;
+			setDeviceCodeInfo(null);
+			setDeviceCodeCopied(false);
+			setOpenAiBrowserOAuthMessage({
+				text: `Failed to verify sign-in: ${error.message}`,
+				type: "error",
+			});
+		} finally {
+			setIsPollingOpenAiBrowserOAuth(false);
+		}
+	};
+
+	const handleStartChatGptOAuth = async () => {
+		setOpenAiBrowserOAuthMessage(null);
+		setDeviceCodeInfo(null);
+		setDeviceCodeCopied(false);
+		try {
+			const result = await startOpenAiBrowserOAuthMutation.mutateAsync({
+				model: CHATGPT_OAUTH_DEFAULT_MODEL,
+			});
+			if (!result.success || !result.user_code || !result.verification_url || !result.state) {
+				setOpenAiBrowserOAuthMessage({
+					text: result.message || "Failed to start device sign-in",
+					type: "error",
+				});
+				return;
+			}
+
+			oauthAbortRef.current?.abort();
+			const abort = new AbortController();
+			oauthAbortRef.current = abort;
+
+			setDeviceCodeInfo({
+				userCode: result.user_code,
+				verificationUrl: result.verification_url,
+			});
+			void monitorOpenAiBrowserOAuth(result.state, abort.signal);
+		} catch (error: any) {
+			setOpenAiBrowserOAuthMessage({text: `Failed: ${error.message}`, type: "error"});
+		}
+	};
+
+	useEffect(() => {
+		if (!openAiOAuthDialogOpen) {
+			oauthAutoStartRef.current = false;
+			oauthAbortRef.current?.abort();
+			oauthAbortRef.current = null;
+			setDeviceCodeInfo(null);
+			setDeviceCodeCopied(false);
+			setOpenAiBrowserOAuthMessage(null);
+			setIsPollingOpenAiBrowserOAuth(false);
+			return;
+		}
+
+		if (oauthAutoStartRef.current) return;
+		oauthAutoStartRef.current = true;
+		void handleStartChatGptOAuth();
+	}, [openAiOAuthDialogOpen]);
+
+	const handleCopyDeviceCode = async () => {
+		if (!deviceCodeInfo) return;
+		try {
+			if (navigator.clipboard?.writeText) {
+				await navigator.clipboard.writeText(deviceCodeInfo.userCode);
+			} else {
+				const textarea = document.createElement("textarea");
+				textarea.value = deviceCodeInfo.userCode;
+				textarea.setAttribute("readonly", "");
+				textarea.style.position = "absolute";
+				textarea.style.left = "-9999px";
+				document.body.appendChild(textarea);
+				textarea.select();
+				document.execCommand("copy");
+				document.body.removeChild(textarea);
+			}
+			setDeviceCodeCopied(true);
+		} catch (error: any) {
+			setOpenAiBrowserOAuthMessage({
+				text: `Failed to copy code: ${error.message}`,
+				type: "error",
+			});
+		}
+	};
+
+	const handleOpenDeviceLogin = () => {
+		if (!deviceCodeInfo || !deviceCodeCopied) return;
+		window.open(
+			deviceCodeInfo.verificationUrl,
+			"spacebot-openai-device",
+			"popup=true,width=780,height=960,noopener,noreferrer",
+		);
 	};
 
 	const handleClose = () => {
@@ -425,24 +586,41 @@ export function Settings() {
 							) : (
 								<div className="flex flex-col gap-3">
 									{PROVIDERS.map((provider) => (
-										<ProviderCard
-											key={provider.id}
-											provider={provider.id}
-											name={provider.name}
-											description={provider.description}
-											configured={isConfigured(provider.id)}
-											defaultModel={provider.defaultModel}
-											onEdit={() => {
-												setEditingProvider(provider.id);
-												setKeyInput("");
-												setModelInput(provider.defaultModel ?? "");
-												setTestedSignature(null);
-												setTestResult(null);
-												setMessage(null);
-											}}
-											onRemove={() => removeMutation.mutate(provider.id)}
-											removing={removeMutation.isPending}
-										/>
+										[
+											<ProviderCard
+												key={provider.id}
+												provider={provider.id}
+												name={provider.name}
+												description={provider.description}
+												configured={isConfigured(provider.id)}
+												defaultModel={provider.defaultModel}
+												onEdit={() => {
+													setEditingProvider(provider.id);
+													setKeyInput("");
+													setModelInput(provider.defaultModel ?? "");
+													setTestedSignature(null);
+													setTestResult(null);
+													setMessage(null);
+												}}
+												onRemove={() => removeMutation.mutate(provider.id)}
+												removing={removeMutation.isPending}
+											/>,
+											provider.id === "openai" ? (
+												<ProviderCard
+													key="openai-chatgpt"
+													provider="openai-chatgpt"
+													name="ChatGPT Plus (OAuth)"
+													description="Sign in with your ChatGPT Plus account using a device code."
+													configured={isConfigured("openai-chatgpt")}
+													defaultModel={CHATGPT_OAUTH_DEFAULT_MODEL}
+													onEdit={() => setOpenAiOAuthDialogOpen(true)}
+													onRemove={() => removeMutation.mutate("openai-chatgpt")}
+													removing={removeMutation.isPending}
+													actionLabel="Sign in"
+													showRemove={isConfigured("openai-chatgpt")}
+												/>
+											) : null,
+										]
 									))}
 								</div>
 							)}
@@ -462,6 +640,19 @@ export function Settings() {
 									, etc.).
 								</p>
 							</div>
+
+							<ChatGptOAuthDialog
+								open={openAiOAuthDialogOpen}
+								onOpenChange={setOpenAiOAuthDialogOpen}
+								isRequesting={startOpenAiBrowserOAuthMutation.isPending}
+								isPolling={isPollingOpenAiBrowserOAuth}
+								message={openAiBrowserOAuthMessage}
+								deviceCodeInfo={deviceCodeInfo}
+								deviceCodeCopied={deviceCodeCopied}
+								onCopyDeviceCode={handleCopyDeviceCode}
+								onOpenDeviceLogin={handleOpenDeviceLogin}
+								onRestart={handleStartChatGptOAuth}
+							/>
 						</div>
 					) : activeSection === "channels" ? (
 						<ChannelsSection />
@@ -491,6 +682,8 @@ export function Settings() {
 						<DialogDescription>
 							{editingProvider === "ollama"
 								? `Enter your ${editingProviderData?.name} base URL. It will be saved to your instance config.`
+								: editingProvider === "openai"
+									? "Enter an OpenAI API key. The model below will be applied to routing."
 								: `Enter your ${editingProviderData?.name} API key. It will be saved to your instance config.`}
 						</DialogDescription>
 					</DialogHeader>
@@ -1767,9 +1960,24 @@ interface ProviderCardProps {
 	onEdit: () => void;
 	onRemove: () => void;
 	removing: boolean;
+	actionLabel?: string;
+	showRemove?: boolean;
 }
 
-function ProviderCard({ provider, name, description, configured, defaultModel, onEdit, onRemove, removing }: ProviderCardProps) {
+function ProviderCard({
+	provider,
+	name,
+	description,
+	configured,
+	defaultModel,
+	onEdit,
+	onRemove,
+	removing,
+	actionLabel,
+	showRemove,
+}: ProviderCardProps) {
+	const primaryLabel = actionLabel ?? (configured ? "Update" : "Add key");
+	const shouldShowRemove = showRemove ?? configured;
 	return (
 		<div className="rounded-lg border border-app-line bg-app-box p-4">
 			<div className="flex items-center gap-3">
@@ -1778,8 +1986,9 @@ function ProviderCard({ provider, name, description, configured, defaultModel, o
 					<div className="flex items-center gap-2">
 						<span className="text-sm font-medium text-ink">{name}</span>
 						{configured && (
-							<span className="text-tiny text-green-400">
-								● Configured
+							<span className="inline-flex items-center">
+								<span className="h-2 w-2 rounded-full bg-green-400" aria-hidden="true" />
+								<span className="sr-only">Configured</span>
 							</span>
 						)}
 					</div>
@@ -1790,9 +1999,9 @@ function ProviderCard({ provider, name, description, configured, defaultModel, o
 				</div>
 				<div className="flex gap-2">
 					<Button onClick={onEdit} variant="outline" size="sm">
-						{configured ? "Update" : "Add key"}
+						{primaryLabel}
 					</Button>
-					{configured && (
+					{shouldShowRemove && (
 						<Button onClick={onRemove} variant="outline" size="sm" loading={removing}>
 							Remove
 						</Button>
@@ -1800,5 +2009,162 @@ function ProviderCard({ provider, name, description, configured, defaultModel, o
 				</div>
 			</div>
 		</div>
+	);
+}
+
+interface ChatGptOAuthDialogProps {
+	open: boolean;
+	onOpenChange: (open: boolean) => void;
+	isRequesting: boolean;
+	isPolling: boolean;
+	message: { text: string; type: "success" | "error" } | null;
+	deviceCodeInfo: { userCode: string; verificationUrl: string } | null;
+	deviceCodeCopied: boolean;
+	onCopyDeviceCode: () => void;
+	onOpenDeviceLogin: () => void;
+	onRestart: () => void;
+}
+
+function ChatGptOAuthDialog({
+	open,
+	onOpenChange,
+	isRequesting,
+	isPolling,
+	message,
+	deviceCodeInfo,
+	deviceCodeCopied,
+	onCopyDeviceCode,
+	onOpenDeviceLogin,
+	onRestart,
+}: ChatGptOAuthDialogProps) {
+	return (
+		<Dialog open={open} onOpenChange={onOpenChange}>
+			<DialogContent className="max-w-md">
+				<DialogHeader>
+					<DialogTitle className="flex items-center gap-2">
+						<ProviderIcon provider="openai-chatgpt" size={20} />
+						Sign in with ChatGPT Plus
+					</DialogTitle>
+					{!message && (
+						<DialogDescription>
+							Copy the device code below, then sign in to your OpenAI account to authorize access.
+						</DialogDescription>
+					)}
+				</DialogHeader>
+
+				<div className="space-y-4">
+					{message && !deviceCodeInfo ? (
+						/* Completed state — success or error with no active flow */
+						<div
+							className={`rounded-md border px-3 py-2 text-sm ${message.type === "success"
+								? "border-green-500/20 bg-green-500/10 text-green-400"
+								: "border-red-500/20 bg-red-500/10 text-red-400"
+							}`}
+						>
+							{message.text}
+						</div>
+					) : isRequesting && !deviceCodeInfo ? (
+						<div className="flex items-center gap-2 text-sm text-ink-dull">
+							<div className="h-2 w-2 animate-pulse rounded-full bg-accent" />
+							Requesting device code...
+						</div>
+					) : deviceCodeInfo ? (
+						<div className="space-y-4">
+							<div className="rounded-md border border-app-line p-3">
+								<div className="flex items-center gap-2">
+									<span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-accent/15 text-[11px] font-semibold text-accent">1</span>
+									<p className="text-sm text-ink-dull">Copy this device code</p>
+								</div>
+								<div className="mt-2.5 flex items-center gap-2 pl-7">
+									<code className="rounded border border-app-line bg-app-darkerBox px-3 py-1.5 font-mono text-base tracking-widest text-ink">
+										{deviceCodeInfo.userCode}
+									</code>
+									<Button onClick={onCopyDeviceCode} size="sm" variant={deviceCodeCopied ? "secondary" : "outline"}>
+										{deviceCodeCopied ? "Copied" : "Copy"}
+									</Button>
+								</div>
+							</div>
+
+							<div className={`rounded-md border border-app-line p-3 ${!deviceCodeCopied ? "opacity-50" : ""}`}>
+								<div className="flex items-center gap-2">
+									<span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-accent/15 text-[11px] font-semibold text-accent">2</span>
+									<p className="text-sm text-ink-dull">Open OpenAI and paste the code</p>
+								</div>
+								<div className="mt-2.5 pl-7">
+									<Button
+										onClick={onOpenDeviceLogin}
+										disabled={!deviceCodeCopied}
+										size="sm"
+										variant="outline"
+									>
+										Open login page
+									</Button>
+								</div>
+							</div>
+
+							{isPolling && !message && (
+								<div className="flex items-center gap-2 text-sm text-ink-faint">
+									<div className="h-2 w-2 animate-pulse rounded-full bg-accent" />
+									Waiting for sign-in confirmation...
+								</div>
+							)}
+
+							{message && (
+								<div
+									className={`rounded-md border px-3 py-2 text-sm ${message.type === "success"
+										? "border-green-500/20 bg-green-500/10 text-green-400"
+										: "border-red-500/20 bg-red-500/10 text-red-400"
+									}`}
+								>
+									{message.text}
+								</div>
+							)}
+						</div>
+					) : null}
+				</div>
+
+				<DialogFooter>
+					{message && !deviceCodeInfo ? (
+						/* Completed — show Done (or Retry for errors) */
+						message.type === "success" ? (
+							<Button onClick={() => onOpenChange(false)} size="sm">
+								Done
+							</Button>
+						) : (
+							<>
+								<Button onClick={() => onOpenChange(false)} variant="ghost" size="sm">
+									Close
+								</Button>
+								<Button
+									onClick={onRestart}
+									disabled={isRequesting}
+									loading={isRequesting}
+									size="sm"
+								>
+									Try again
+								</Button>
+							</>
+						)
+					) : (
+						<>
+							<Button onClick={() => onOpenChange(false)} variant="ghost" size="sm">
+								Cancel
+							</Button>
+							{deviceCodeInfo && (
+								<Button
+									onClick={onRestart}
+									disabled={isRequesting}
+									loading={isRequesting}
+									variant="outline"
+									size="sm"
+								>
+									Get new code
+								</Button>
+							)}
+						</>
+					)}
+				</DialogFooter>
+			</DialogContent>
+		</Dialog>
 	);
 }

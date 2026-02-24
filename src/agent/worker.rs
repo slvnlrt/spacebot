@@ -203,8 +203,9 @@ impl Worker {
             self.screenshot_dir.clone(),
             self.brave_search_key.clone(),
             self.deps.runtime_config.workspace_dir.clone(),
-            self.deps.runtime_config.instance_dir.clone(),
+            self.deps.sandbox.clone(),
             mcp_tools,
+            self.deps.runtime_config.clone(),
         );
 
         let routing = self.deps.runtime_config.routing.load();
@@ -265,7 +266,10 @@ impl Worker {
                                     None
                                 }
                             })
-                            .unwrap_or_else(|| "Worker reached maximum segments without a final response.".to_string());
+                            .unwrap_or_else(|| {
+                                "Worker reached maximum segments without a final response."
+                                    .to_string()
+                            });
                     }
 
                     self.maybe_compact_history(&mut history).await;
@@ -356,8 +360,7 @@ impl Worker {
                             self.hook.send_status("compacting (overflow recovery)");
                             self.force_compact_history(&mut history).await;
                             let prompt_engine = self.deps.runtime_config.prompts.load();
-                            let overflow_msg =
-                                prompt_engine.render_system_worker_overflow()?;
+                            let overflow_msg = prompt_engine.render_system_worker_overflow()?;
                             follow_up_prompt = format!("{follow_up}\n\n{overflow_msg}");
                         }
                         Err(error) => {

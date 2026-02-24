@@ -70,6 +70,16 @@ async fn bootstrap_deps() -> anyhow::Result<(spacebot::AgentDeps, spacebot::conf
     let agent_id: spacebot::AgentId = Arc::from(agent_config.id.as_str());
     let mcp_manager = Arc::new(spacebot::mcp::McpManager::new(agent_config.mcp.clone()));
 
+    let sandbox = Arc::new(
+        spacebot::sandbox::Sandbox::new(
+            &agent_config.sandbox,
+            agent_config.workspace.clone(),
+            &config.instance_dir,
+            agent_config.data_dir.clone(),
+        )
+        .await,
+    );
+
     let deps = spacebot::AgentDeps {
         agent_id,
         memory_search,
@@ -80,6 +90,9 @@ async fn bootstrap_deps() -> anyhow::Result<(spacebot::AgentDeps, spacebot::conf
         event_tx,
         sqlite_pool: db.sqlite.clone(),
         messaging_manager: None,
+        sandbox,
+        links: Arc::new(arc_swap::ArcSwap::from_pointee(Vec::new())),
+        agent_names: Arc::new(std::collections::HashMap::new()),
     };
 
     Ok((deps, config))
@@ -125,7 +138,9 @@ fn build_channel_system_prompt(rc: &spacebot::config::RuntimeConfig) -> String {
     let identity_context = rc.identity.load().render();
     let memory_bulletin = rc.memory_bulletin.load();
     let skills = rc.skills.load();
-    let skills_prompt = skills.render_channel_prompt(&prompt_engine);
+    let skills_prompt = skills
+        .render_channel_prompt(&prompt_engine)
+        .unwrap_or_default();
 
     let browser_enabled = rc.browser_config.load().enabled;
     let web_search_enabled = rc.brave_search_key.load().is_some();
@@ -202,6 +217,11 @@ async fn dump_channel_context() {
         "test-conversation",
         skip_flag,
         replied_flag,
+        None,
+        None,
+        None,
+        None,
+        None,
         None,
     )
     .await
@@ -317,8 +337,9 @@ async fn dump_worker_context() {
         std::path::PathBuf::from("/tmp/screenshots"),
         brave_search_key,
         std::path::PathBuf::from("/tmp"),
-        std::path::PathBuf::from("/tmp"),
+        deps.sandbox.clone(),
         vec![],
+        deps.runtime_config.clone(),
     );
 
     let tool_defs = worker_tool_server
@@ -413,6 +434,11 @@ async fn dump_all_contexts() {
         skip_flag,
         replied_flag,
         None,
+        None,
+        None,
+        None,
+        None,
+        None,
     )
     .await
     .expect("failed to add channel tools");
@@ -466,8 +492,9 @@ async fn dump_all_contexts() {
         std::path::PathBuf::from("/tmp/screenshots"),
         brave_search_key,
         std::path::PathBuf::from("/tmp"),
-        std::path::PathBuf::from("/tmp"),
+        deps.sandbox.clone(),
         vec![],
+        deps.runtime_config.clone(),
     );
     let worker_tool_defs = worker_tool_server.get_tool_defs(None).await.unwrap();
     let worker_tools_text = format_tool_defs(&worker_tool_defs);

@@ -312,42 +312,80 @@ impl Messaging for TelegramAdapter {
             OutboundResponse::File {
                 filename,
                 data,
-                mime_type: _,
+                mime_type,
                 caption,
             } => {
                 self.stop_typing(&message.conversation_id).await;
 
-                let input_file = InputFile::memory(data.clone()).file_name(filename.clone());
-                let sent = if let Some(ref caption_text) = caption {
-                    let html_caption = markdown_to_telegram_html(caption_text);
-                    self.bot
-                        .send_document(chat_id, input_file)
-                        .caption(&html_caption)
-                        .parse_mode(ParseMode::Html)
-                        .send()
-                        .await
-                } else {
-                    self.bot.send_document(chat_id, input_file).send().await
-                };
-
-                if let Err(error) = sent {
-                    if should_retry_plain_caption(&error) {
-                        tracing::debug!(
-                            %error,
-                            "HTML caption parse failed, retrying telegram file with plain caption"
-                        );
-                        let fallback_file = InputFile::memory(data).file_name(filename);
-                        let mut request = self.bot.send_document(chat_id, fallback_file);
-                        if let Some(caption_text) = caption {
-                            request = request.caption(caption_text);
-                        }
-                        request
+                // Use send_audio for audio files so Telegram renders an inline player.
+                // Fall back to send_document for everything else.
+                if mime_type.starts_with("audio/") {
+                    let input_file = InputFile::memory(data.clone()).file_name(filename.clone());
+                    let sent = if let Some(ref caption_text) = caption {
+                        let html_caption = markdown_to_telegram_html(caption_text);
+                        self.bot
+                            .send_audio(chat_id, input_file)
+                            .caption(&html_caption)
+                            .parse_mode(ParseMode::Html)
                             .send()
                             .await
-                            .context("failed to send telegram file")?;
                     } else {
-                        return Err(error)
-                            .context("failed to send telegram file with HTML caption")?;
+                        self.bot.send_audio(chat_id, input_file).send().await
+                    };
+
+                    if let Err(error) = sent {
+                        if should_retry_plain_caption(&error) {
+                            tracing::debug!(
+                                %error,
+                                "HTML caption parse failed, retrying telegram audio with plain caption"
+                            );
+                            let fallback_file = InputFile::memory(data).file_name(filename);
+                            let mut request = self.bot.send_audio(chat_id, fallback_file);
+                            if let Some(caption_text) = caption {
+                                request = request.caption(caption_text);
+                            }
+                            request
+                                .send()
+                                .await
+                                .context("failed to send telegram audio")?;
+                        } else {
+                            return Err(error)
+                                .context("failed to send telegram audio with HTML caption")?;
+                        }
+                    }
+                } else {
+                    let input_file = InputFile::memory(data.clone()).file_name(filename.clone());
+                    let sent = if let Some(ref caption_text) = caption {
+                        let html_caption = markdown_to_telegram_html(caption_text);
+                        self.bot
+                            .send_document(chat_id, input_file)
+                            .caption(&html_caption)
+                            .parse_mode(ParseMode::Html)
+                            .send()
+                            .await
+                    } else {
+                        self.bot.send_document(chat_id, input_file).send().await
+                    };
+
+                    if let Err(error) = sent {
+                        if should_retry_plain_caption(&error) {
+                            tracing::debug!(
+                                %error,
+                                "HTML caption parse failed, retrying telegram file with plain caption"
+                            );
+                            let fallback_file = InputFile::memory(data).file_name(filename);
+                            let mut request = self.bot.send_document(chat_id, fallback_file);
+                            if let Some(caption_text) = caption {
+                                request = request.caption(caption_text);
+                            }
+                            request
+                                .send()
+                                .await
+                                .context("failed to send telegram file")?;
+                        } else {
+                            return Err(error)
+                                .context("failed to send telegram file with HTML caption")?;
+                        }
                     }
                 }
             }
@@ -910,6 +948,8 @@ fn should_retry_plain_caption(error: &RequestError) -> bool {
 
 // -- Markdown-to-Telegram-HTML formatting --
 
+static BOLD_ITALIC_PATTERN: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\*\*\*(.+?)\*\*\*").expect("hardcoded regex"));
 static BOLD_PATTERN: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\*\*(.+?)\*\*").expect("hardcoded regex"));
 static BOLD_UNDERSCORE_PATTERN: LazyLock<Regex> =
@@ -1063,10 +1103,11 @@ fn format_inline(line: &str) -> String {
 
 /// Replace markdown span markers with HTML tags in already-escaped text.
 ///
-/// Bold (`**`) is processed before italic (`*`) so double-star patterns
-/// are consumed first and single stars only match true italic spans.
+/// Bold-italic (`***`) is processed first, then bold (`**`), then italic
+/// (`*`) so longer patterns are consumed before shorter ones.
 fn format_markdown_spans(text: &str) -> String {
-    let text = BOLD_PATTERN.replace_all(text, "<b>$1</b>");
+    let text = BOLD_ITALIC_PATTERN.replace_all(text, "<b><i>$1</i></b>");
+    let text = BOLD_PATTERN.replace_all(&text, "<b>$1</b>");
     let text = BOLD_UNDERSCORE_PATTERN.replace_all(&text, "<b>$1</b>");
     let text = ITALIC_PATTERN.replace_all(&text, "<i>$1</i>");
     let text = ITALIC_UNDERSCORE_PATTERN.replace_all(&text, "<i>$1</i>");
