@@ -1036,7 +1036,6 @@ function MemoryInjectionSection({settings, isLoading}: GlobalSettingsSectionProp
 	);
 	const [semanticThreshold, setSemanticThreshold] = useState(settings?.memory_injection?.semantic_threshold ?? 0.85);
 	const [contextWindowDepth, setContextWindowDepth] = useState(settings?.memory_injection?.context_window_depth ?? 10);
-	const [showAdvanced, setShowAdvanced] = useState(false);
 	const [ambientEnabled, setAmbientEnabled] = useState(settings?.memory_injection?.ambient_enabled ?? false);
 	const [pinnedTypes, setPinnedTypes] = useState<string[]>(settings?.memory_injection?.pinned_types ?? []);
 	const [pinnedLimit, setPinnedLimit] = useState(settings?.memory_injection?.pinned_limit ?? 3);
@@ -1120,7 +1119,7 @@ function MemoryInjectionSection({settings, isLoading}: GlobalSettingsSectionProp
 					<span className="rounded bg-yellow-500/20 px-1.5 py-0.5 text-tiny font-medium text-yellow-400">Experimental</span>
 				</div>
 				<p className="mt-1 text-sm text-ink-dull">
-					Control how relevant memories are surfaced in conversations. Before each response, the system searches memories by type, importance, recency, and semantic similarity to the user's message.
+					Default Memory Injection settings applied to agents that do not define an agent-level override. Per-agent override is available in Agent Config → Memory Injection.
 				</p>
 			</div>
 
@@ -1250,14 +1249,12 @@ function MemoryInjectionSection({settings, isLoading}: GlobalSettingsSectionProp
 									<div className="flex items-center gap-3">
 										<div className="text-xs text-ink-dull">Enabled</div>
 										<Toggle size="sm" checked={ambientEnabled} onCheckedChange={setAmbientEnabled} />
-										<div className="text-xs text-ink-dull">Show</div>
-										<Toggle size="sm" checked={showAdvanced} onCheckedChange={setShowAdvanced} />
 									</div>
 								</div>
 								<p className="mt-0.5 text-sm text-ink-dull">
 									Optional always-on context between cortex bulletins. Keep disabled for community bots.
 								</p>
-								{showAdvanced && (
+								{ambientEnabled && (
 									<div className="mt-4 flex flex-col gap-4">
 										<div className="rounded-md border border-app-line bg-app px-3 py-2 text-xs text-ink-dull">
 											Recommended for personal assistants: <span className="text-ink">todo</span> and <span className="text-ink">goal</span> (optionally <span className="text-ink">decision</span>). Other types can add noise.

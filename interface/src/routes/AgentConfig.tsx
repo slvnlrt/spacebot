@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api, type AgentConfigResponse, type AgentConfigUpdateRequest } from "@/api/client";
-import { Button, SettingSidebarButton, Input, TextArea, Toggle, NumberStepper, Select, SelectTrigger, SelectValue, SelectContent, SelectItem, cx } from "@/ui";
+import { Button, SettingSidebarButton, TextArea, Toggle, NumberStepper, Select, SelectTrigger, SelectValue, SelectContent, SelectItem, cx } from "@/ui";
 import { ModelSelect } from "@/components/ModelSelect";
 import { Markdown } from "@/components/Markdown";
 import { motion, AnimatePresence } from "framer-motion";
@@ -32,7 +32,7 @@ const SECTIONS: {
 	{ id: "cortex", label: "Cortex", group: "config", description: "System observer settings", detail: "The cortex monitors active processes and generates memory bulletins. Tick interval controls observation frequency. Timeouts determine when stuck workers or branches get cancelled. The circuit breaker auto-disables after consecutive failures." },
 	{ id: "coalesce", label: "Coalesce", group: "config", description: "Message batching", detail: "When multiple messages arrive in quick succession, coalescing batches them into a single LLM turn. This prevents the agent from responding to each message individually in fast-moving conversations." },
 	{ id: "memory", label: "Memory Persistence", group: "config", description: "Auto-save interval", detail: "Spawns a silent background branch at regular intervals to recall existing memories and save new ones from the recent conversation. Runs without blocking the channel." },
-	{ id: "memory_injection", label: "Memory Injection", group: "config", description: "Per-agent retrieval and dedup", detail: "Controls pre-hook memory retrieval for this specific agent: contextual search budget, dedup thresholds, ambient pinned types, and history block persistence for injected context." },
+	{ id: "memory_injection", label: "Memory Injection", group: "config", description: "Per-agent retrieval and dedup", detail: "Overrides global Memory Injection defaults for this agent only. Leave untouched to keep using global defaults." },
 	{ id: "browser", label: "Browser", group: "config", description: "Chrome automation", detail: "Controls browser automation tools available to workers. When enabled, workers can navigate web pages, take screenshots, and interact with sites. JavaScript evaluation is a separate permission." },
 ];
 
@@ -825,111 +825,80 @@ function ConfigSectionEditor({ sectionId, label, description, detail, config, on
 				];
 
 				return (
-					<div className="grid gap-4">
-						<ConfigToggleField
-							label="Enabled"
-							description="Enable memory injection pre-hook for this agent"
-							value={localValues.enabled as boolean}
-							onChange={(v) => handleChange("enabled", v)}
-						/>
-						<NumberStepper
-							label="Search Limit"
-							description="Maximum contextual memories retrieved by hybrid search"
-							value={localValues.search_limit as number}
-							onChange={(v) => handleChange("search_limit", v)}
-							min={1}
-							max={100}
-						/>
-						<NumberStepper
-							label="Context Min Score"
-							description="Minimum hybrid score for contextual candidates"
-							value={localValues.contextual_min_score as number}
-							onChange={(v) => handleChange("contextual_min_score", v)}
-							min={0}
-							max={0.05}
-							step={0.001}
-							type="float"
-						/>
-						<NumberStepper
-							label="Semantic Threshold"
-							description="Cosine similarity threshold for semantic deduplication"
-							value={localValues.semantic_threshold as number}
-							onChange={(v) => handleChange("semantic_threshold", v)}
-							min={0.5}
-							max={1}
-							step={0.01}
-							type="float"
-						/>
-						<NumberStepper
-							label="Re-injection Delay"
-							description="Turns before a memory can be injected again"
-							value={localValues.context_window_depth as number}
-							onChange={(v) => handleChange("context_window_depth", v)}
-							min={1}
-							max={200}
-							suffix=" turns"
-						/>
-						<NumberStepper
-							label="Max Total"
-							description="Hard cap across pinned and contextual memories"
-							value={localValues.max_total as number}
-							onChange={(v) => handleChange("max_total", v)}
-							min={1}
-							max={200}
-						/>
-						<NumberStepper
-							label="History Block Limit"
-							description="Maximum injected context blocks kept in history (0 = ephemeral)"
-							value={localValues.max_injected_blocks_in_history as number}
-							onChange={(v) => handleChange("max_injected_blocks_in_history", v)}
-							min={0}
-							max={10}
-						/>
-						<ConfigToggleField
-							label="Ambient Enabled"
-							description="Enable always-on pinned type retrieval"
-							value={localValues.ambient_enabled as boolean}
-							onChange={(v) => handleChange("ambient_enabled", v)}
-						/>
-						<NumberStepper
-							label="Pinned Limit"
-							description="Maximum memories per pinned type"
-							value={localValues.pinned_limit as number}
-							onChange={(v) => handleChange("pinned_limit", v)}
-							min={1}
-							max={20}
-						/>
-						<div className="flex flex-col gap-1.5">
-							<label className="text-sm font-medium text-ink">Pinned Sort</label>
-							<p className="text-tiny text-ink-faint">Ordering strategy for pinned memories</p>
-							<Select
-								value={(localValues.pinned_sort as string) || "recent"}
-								onValueChange={(value) => handleChange("pinned_sort", value)}
-							>
-								<SelectTrigger className="border-app-line/50 bg-app-darkBox/30">
-									<SelectValue />
-								</SelectTrigger>
-								<SelectContent>
-									<SelectItem value="recent">recent</SelectItem>
-									<SelectItem value="importance">importance</SelectItem>
-								</SelectContent>
-							</Select>
-						</div>
-						<div className="flex flex-col gap-2">
-							<label className="text-sm font-medium text-ink">Pinned Types</label>
-							<p className="text-tiny text-ink-faint">Always inject these memory types when ambient mode is enabled</p>
-							<div className="grid grid-cols-2 gap-2">
-								{memoryTypeOptions.map((memoryType) => (
-									<Button
-										key={memoryType}
-										onClick={() => togglePinnedType(memoryType)}
-										variant={pinnedTypes.includes(memoryType) ? "primary" : "secondary"}
-									>
-										{memoryType}
-									</Button>
-								))}
+					<div className="flex flex-col gap-4">
+						<div className="rounded-lg border border-app-line bg-app-box p-4">
+							<div className="flex items-center justify-between">
+								<div>
+									<span className="text-sm font-medium text-ink">Enable Memory Injection</span>
+									<p className="mt-0.5 text-sm text-ink-dull">Enable pre-hook memory injection for this agent</p>
+								</div>
+								<Toggle size="sm" checked={localValues.enabled as boolean} onCheckedChange={(v) => handleChange("enabled", v)} />
 							</div>
 						</div>
+
+						{(localValues.enabled as boolean) && (
+							<>
+								<div className="rounded-lg border border-app-line bg-app-box p-4">
+									<span className="text-sm font-medium text-ink">Contextual Search</span>
+									<p className="mt-0.5 text-sm text-ink-dull">Hybrid search runs on every user message for this agent.</p>
+									<div className="mt-4 grid grid-cols-2 gap-x-6 gap-y-4">
+										<NumberStepper label="Search Limit" description="Maximum contextual memories retrieved by hybrid search" value={localValues.search_limit as number} onChange={(v) => handleChange("search_limit", v)} min={1} max={100} />
+										<NumberStepper label="Context Min Score" description="Minimum hybrid score for contextual candidates" value={localValues.contextual_min_score as number} onChange={(v) => handleChange("contextual_min_score", v)} min={0} max={0.05} step={0.001} type="float" />
+										<NumberStepper label="Max Total" description="Hard cap across pinned and contextual memories" value={localValues.max_total as number} onChange={(v) => handleChange("max_total", v)} min={1} max={200} />
+										<NumberStepper label="History Block Limit" description="Maximum injected context blocks kept in history (0 = ephemeral)" value={localValues.max_injected_blocks_in_history as number} onChange={(v) => handleChange("max_injected_blocks_in_history", v)} min={0} max={10} />
+									</div>
+								</div>
+
+								<div className="rounded-lg border border-app-line bg-app-box p-4">
+									<span className="text-sm font-medium text-ink">Deduplication</span>
+									<p className="mt-0.5 text-sm text-ink-dull">Control duplicate filtering across turns and within the same turn.</p>
+									<div className="mt-4 grid grid-cols-2 gap-x-6 gap-y-4">
+										<NumberStepper label="Semantic Threshold" description="Cosine similarity threshold for semantic deduplication" value={localValues.semantic_threshold as number} onChange={(v) => handleChange("semantic_threshold", v)} min={0.5} max={1} step={0.01} type="float" />
+										<NumberStepper label="Re-injection Delay" description="Turns before a memory can be injected again" value={localValues.context_window_depth as number} onChange={(v) => handleChange("context_window_depth", v)} min={1} max={200} suffix=" turns" />
+									</div>
+								</div>
+
+								<div className="rounded-lg border border-app-line bg-app-box p-4">
+									<div className="flex items-center justify-between">
+										<span className="text-sm font-medium text-ink">Ambient Awareness (Advanced)</span>
+										<div className="flex items-center gap-3">
+											<div className="text-xs text-ink-dull">Enabled</div>
+											<Toggle size="sm" checked={localValues.ambient_enabled as boolean} onCheckedChange={(v) => handleChange("ambient_enabled", v)} />
+										</div>
+									</div>
+									<p className="mt-0.5 text-sm text-ink-dull">Agent-level override of global ambient behavior. Keep disabled for community bots.</p>
+									{(localValues.ambient_enabled as boolean) && (
+										<div className="mt-4 flex flex-col gap-4">
+											<div className="rounded-md border border-app-line bg-app px-3 py-2 text-xs text-ink-dull">Recommended for personal assistants: <span className="text-ink">todo</span> and <span className="text-ink">goal</span> (optionally <span className="text-ink">decision</span>).</div>
+											<div className="text-xs text-ink-faint">Selected: {pinnedTypes.length === 0 ? "none" : pinnedTypes.join(", ")}</div>
+											<div className="grid grid-cols-2 gap-2">
+												{memoryTypeOptions.map((memoryType) => (
+													<Button key={memoryType} onClick={() => togglePinnedType(memoryType)} variant={pinnedTypes.includes(memoryType) ? "default" : "secondary"}>
+														{memoryType}
+													</Button>
+												))}
+											</div>
+											<div className="grid grid-cols-2 gap-x-6 gap-y-4">
+												<NumberStepper label="Pinned Limit" description="Maximum memories per pinned type" value={localValues.pinned_limit as number} onChange={(v) => handleChange("pinned_limit", v)} min={1} max={20} />
+												<div>
+													<span className="text-sm font-medium text-ink">Pinned Sort</span>
+													<p className="mt-0.5 text-sm text-ink-dull">Ordering strategy for pinned memories</p>
+													<Select value={(localValues.pinned_sort as string) || "recent"} onValueChange={(value) => handleChange("pinned_sort", value)}>
+														<SelectTrigger className="mt-2">
+															<SelectValue />
+														</SelectTrigger>
+														<SelectContent>
+															<SelectItem value="recent">recent</SelectItem>
+															<SelectItem value="importance">importance</SelectItem>
+														</SelectContent>
+													</Select>
+												</div>
+											</div>
+										</div>
+									)}
+								</div>
+							</>
+						)}
 					</div>
 				);
 			}
@@ -943,6 +912,9 @@ function ConfigSectionEditor({ sectionId, label, description, detail, config, on
 			<div className="flex items-center justify-between border-b border-app-line/50 bg-app-darkBox/20 px-5 py-2.5">
 				<div className="flex items-center gap-3">
 					<h3 className="text-sm font-medium text-ink">{label}</h3>
+					{sectionId === "memory_injection" && (
+						<span className="rounded bg-yellow-500/20 px-1.5 py-0.5 text-tiny font-medium text-yellow-400">Experimental</span>
+					)}
 					<span className="text-tiny text-ink-faint">{description}</span>
 				</div>
 				{localDirty ? (
@@ -954,6 +926,35 @@ function ConfigSectionEditor({ sectionId, label, description, detail, config, on
 			<div className="flex-1 overflow-y-auto px-8 py-8">
 				<div className="mb-6 rounded-lg border border-app-line/30 bg-app-darkBox/20 px-5 py-4">
 					<p className="text-sm leading-relaxed text-ink-dull">{detail}</p>
+					{sectionId === "memory_injection" && (
+						<div className="mt-3 flex items-center justify-between gap-3">
+							<div className="flex items-center gap-2">
+								<span className={`rounded px-1.5 py-0.5 text-tiny font-medium ${
+									config.memory_injection_overridden
+										? "bg-accent/20 text-accent"
+										: "bg-ink-faint/20 text-ink-faint"
+								}`}>
+									{config.memory_injection_overridden ? "Override" : "Using Default"}
+								</span>
+								<span className="text-tiny text-ink-faint">
+									{config.memory_injection_overridden
+										? "This section overrides global defaults for this agent."
+										: "This agent currently inherits global Memory Injection defaults."}
+								</span>
+							</div>
+							{config.memory_injection_overridden && (
+								<Button
+									variant="secondary"
+									onClick={() => {
+										onSave({ reset_memory_injection_override: true });
+										setLocalDirty(false);
+									}}
+								>
+									Revert to Default
+								</Button>
+							)}
+						</div>
+					)}
 				</div>
 				{renderFields()}
 			</div>
@@ -962,28 +963,6 @@ function ConfigSectionEditor({ sectionId, label, description, detail, config, on
 }
 
 // -- Form Field Components --
-
-interface ConfigFieldProps {
-	label: string;
-	description: string;
-	value: string;
-	onChange: (value: string) => void;
-}
-
-function ConfigField({ label, description, value, onChange }: ConfigFieldProps) {
-	return (
-		<div className="flex flex-col gap-1.5">
-			<label className="text-sm font-medium text-ink">{label}</label>
-			<p className="text-tiny text-ink-faint">{description}</p>
-			<Input
-				type="text"
-				value={value}
-				onChange={(e) => onChange(e.target.value)}
-				className="mt-1 border-app-line/50 bg-app-darkBox/30"
-			/>
-		</div>
-	);
-}
 
 interface ConfigToggleFieldProps {
 	label: string;

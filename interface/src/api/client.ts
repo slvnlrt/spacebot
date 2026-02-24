@@ -542,6 +542,7 @@ export interface AgentConfigResponse {
 	coalesce: CoalesceSection;
 	memory_persistence: MemoryPersistenceSection;
 	memory_injection: MemoryInjectionSection;
+	memory_injection_overridden: boolean;
 	browser: BrowserSection;
 	discord: DiscordSection;
 }
@@ -633,6 +634,7 @@ export interface AgentConfigUpdateRequest {
 	coalesce?: CoalesceUpdate;
 	memory_persistence?: MemoryPersistenceUpdate;
 	memory_injection?: MemoryInjectionUpdate;
+	reset_memory_injection_override?: boolean;
 	browser?: BrowserUpdate;
 	discord?: DiscordUpdate;
 }

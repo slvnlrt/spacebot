@@ -97,6 +97,7 @@ pub(super) struct AgentConfigResponse {
     coalesce: CoalesceSection,
     memory_persistence: MemoryPersistenceSection,
     memory_injection: MemoryInjectionSection,
+    memory_injection_overridden: bool,
     browser: BrowserSection,
     discord: DiscordSection,
 }
@@ -123,6 +124,8 @@ pub(super) struct AgentConfigUpdateRequest {
     memory_persistence: Option<MemoryPersistenceUpdate>,
     #[serde(default)]
     memory_injection: Option<MemoryInjectionUpdate>,
+    #[serde(default)]
+    reset_memory_injection_override: Option<bool>,
     #[serde(default)]
     browser: Option<BrowserUpdate>,
     #[serde(default)]
@@ -228,6 +231,7 @@ pub(super) async fn get_agent_config(
     let memory_persistence = rc.memory_persistence.load();
     let memory_injection = rc.memory_injection.load();
     let browser = rc.browser_config.load();
+    let memory_injection_overridden = has_memory_injection_override(&state, &query.agent_id).await;
 
     let response = AgentConfigResponse {
         routing: RoutingSection {
@@ -285,6 +289,7 @@ pub(super) async fn get_agent_config(
             max_total: memory_injection.max_total,
             max_injected_blocks_in_history: memory_injection.max_injected_blocks_in_history,
         },
+        memory_injection_overridden,
         browser: BrowserSection {
             enabled: browser.enabled,
             headless: browser.headless,
@@ -357,7 +362,9 @@ pub(super) async fn update_agent_config(
     if let Some(memory_persistence) = &request.memory_persistence {
         update_memory_persistence_table(&mut doc, agent_idx, memory_persistence)?;
     }
-    if let Some(memory_injection) = &request.memory_injection {
+    if request.reset_memory_injection_override.unwrap_or(false) {
+        remove_memory_injection_override(&mut doc, agent_idx)?;
+    } else if let Some(memory_injection) = &request.memory_injection {
         update_memory_injection_table(&mut doc, agent_idx, memory_injection)?;
     }
     if let Some(browser) = &request.browser {
@@ -663,6 +670,15 @@ fn update_memory_injection_table(
     Ok(())
 }
 
+fn remove_memory_injection_override(
+    doc: &mut toml_edit::DocumentMut,
+    agent_idx: usize,
+) -> Result<(), StatusCode> {
+    let agent = get_agent_table_mut(doc, agent_idx)?;
+    agent.remove("memory_injection");
+    Ok(())
+}
+
 fn update_browser_table(
     doc: &mut toml_edit::DocumentMut,
     agent_idx: usize,
@@ -702,4 +718,28 @@ fn update_discord_table(
     }
 
     Ok(())
+}
+
+async fn has_memory_injection_override(state: &Arc<ApiState>, agent_id: &str) -> bool {
+    let config_path = state.config_path.read().await.clone();
+    if config_path.as_os_str().is_empty() {
+        return false;
+    }
+
+    let Ok(content) = tokio::fs::read_to_string(&config_path).await else {
+        return false;
+    };
+
+    let Ok(doc) = content.parse::<toml_edit::DocumentMut>() else {
+        return false;
+    };
+
+    let Some(agents) = doc.get("agents").and_then(|value| value.as_array_of_tables()) else {
+        return false;
+    };
+
+    agents
+        .iter()
+        .find(|agent| agent.get("id").and_then(|value| value.as_str()) == Some(agent_id))
+        .is_some_and(|agent| agent.contains_key("memory_injection"))
 }
