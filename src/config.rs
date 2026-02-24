@@ -568,6 +568,11 @@ pub struct MemoryInjectionConfig {
     /// Hard cap on total injected memories across pinned and contextual pools.
     #[serde(default = "default_max_total")]
     pub max_total: usize,
+
+    /// Maximum number of injected context blocks kept in channel history.
+    /// Set to 0 for ephemeral mode.
+    #[serde(default = "default_max_injected_blocks_in_history")]
+    pub max_injected_blocks_in_history: usize,
 }
 
 fn default_enabled() -> bool {
@@ -580,7 +585,7 @@ fn default_contextual_min_score() -> f32 {
     0.01
 }
 fn default_context_window_depth() -> usize {
-    50
+    10
 }
 fn default_semantic_threshold() -> f32 {
     0.85
@@ -600,6 +605,9 @@ fn default_pinned_sort() -> String {
 fn default_max_total() -> usize {
     25
 }
+fn default_max_injected_blocks_in_history() -> usize {
+    3
+}
 
 impl Default for MemoryInjectionConfig {
     fn default() -> Self {
@@ -614,6 +622,7 @@ impl Default for MemoryInjectionConfig {
             pinned_limit: default_pinned_limit(),
             pinned_sort: default_pinned_sort(),
             max_total: default_max_total(),
+            max_injected_blocks_in_history: default_max_injected_blocks_in_history(),
         }
     }
 }
@@ -1552,6 +1561,7 @@ struct TomlMemoryInjectionConfig {
     pinned_limit: Option<i64>,
     pinned_sort: Option<String>,
     max_total: Option<usize>,
+    max_injected_blocks_in_history: Option<usize>,
 }
 
 #[derive(Deserialize, Default)]
@@ -2864,6 +2874,9 @@ impl Config {
                         pinned_limit: mi.pinned_limit.unwrap_or(base.pinned_limit),
                         pinned_sort,
                         max_total: mi.max_total.unwrap_or(base.max_total),
+                        max_injected_blocks_in_history: mi
+                            .max_injected_blocks_in_history
+                            .unwrap_or(base.max_injected_blocks_in_history),
                     }
                 })
                 .unwrap_or(base_defaults.memory_injection),

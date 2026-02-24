@@ -1031,8 +1031,11 @@ function MemoryInjectionSection({settings, isLoading}: GlobalSettingsSectionProp
 	const [searchLimit, setSearchLimit] = useState(settings?.memory_injection?.search_limit ?? 20);
 	const [contextualMinScore, setContextualMinScore] = useState(settings?.memory_injection?.contextual_min_score ?? 0.01);
 	const [maxTotal, setMaxTotal] = useState(settings?.memory_injection?.max_total ?? 25);
+	const [maxInjectedBlocksInHistory, setMaxInjectedBlocksInHistory] = useState(
+		settings?.memory_injection?.max_injected_blocks_in_history ?? 3
+	);
 	const [semanticThreshold, setSemanticThreshold] = useState(settings?.memory_injection?.semantic_threshold ?? 0.85);
-	const [contextWindowDepth, setContextWindowDepth] = useState(settings?.memory_injection?.context_window_depth ?? 50);
+	const [contextWindowDepth, setContextWindowDepth] = useState(settings?.memory_injection?.context_window_depth ?? 10);
 	const [showAdvanced, setShowAdvanced] = useState(false);
 	const [ambientEnabled, setAmbientEnabled] = useState(settings?.memory_injection?.ambient_enabled ?? false);
 	const [pinnedTypes, setPinnedTypes] = useState<string[]>(settings?.memory_injection?.pinned_types ?? []);
@@ -1058,6 +1061,7 @@ function MemoryInjectionSection({settings, isLoading}: GlobalSettingsSectionProp
 			setSearchLimit(settings.memory_injection.search_limit);
 			setContextualMinScore(settings.memory_injection.contextual_min_score ?? 0.01);
 			setMaxTotal(settings.memory_injection.max_total);
+			setMaxInjectedBlocksInHistory(settings.memory_injection.max_injected_blocks_in_history ?? 3);
 			setSemanticThreshold(settings.memory_injection.semantic_threshold);
 			setContextWindowDepth(settings.memory_injection.context_window_depth);
 			setAmbientEnabled(settings.memory_injection.ambient_enabled ?? false);
@@ -1089,6 +1093,7 @@ function MemoryInjectionSection({settings, isLoading}: GlobalSettingsSectionProp
 				search_limit: searchLimit,
 				contextual_min_score: contextualMinScore,
 				max_total: maxTotal,
+				max_injected_blocks_in_history: maxInjectedBlocksInHistory,
 				semantic_threshold: semanticThreshold,
 				context_window_depth: contextWindowDepth,
 				ambient_enabled: ambientEnabled,
@@ -1186,6 +1191,16 @@ function MemoryInjectionSection({settings, isLoading}: GlobalSettingsSectionProp
 											onChange={setMaxTotal}
 											min={1}
 											max={200}
+										/>
+									</div>
+									<div>
+										<NumberStepper
+											label="History Block Limit"
+											description="Maximum injected context blocks kept in history (0 = ephemeral)"
+											value={maxInjectedBlocksInHistory}
+											onChange={setMaxInjectedBlocksInHistory}
+											min={0}
+											max={10}
 										/>
 									</div>
 								</div>

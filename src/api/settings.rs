@@ -29,6 +29,7 @@ pub(super) struct MemoryInjectionResponse {
     pinned_limit: i64,
     pinned_sort: String,
     max_total: usize,
+    max_injected_blocks_in_history: usize,
 }
 
 #[derive(Serialize)]
@@ -71,6 +72,7 @@ pub(super) struct MemoryInjectionUpdate {
     pinned_limit: Option<i64>,
     pinned_sort: Option<String>,
     max_total: Option<usize>,
+    max_injected_blocks_in_history: Option<usize>,
 }
 
 #[derive(Deserialize)]
@@ -231,7 +233,7 @@ pub(super) async fn get_global_settings(
                     .and_then(|m| m.get("context_window_depth"))
                     .and_then(|v| v.as_integer())
                     .and_then(|i| usize::try_from(i).ok())
-                    .unwrap_or(50),
+                    .unwrap_or(10),
                 semantic_threshold: memory_injection_table
                     .and_then(|m| m.get("semantic_threshold"))
                     .and_then(|v| v.as_float())
@@ -264,6 +266,11 @@ pub(super) async fn get_global_settings(
                     .and_then(|v| v.as_integer())
                     .and_then(|i| usize::try_from(i).ok())
                     .unwrap_or(25),
+                max_injected_blocks_in_history: memory_injection_table
+                    .and_then(|m| m.get("max_injected_blocks_in_history"))
+                    .and_then(|v| v.as_integer())
+                    .and_then(|i| usize::try_from(i).ok())
+                    .unwrap_or(3),
             };
 
             (
@@ -298,13 +305,14 @@ pub(super) async fn get_global_settings(
                     enabled: true,
                     search_limit: 20,
                     contextual_min_score: 0.01,
-                    context_window_depth: 50,
+                    context_window_depth: 10,
                     semantic_threshold: 0.85,
                     pinned_types: Vec::new(),
                     ambient_enabled: false,
                     pinned_limit: 3,
                     pinned_sort: "recent".to_string(),
                     max_total: 25,
+                    max_injected_blocks_in_history: 3,
                 },
             )
         };
@@ -473,6 +481,12 @@ pub(super) async fn update_global_settings(
         }
         if let Some(max_total) = memory_injection.max_total {
             doc["defaults"]["memory_injection"]["max_total"] = toml_edit::value(max_total as i64);
+        }
+        if let Some(max_injected_blocks_in_history) =
+            memory_injection.max_injected_blocks_in_history
+        {
+            doc["defaults"]["memory_injection"]["max_injected_blocks_in_history"] =
+                toml_edit::value(max_injected_blocks_in_history as i64);
         }
     }
 

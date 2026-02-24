@@ -38,6 +38,43 @@ const RETRIGGER_DEBOUNCE_MS: u64 = 500;
 /// infinite retrigger cascades where each retrigger spawns more work.
 const MAX_RETRIGGERS_PER_TURN: usize = 3;
 
+/// Stable prefix for injected memory context blocks.
+pub(crate) const INJECTION_BLOCK_PREFIX: &str = "[Context from memory]";
+
+/// Check whether a message is a memory-injection context block.
+pub(crate) fn is_injection_block(message: &rig::message::Message) -> bool {
+    match message {
+        rig::message::Message::User { content } => content.iter().any(|item| {
+            matches!(item, UserContent::Text(t) if t.text.starts_with(INJECTION_BLOCK_PREFIX))
+        }),
+        _ => false,
+    }
+}
+
+/// Keep at most `max_keep` injection blocks in history.
+///
+/// If `max_keep == 0`, all injection blocks are removed (ephemeral mode).
+/// Called before adding a new block so there is room for the incoming one.
+fn prune_old_injection_blocks(history: &mut Vec<rig::message::Message>, max_keep: usize) {
+    if max_keep == 0 {
+        history.retain(|message| !is_injection_block(message));
+        return;
+    }
+
+    let injection_indices: Vec<usize> = history
+        .iter()
+        .enumerate()
+        .filter_map(|(index, message)| is_injection_block(message).then_some(index))
+        .collect();
+
+    if injection_indices.len() >= max_keep {
+        let to_remove = injection_indices.len() - max_keep + 1;
+        for &index in injection_indices[..to_remove].iter().rev() {
+            history.remove(index);
+        }
+    }
+}
+
 /// Shared state that channel tools need to act on the channel.
 ///
 /// Wrapped in Arc and passed to tools (branch, spawn_worker, route, cancel)
@@ -1341,11 +1378,17 @@ impl Channel {
         };
         let history_len_before = history.len();
 
-        // Inject memory context silently (not persisted to history)
-        // This is the key mechanism of memory injection: LLM sees context without it being saved
+        // Inject memory context block into the per-turn history.
+        // Blocks are persisted in bounded form (oldest blocks pruned before insertion).
         if let Some(ref context) = injected_context {
-            // Use a user message format with clear prefix so LLM understands this is context
-            let context_message = format!("[Context from memory]:\n{}", context);
+            let memory_injection_config = self.deps.runtime_config.memory_injection.load();
+            prune_old_injection_blocks(
+                &mut history,
+                memory_injection_config.max_injected_blocks_in_history,
+            );
+
+            // Use a user message format with clear prefix so LLM understands this is context.
+            let context_message = format!("{INJECTION_BLOCK_PREFIX}:\n{}", context);
             history.push(rig::message::Message::from(context_message));
         }
 
@@ -2667,7 +2710,10 @@ fn apply_history_after_turn(
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_history_after_turn, ChannelInjectionState};
+    use super::{
+        apply_history_after_turn, is_injection_block, prune_old_injection_blocks,
+        ChannelInjectionState, INJECTION_BLOCK_PREFIX,
+    };
     use rig::completion::{CompletionError, PromptError};
     use rig::message::Message;
     use rig::tool::ToolSetError;
@@ -2683,6 +2729,10 @@ mod tests {
             id: None,
             content: rig::OneOrMany::one(rig::message::AssistantContent::text(text)),
         }
+    }
+
+    fn injected_context_msg(text: &str) -> Message {
+        user_msg(&format!("{INJECTION_BLOCK_PREFIX}:\n{text}"))
     }
 
     fn make_history(msgs: &[&str]) -> Vec<Message> {
@@ -3008,5 +3058,80 @@ mod tests {
         state2.record_injection("test".to_string(), 0);
         assert!(!state2.should_reinject("test", 0, 0));
         assert!(state2.should_reinject("test", 1, 0));
+    }
+
+    #[test]
+    fn detects_injection_block() {
+        assert!(is_injection_block(&injected_context_msg("[Fact] hello")));
+        assert!(!is_injection_block(&user_msg("regular user message")));
+        assert!(!is_injection_block(&assistant_msg("assistant response")));
+    }
+
+    #[test]
+    fn prune_injection_blocks_under_cap_is_noop() {
+        let mut history = vec![
+            user_msg("u1"),
+            injected_context_msg("[Fact] a"),
+            assistant_msg("a1"),
+            injected_context_msg("[Fact] b"),
+            assistant_msg("a2"),
+        ];
+
+        prune_old_injection_blocks(&mut history, 3);
+
+        let injected_count = history.iter().filter(|m| is_injection_block(m)).count();
+        assert_eq!(injected_count, 2);
+    }
+
+    #[test]
+    fn prune_injection_blocks_removes_oldest_when_at_cap() {
+        let mut history = vec![
+            injected_context_msg("[Fact] oldest"),
+            user_msg("u1"),
+            injected_context_msg("[Fact] middle"),
+            assistant_msg("a1"),
+            injected_context_msg("[Fact] newest"),
+        ];
+
+        prune_old_injection_blocks(&mut history, 2);
+
+        let injected_blocks: Vec<String> = history
+            .iter()
+            .filter_map(|message| {
+                if let Message::User { content } = message {
+                    return content.iter().find_map(|item| {
+                        if let rig::message::UserContent::Text(t) = item
+                            && t.text.starts_with(INJECTION_BLOCK_PREFIX)
+                        {
+                            return Some(t.text.clone());
+                        }
+                        None
+                    });
+                }
+                None
+            })
+            .collect();
+
+        // We prune before inserting a new block, so when at cap we keep
+        // max_keep - 1 existing blocks to make room for the incoming block.
+        assert_eq!(injected_blocks.len(), 1);
+        assert!(!injected_blocks.iter().any(|text| text.contains("oldest")));
+        assert!(injected_blocks.iter().any(|text| text.contains("newest")));
+    }
+
+    #[test]
+    fn prune_injection_blocks_ephemeral_removes_all() {
+        let mut history = vec![
+            user_msg("u1"),
+            injected_context_msg("[Fact] a"),
+            assistant_msg("a1"),
+            injected_context_msg("[Fact] b"),
+        ];
+
+        prune_old_injection_blocks(&mut history, 0);
+
+        let injected_count = history.iter().filter(|m| is_injection_block(m)).count();
+        assert_eq!(injected_count, 0);
+        assert_eq!(history.len(), 2);
     }
 }

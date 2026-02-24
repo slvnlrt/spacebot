@@ -6,6 +6,7 @@
 
 use crate::error::Result;
 use crate::llm::SpacebotModel;
+use crate::agent::channel::is_injection_block;
 use crate::{AgentDeps, ChannelId, ProcessType};
 use rig::agent::AgentBuilder;
 use rig::completion::{CompletionModel as _, Prompt as _};
@@ -306,6 +307,10 @@ fn render_messages_as_transcript(messages: &[Message]) -> String {
     let mut output = String::new();
 
     for message in messages {
+        if is_injection_block(message) {
+            continue;
+        }
+
         match message {
             Message::User { content } => {
                 for item in content.iter() {
@@ -362,6 +367,38 @@ fn extract_summary_section(response: &str) -> String {
         after_header.trim().to_string()
     } else {
         response.trim().to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::render_messages_as_transcript;
+    use crate::agent::channel::INJECTION_BLOCK_PREFIX;
+    use rig::message::{AssistantContent, Message, UserContent};
+
+    #[test]
+    fn render_transcript_skips_injection_blocks() {
+        let messages = vec![
+            Message::User {
+                content: rig::OneOrMany::one(UserContent::text(format!(
+                    "{INJECTION_BLOCK_PREFIX}:\n[Fact] hidden"
+                ))),
+            },
+            Message::User {
+                content: rig::OneOrMany::one(UserContent::text("Hello")),
+            },
+            Message::Assistant {
+                id: None,
+                content: rig::OneOrMany::one(AssistantContent::text("Hi")),
+            },
+        ];
+
+        let transcript = render_messages_as_transcript(&messages);
+
+        assert!(transcript.contains("User: Hello"));
+        assert!(transcript.contains("Assistant: Hi"));
+        assert!(!transcript.contains(INJECTION_BLOCK_PREFIX));
+        assert!(!transcript.contains("[Fact] hidden"));
     }
 }
 

@@ -921,21 +921,21 @@ export interface MemoryInjectionConfig {
 	pinned_limit: number;
 	pinned_sort: string;
 	max_total: number;
+	max_injected_blocks_in_history: number;
 }
 
 export interface MemoryInjectionConfigUpdate {
 	enabled?: boolean;
 	search_limit?: number;
-	contextual_min_score: number;
 	contextual_min_score?: number;
 	context_window_depth?: number;
 	semantic_threshold?: number;
-	ambient_enabled: boolean;
 	pinned_types?: string[];
 	ambient_enabled?: boolean;
 	pinned_limit?: number;
 	pinned_sort?: string;
 	max_total?: number;
+	max_injected_blocks_in_history?: number;
 }
 
 export interface GlobalSettingsResponse {
