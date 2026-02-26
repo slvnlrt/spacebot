@@ -9,7 +9,9 @@ use crate::conversation::{ChannelStore, ConversationLogger, ProcessRunLogger};
 use crate::error::{AgentError, Result};
 use crate::hooks::SpacebotHook;
 use crate::llm::SpacebotModel;
-use crate::memory::{is_semantically_duplicate, MemoryType, SearchConfig, SearchMode, SearchSort};
+use crate::memory::{
+    cosine_similarity, is_semantically_duplicate, MemoryType, SearchConfig, SearchMode, SearchSort,
+};
 use crate::{
     AgentDeps, BranchId, ChannelId, InboundMessage, OutboundResponse, ProcessEvent, ProcessId,
     ProcessType, WorkerId,
@@ -1414,7 +1416,7 @@ impl Channel {
     /// 5) Structured context formatting for prompt injection
     #[tracing::instrument(skip(self, user_text), fields(channel_id = %self.id))]
     async fn compute_memory_injection(&mut self, user_text: &str) -> Option<String> {
-        #[derive(Clone, Copy, Debug)]
+        #[derive(Clone, Copy, Debug, PartialEq)]
         enum InjectionSource {
             Pinned,
             Contextual,
@@ -1456,6 +1458,7 @@ impl Channel {
         let contextual_min_score = config.contextual_min_score;
         let max_total = config.max_total;
 
+
         let pinned_sort = if config.pinned_sort == "importance" {
             SearchSort::Importance
         } else {
@@ -1496,7 +1499,14 @@ impl Channel {
             mode: SearchMode::Hybrid,
             max_results: search_limit,
             max_results_per_source: search_limit,
-            min_score: contextual_min_score,
+            // Don't filter on RRF score — it measures cross-source consensus,
+            // not relevance. Actual relevance filtering happens below via
+            // cosine-similarity post-filter using contextual_min_score.
+            min_score: 0.0,
+            // Disable graph traversal for injection: vector + FTS give precise
+            // semantic results; the graph's naive keyword matching floods results
+            // with high-importance but irrelevant memories (stop-word matches).
+            graph_seed_limit: 0,
             ..Default::default()
         };
 
@@ -1528,12 +1538,31 @@ impl Channel {
 
         let candidate_count = all_candidates.len();
 
+        // Embed the query once for cosine-similarity post-filtering.
+        let query_embedding = memory_search
+            .embedding_model_arc()
+            .embed_one(user_text)
+            .await
+            .ok();
+
         let mut deduped_count = 0usize;
         let mut unique_candidates = Vec::new();
         let mut seen_ids = HashSet::new();
 
         self.injection_state
             .prune_semantic_buffer(self.current_turn, context_window_depth);
+
+        // === Pass 1: resolve embeddings, compute cosine similarities ===
+        struct ScoredCandidate {
+            memory: crate::memory::Memory,
+            source: InjectionSource,
+            embedding: Vec<f32>,
+            /// Cosine similarity to the user query (None for pinned).
+            cosine: Option<f32>,
+        }
+
+        let mut scored_candidates = Vec::new();
+        let mut max_cosine: f32 = 0.0;
 
         for candidate in all_candidates {
             let memory = candidate.memory;
@@ -1551,6 +1580,7 @@ impl Channel {
                 deduped_count += 1;
                 continue;
             }
+            seen_ids.insert(memory.id.clone());
 
             let embedding = match memory_search.embedding_table().get_embedding(&memory.id).await {
                 Ok(Some(embedding)) => embedding,
@@ -1559,11 +1589,12 @@ impl Channel {
                     match memory_search.embedding_model_arc().embed_one(&memory.content).await {
                         Ok(embedding) => embedding,
                         Err(error) => {
-                            tracing::warn!(%error, memory_id = %memory.id, "failed to compute embedding for deduplication");
-                            seen_ids.insert(memory.id.clone());
-                            unique_candidates.push(InjectionCandidate {
+                            tracing::warn!(%error, memory_id = %memory.id, "failed to compute embedding");
+                            scored_candidates.push(ScoredCandidate {
                                 memory,
                                 source: candidate.source,
+                                embedding: Vec::new(),
+                                cosine: None,
                             });
                             continue;
                         }
@@ -1574,11 +1605,12 @@ impl Channel {
                     match memory_search.embedding_model_arc().embed_one(&memory.content).await {
                         Ok(embedding) => embedding,
                         Err(error) => {
-                            tracing::warn!(%error, memory_id = %memory.id, "failed to compute embedding for deduplication");
-                            seen_ids.insert(memory.id.clone());
-                            unique_candidates.push(InjectionCandidate {
+                            tracing::warn!(%error, memory_id = %memory.id, "failed to compute embedding");
+                            scored_candidates.push(ScoredCandidate {
                                 memory,
                                 source: candidate.source,
+                                embedding: Vec::new(),
+                                cosine: None,
                             });
                             continue;
                         }
@@ -1586,25 +1618,82 @@ impl Channel {
                 }
             };
 
-            if is_semantically_duplicate(
-                &embedding,
-                self.injection_state
-                    .semantic_buffer
-                    .iter()
-                    .map(|(buffer_embedding, _)| buffer_embedding),
-                semantic_threshold,
-            ) {
-                deduped_count += 1;
-                continue;
+            let cosine = if candidate.source == InjectionSource::Contextual {
+                query_embedding
+                    .as_ref()
+                    .map(|query_emb| cosine_similarity(query_emb, &embedding))
+            } else {
+                None // Pinned — always kept
+            };
+
+            if let Some(sim) = cosine {
+                max_cosine = max_cosine.max(sim);
             }
 
-            seen_ids.insert(memory.id.clone());
-            self.injection_state.record_injection(memory.id.clone(), self.current_turn);
-            self.injection_state
-                .add_embedding(embedding, self.current_turn);
-            unique_candidates.push(InjectionCandidate {
+            scored_candidates.push(ScoredCandidate {
                 memory,
                 source: candidate.source,
+                embedding,
+                cosine,
+            });
+        }
+
+        // === Pass 2: relative cosine filter + semantic dedup ===
+        // contextual_min_score is a *ratio* (0.0–1.0): a candidate must score
+        // at least max_cosine × ratio to be kept. This adapts to message
+        // length — long messages compress the cosine spread, so a relative
+        // threshold stays meaningful regardless.
+        let dynamic_threshold = max_cosine * contextual_min_score;
+
+        tracing::debug!(
+            channel_id = %self.id,
+            max_cosine,
+            ratio = contextual_min_score,
+            dynamic_threshold,
+            scored = scored_candidates.len(),
+            "cosine relative threshold"
+        );
+
+        // Reset seen_ids for the dedup pass (already used for pass-1 dedup).
+        seen_ids.clear();
+
+        for scored in scored_candidates {
+            // Relative cosine filter: skip contextual memories below threshold.
+            if let Some(sim) = scored.cosine {
+                tracing::debug!(
+                    memory_id = %scored.memory.id,
+                    similarity = sim,
+                    dynamic_threshold,
+                    content_preview = %scored.memory.content.chars().take(60).collect::<String>(),
+                    "cosine filter check"
+                );
+                if sim < dynamic_threshold {
+                    deduped_count += 1;
+                    continue;
+                }
+            }
+
+            // Skip semantic dedup if embedding is empty (error fallback).
+            if !scored.embedding.is_empty() {
+                if is_semantically_duplicate(
+                    &scored.embedding,
+                    self.injection_state
+                        .semantic_buffer
+                        .iter()
+                        .map(|(buffer_embedding, _)| buffer_embedding),
+                    semantic_threshold,
+                ) {
+                    deduped_count += 1;
+                    continue;
+                }
+                self.injection_state
+                    .add_embedding(scored.embedding, self.current_turn);
+            }
+
+            self.injection_state.record_injection(scored.memory.id.clone(), self.current_turn);
+            unique_candidates.push(InjectionCandidate {
+                memory: scored.memory,
+                source: scored.source,
             });
         }
 
@@ -1807,6 +1896,27 @@ impl Channel {
             drop(history);
         }
 
+        let history_len_before = {
+            let mut guard = self.state.history.write().await;
+
+            // Inject memory context block into canonical history before cloning.
+            // This guarantees the block persists through apply_history_after_turn(),
+            // which merges only newly appended entries after `history_len_before`.
+            if let Some(ref context) = injected_context {
+                let memory_injection_config = self.deps.runtime_config.memory_injection.load();
+                prune_old_injection_blocks(
+                    &mut guard,
+                    memory_injection_config.max_injected_blocks_in_history,
+                );
+
+                // Use a user message format with clear prefix so LLM understands this is context.
+                let context_message = format!("{INJECTION_BLOCK_PREFIX}:\n{}", context);
+                guard.push(rig::message::Message::from(context_message));
+            }
+
+            guard.len()
+        };
+
         // Clone history out so the write lock is released before the agentic loop.
         // The branch tool needs a read lock on history to clone it for the branch,
         // and holding a write lock across the entire agentic loop would deadlock.
@@ -1814,21 +1924,6 @@ impl Channel {
             let guard = self.state.history.read().await;
             guard.clone()
         };
-        let history_len_before = history.len();
-
-        // Inject memory context block into the per-turn history.
-        // Blocks are persisted in bounded form (oldest blocks pruned before insertion).
-        if let Some(ref context) = injected_context {
-            let memory_injection_config = self.deps.runtime_config.memory_injection.load();
-            prune_old_injection_blocks(
-                &mut history,
-                memory_injection_config.max_injected_blocks_in_history,
-            );
-
-            // Use a user message format with clear prefix so LLM understands this is context.
-            let context_message = format!("{INJECTION_BLOCK_PREFIX}:\n{}", context);
-            history.push(rig::message::Message::from(context_message));
-        }
 
         let mut result = agent
             .prompt(user_text)

@@ -304,7 +304,7 @@ pub(super) async fn get_global_settings(
                 MemoryInjectionResponse {
                     enabled: true,
                     search_limit: 20,
-                    contextual_min_score: 0.01,
+                    contextual_min_score: 0.70,
                     context_window_depth: 10,
                     semantic_threshold: 0.85,
                     pinned_types: Vec::new(),

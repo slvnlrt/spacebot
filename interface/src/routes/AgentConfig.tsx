@@ -843,7 +843,7 @@ function ConfigSectionEditor({ sectionId, label, description, detail, config, on
 									<p className="mt-0.5 text-sm text-ink-dull">Hybrid search runs on every user message for this agent.</p>
 									<div className="mt-4 grid grid-cols-2 gap-x-6 gap-y-4">
 										<NumberStepper label="Search Limit" description="Maximum contextual memories retrieved by hybrid search" value={localValues.search_limit as number} onChange={(v) => handleChange("search_limit", v)} min={1} max={100} />
-										<NumberStepper label="Context Min Score" description="Minimum hybrid score for contextual candidates" value={localValues.contextual_min_score as number} onChange={(v) => handleChange("contextual_min_score", v)} min={0} max={0.05} step={0.001} type="float" />
+										<NumberStepper label="Context Min Score" description="Relative cosine threshold ratio (0–1). Candidates must score at least best_match × ratio." value={localValues.contextual_min_score as number} onChange={(v) => handleChange("contextual_min_score", v)} min={0} max={1} step={0.01} type="float" />
 										<NumberStepper label="Max Total" description="Hard cap across pinned and contextual memories" value={localValues.max_total as number} onChange={(v) => handleChange("max_total", v)} min={1} max={200} />
 										<NumberStepper label="History Block Limit" description="Maximum injected context blocks kept in history (0 = ephemeral)" value={localValues.max_injected_blocks_in_history as number} onChange={(v) => handleChange("max_injected_blocks_in_history", v)} min={0} max={10} />
 									</div>

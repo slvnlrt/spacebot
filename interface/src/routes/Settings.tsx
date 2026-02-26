@@ -1222,7 +1222,7 @@ function MemoryInjectionSection({settings, isLoading}: GlobalSettingsSectionProp
 	const queryClient = useQueryClient();
 	const [enabled, setEnabled] = useState(settings?.memory_injection?.enabled ?? true);
 	const [searchLimit, setSearchLimit] = useState(settings?.memory_injection?.search_limit ?? 20);
-	const [contextualMinScore, setContextualMinScore] = useState(settings?.memory_injection?.contextual_min_score ?? 0.01);
+	const [contextualMinScore, setContextualMinScore] = useState(settings?.memory_injection?.contextual_min_score ?? 0.70);
 	const [maxTotal, setMaxTotal] = useState(settings?.memory_injection?.max_total ?? 25);
 	const [maxInjectedBlocksInHistory, setMaxInjectedBlocksInHistory] = useState(
 		settings?.memory_injection?.max_injected_blocks_in_history ?? 3
@@ -1251,7 +1251,7 @@ function MemoryInjectionSection({settings, isLoading}: GlobalSettingsSectionProp
 		if (settings?.memory_injection) {
 			setEnabled(settings.memory_injection.enabled ?? true);
 			setSearchLimit(settings.memory_injection.search_limit);
-			setContextualMinScore(settings.memory_injection.contextual_min_score ?? 0.01);
+    setContextualMinScore(settings.memory_injection.contextual_min_score ?? 0.70);
 			setMaxTotal(settings.memory_injection.max_total);
 			setMaxInjectedBlocksInHistory(settings.memory_injection.max_injected_blocks_in_history ?? 3);
 			setSemanticThreshold(settings.memory_injection.semantic_threshold);
@@ -1362,17 +1362,17 @@ function MemoryInjectionSection({settings, isLoading}: GlobalSettingsSectionProp
 									<div>
 										<div className="flex items-center justify-between mb-2">
 											<span className="text-sm text-ink">Context Min Score</span>
-											<span className="text-sm text-ink-dull">{contextualMinScore.toFixed(3)}</span>
+											<span className="text-sm text-ink-dull">{contextualMinScore.toFixed(2)}</span>
 										</div>
 										<Slider
 											value={[contextualMinScore]}
 											onValueChange={(v) => setContextualMinScore(v[0])}
 											min={0}
-											max={0.05}
-											step={0.001}
+											max={1}
+											step={0.01}
 										/>
 										<p className="mt-1 text-tiny text-ink-faint">
-											Minimum hybrid score for contextual candidates. Increase to reduce broad or vague matches.
+											Relative cosine threshold ratio. Candidates must score at least best_match × ratio. Higher = stricter.
 										</p>
 									</div>
 									<div>

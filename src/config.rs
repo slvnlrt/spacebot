@@ -670,7 +670,7 @@ fn default_search_limit() -> usize {
     20
 }
 fn default_contextual_min_score() -> f32 {
-    0.01
+    0.70
 }
 fn default_context_window_depth() -> usize {
     10
