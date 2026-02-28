@@ -245,11 +245,16 @@ pub fn init_foreground_tracing(
 }
 
 fn build_env_filter(debug: bool) -> tracing_subscriber::EnvFilter {
-    if debug {
-        tracing_subscriber::EnvFilter::new("debug")
-    } else {
-        tracing_subscriber::EnvFilter::new("info")
-    }
+    // Honour RUST_LOG if set — allows fine-grained control in production/debug
+    // without having to rebuild (e.g. `RUST_LOG="warn,spacebot=debug,lance=warn"`).
+    // Falls back to "debug" / "info" based on the --debug flag.
+    tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        if debug {
+            tracing_subscriber::EnvFilter::new("debug")
+        } else {
+            tracing_subscriber::EnvFilter::new("info")
+        }
+    })
 }
 
 /// Build an OTLP `SdkTracerProvider` when an endpoint is configured.

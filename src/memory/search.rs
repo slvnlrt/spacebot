@@ -1,7 +1,7 @@
 //! Memory search: hybrid (vector + FTS + RRF + graph), temporal, importance, and typed queries.
 
 use crate::error::Result;
-use crate::memory::types::{Memory, MemorySearchResult, MemoryType, RelationType};
+use crate::memory::types::{Memory, MemorySearchResult, MemoryType, RelationType, SourceSignal};
 use crate::memory::{EmbeddingModel, EmbeddingTable, MemoryStore};
 
 use std::collections::HashMap;
@@ -135,6 +135,7 @@ impl MemorySearch {
                     memory,
                     score,
                     rank: rank + 1,
+                    source_signal: None,
                 }
             })
             .collect();
@@ -162,6 +163,15 @@ impl MemorySearch {
             .await
         {
             Ok(fts_matches) => {
+                tracing::debug!(
+                    query,
+                    raw_count = fts_matches.len(),
+                    scores = ?fts_matches
+                        .iter()
+                        .map(|(id, score)| (id.get(..8).unwrap_or(id), score))
+                        .collect::<Vec<_>>(),
+                    "FTS raw results (before BM25 filter)"
+                );
                 for (memory_id, score) in fts_matches {
                     if let Some(memory) = self.store.load(&memory_id).await?
                         && !memory.forgotten
@@ -176,6 +186,25 @@ impl MemorySearch {
             Err(error) => {
                 tracing::debug!(%error, "FTS search unavailable, falling back to vector + graph");
             }
+        }
+
+        // Relative BM25 filter: keep only top half of FTS results.
+        // BM25 rewards term rarity, so a precise match ("Jamie Pine") scores
+        // much higher than common-word co-occurrences. Cutting the bottom half
+        // removes weak lexical matches before they inflate the fused list.
+        if fts_results.len() > 1 {
+            fts_results.sort_by(|a, b| b.score.total_cmp(&a.score));
+            let before = fts_results.len();
+            fts_results.truncate((fts_results.len() + 1) / 2);
+            tracing::debug!(
+                before,
+                after = fts_results.len(),
+                kept = ?fts_results
+                    .iter()
+                    .map(|r| (r.memory.id.get(..8).unwrap_or(&r.memory.id), r.score))
+                    .collect::<Vec<_>>(),
+                "FTS after top-50% BM25 filter"
+            );
         }
 
         // 2. Vector similarity search via LanceDB
@@ -235,16 +264,25 @@ impl MemorySearch {
         // Convert to MemorySearchResult with ranks, applying optional type filter
         let results: Vec<MemorySearchResult> = fused_results
             .into_iter()
-            .filter(|scored| {
+            .filter(|fused| {
                 config
                     .memory_type
-                    .is_none_or(|t| scored.memory.memory_type == t)
+                    .is_none_or(|t| fused.memory.memory_type == t)
             })
             .enumerate()
-            .map(|(rank, scored)| MemorySearchResult {
-                memory: scored.memory,
-                score: scored.score as f32,
-                rank: rank + 1,
+            .map(|(rank, fused)| {
+                let source_signal = match (fused.in_fts, fused.in_vector) {
+                    (true, false) => Some(SourceSignal::FtsOnly),
+                    (false, true) => Some(SourceSignal::VectorOnly),
+                    (true, true) => Some(SourceSignal::Both),
+                    (false, false) => None, // graph-only
+                };
+                MemorySearchResult {
+                    memory: fused.memory,
+                    score: fused.score as f32,
+                    rank: rank + 1,
+                    source_signal,
+                }
             })
             .filter(|r| r.score >= config.min_score)
             .take(config.max_results_per_source)
@@ -375,24 +413,43 @@ struct ScoredMemory {
     score: f64,
 }
 
+/// RRF output: fused score plus which source signals contributed.
+#[derive(Debug, Clone)]
+struct FusedMemory {
+    memory: Memory,
+    score: f64,
+    /// This memory appeared in the FTS result list.
+    in_fts: bool,
+    /// This memory appeared in the vector result list.
+    in_vector: bool,
+}
+
 /// Reciprocal Rank Fusion to combine results from multiple sources.
 /// RRF score = sum(1 / (k + rank)) for each list where the item appears.
+/// Tracks per-entry which source signals contributed (FTS / vector / graph).
 fn reciprocal_rank_fusion(
     vector_results: &[ScoredMemory],
     fts_results: &[ScoredMemory],
     graph_results: &[ScoredMemory],
     k: f64,
-) -> Vec<ScoredMemory> {
-    // Build a map of memory ID to RRF score
-    let mut rrf_scores: HashMap<String, (f64, Memory)> = HashMap::new();
+) -> Vec<FusedMemory> {
+    struct Entry {
+        score: f64,
+        memory: Memory,
+        in_fts: bool,
+        in_vector: bool,
+    }
+
+    let mut rrf_scores: HashMap<String, Entry> = HashMap::new();
 
     // Add vector results
     for (rank, scored) in vector_results.iter().enumerate() {
         let rrf_score = 1.0 / (k + (rank as f64 + 1.0));
         let entry = rrf_scores
             .entry(scored.memory.id.clone())
-            .or_insert((0.0, scored.memory.clone()));
-        entry.0 += rrf_score;
+            .or_insert(Entry { score: 0.0, memory: scored.memory.clone(), in_fts: false, in_vector: false });
+        entry.score += rrf_score;
+        entry.in_vector = true;
     }
 
     // Add FTS results
@@ -400,23 +457,29 @@ fn reciprocal_rank_fusion(
         let rrf_score = 1.0 / (k + (rank as f64 + 1.0));
         let entry = rrf_scores
             .entry(scored.memory.id.clone())
-            .or_insert((0.0, scored.memory.clone()));
-        entry.0 += rrf_score;
+            .or_insert(Entry { score: 0.0, memory: scored.memory.clone(), in_fts: false, in_vector: false });
+        entry.score += rrf_score;
+        entry.in_fts = true;
     }
 
-    // Add graph results
+    // Add graph results (no source signal flag — graph uses keyword heuristics)
     for (rank, scored) in graph_results.iter().enumerate() {
         let rrf_score = 1.0 / (k + (rank as f64 + 1.0));
         let entry = rrf_scores
             .entry(scored.memory.id.clone())
-            .or_insert((0.0, scored.memory.clone()));
-        entry.0 += rrf_score;
+            .or_insert(Entry { score: 0.0, memory: scored.memory.clone(), in_fts: false, in_vector: false });
+        entry.score += rrf_score;
     }
 
     // Convert to vec and sort by RRF score
-    let mut fused: Vec<ScoredMemory> = rrf_scores
+    let mut fused: Vec<FusedMemory> = rrf_scores
         .into_iter()
-        .map(|(_, (score, memory))| ScoredMemory { memory, score })
+        .map(|(_, e)| FusedMemory {
+            memory: e.memory,
+            score: e.score,
+            in_fts: e.in_fts,
+            in_vector: e.in_vector,
+        })
         .collect();
 
     fused.sort_by(|a, b| b.score.total_cmp(&a.score));
@@ -494,6 +557,7 @@ mod tests {
                 memory: Memory::new(format!("mem {i}"), MemoryType::Fact),
                 score: 1.0 - (i as f32 * 0.1),
                 rank: i + 1,
+                source_signal: None,
             })
             .collect();
 

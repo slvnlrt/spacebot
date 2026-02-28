@@ -205,12 +205,31 @@ impl std::fmt::Display for RelationType {
     }
 }
 
+/// Which retrieval signals contributed a hybrid search result.
+///
+/// Tracked through RRF fusion so downstream consumers can make
+/// signal-aware decisions (e.g. skip the cosine floor for FTS-exact matches).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceSignal {
+    /// Found only via full-text (BM25) search.
+    FtsOnly,
+    /// Found only via vector (cosine) search.
+    VectorOnly,
+    /// Found via both FTS and vector search.
+    Both,
+}
+
 /// Search result combining memory with relevance score.
 #[derive(Debug, Clone, Serialize)]
 pub struct MemorySearchResult {
     pub memory: Memory,
     pub score: f32,
     pub rank: usize,
+    /// Which retrieval signals produced this result (hybrid mode only).
+    /// `None` for metadata-only modes (Recent, Important, Typed).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_signal: Option<SourceSignal>,
 }
 
 /// Input for memory creation.

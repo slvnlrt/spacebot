@@ -11,6 +11,7 @@ use crate::hooks::SpacebotHook;
 use crate::llm::SpacebotModel;
 use crate::memory::{
     cosine_similarity, is_semantically_duplicate, MemoryType, SearchConfig, SearchMode, SearchSort,
+    SourceSignal,
 };
 use crate::{
     AgentDeps, BranchId, ChannelId, InboundMessage, OutboundResponse, ProcessEvent, ProcessId,
@@ -1426,6 +1427,8 @@ impl Channel {
         struct InjectionCandidate {
             memory: crate::memory::Memory,
             source: InjectionSource,
+            /// Which retrieval signals produced this candidate (hybrid search only).
+            source_signal: Option<SourceSignal>,
         }
 
         let parse_memory_type = |value: &str| -> Option<MemoryType> {
@@ -1521,12 +1524,14 @@ impl Channel {
             .map(|memory| InjectionCandidate {
                 memory,
                 source: InjectionSource::Pinned,
+                source_signal: None,
             })
             .collect::<Vec<_>>();
 
         match contextual_results {
             Ok(results) => {
                 all_candidates.extend(results.into_iter().map(|result| InjectionCandidate {
+                    source_signal: result.source_signal,
                     memory: result.memory,
                     source: InjectionSource::Contextual,
                 }));
@@ -1571,6 +1576,8 @@ impl Channel {
             embedding: Vec<f32>,
             /// Cosine similarity to the user query (None for pinned).
             cosine: Option<f32>,
+            /// Which retrieval signals produced this candidate.
+            source_signal: Option<SourceSignal>,
         }
 
         let mut scored_candidates = Vec::new();
@@ -1603,6 +1610,7 @@ impl Channel {
                         Err(error) => {
                             tracing::warn!(%error, memory_id = %memory.id, "failed to compute embedding");
                             scored_candidates.push(ScoredCandidate {
+                                source_signal: candidate.source_signal,
                                 memory,
                                 source: candidate.source,
                                 embedding: Vec::new(),
@@ -1619,6 +1627,7 @@ impl Channel {
                         Err(error) => {
                             tracing::warn!(%error, memory_id = %memory.id, "failed to compute embedding");
                             scored_candidates.push(ScoredCandidate {
+                                source_signal: candidate.source_signal,
                                 memory,
                                 source: candidate.source,
                                 embedding: Vec::new(),
@@ -1641,6 +1650,7 @@ impl Channel {
             }
 
             scored_candidates.push(ScoredCandidate {
+                source_signal: candidate.source_signal,
                 memory,
                 source: candidate.source,
                 embedding,
@@ -1674,16 +1684,37 @@ impl Channel {
         seen_ids.clear();
 
         for scored in scored_candidates {
-            // Relative cosine filter: skip contextual memories below threshold.
+            // Differentiated cosine floor by retrieval signal.
+            //
+            // MiniLM is unreliable for rare proper nouns — a precise FTS/BM25
+            // match may have a low cosine even when it is the correct result.
+            // We therefore apply a softer floor for FTS-backed candidates.
+            // The BM25 top-50% pre-filter in hybrid_search already removed the
+            // weakest lexical matches before they reached RRF, so FtsOnly
+            // candidates here are already pre-qualified by BM25.
+            //
+            //   FtsOnly       → 0.45  (absolute floor only — BM25 already qualified)
+            //   Both          → 0.50  (absolute floor only — FTS + vector agree)
+            //   VectorOnly/∅  → dynamic_threshold (adapts to message, >= 0.60)
+            //
+            // dynamic_threshold must NOT apply to FTS-backed candidates: BM25
+            // already provides a relevance signal, and MiniLM cosine is noisy
+            // for proper nouns / short entities that FTS handles well.
             if let Some(sim) = scored.cosine {
+                let effective_threshold: f32 = match scored.source_signal {
+                    Some(SourceSignal::FtsOnly) => 0.45,
+                    Some(SourceSignal::Both) => 0.50,
+                    _ => dynamic_threshold, // >= ABSOLUTE_MIN_COSINE (0.60)
+                };
                 tracing::debug!(
                     memory_id = %scored.memory.id,
                     similarity = sim,
-                    dynamic_threshold,
+                    effective_threshold,
+                    source_signal = ?scored.source_signal,
                     content_preview = %scored.memory.content.chars().take(60).collect::<String>(),
                     "cosine filter check"
                 );
-                if sim < dynamic_threshold {
+                if sim < effective_threshold {
                     deduped_count += 1;
                     continue;
                 }
@@ -1708,6 +1739,7 @@ impl Channel {
 
             self.injection_state.record_injection(scored.memory.id.clone(), self.current_turn);
             unique_candidates.push(InjectionCandidate {
+                source_signal: scored.source_signal,
                 memory: scored.memory,
                 source: scored.source,
             });
