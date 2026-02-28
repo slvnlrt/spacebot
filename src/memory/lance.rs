@@ -355,8 +355,13 @@ impl EmbeddingTable {
     /// Ensure the FTS index exists on the content column.
     ///
     /// LanceDB requires an inverted index for `full_text_search()` queries.
-    /// This is safe to call multiple times — if the index already exists, the
-    /// error is silently ignored.
+    /// `IndexBuilder` defaults to `replace = true`, so each call rebuilds the
+    /// index from scratch and covers all rows present at call time.
+    ///
+    /// **Perf note**: rebuilding on every `memory_save` call is correct but
+    /// O(N) in total memory count. TODO: replace the post-save call in
+    /// `memory_save.rs` with `table.optimize(OptimizeAction::Index(...))` to
+    /// fold only the new rows into the existing index incrementally.
     pub async fn ensure_fts_index(&self) -> Result<()> {
         match self
             .table

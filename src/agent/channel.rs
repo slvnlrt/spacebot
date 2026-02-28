@@ -1538,12 +1538,24 @@ impl Channel {
 
         let candidate_count = all_candidates.len();
 
-        // Embed the query once for cosine-similarity post-filtering.
-        let query_embedding = memory_search
+        // Embed the query for cosine-similarity post-filtering.
+        // If embedding fails we have no signal to rank candidates, so skip injection
+        // entirely rather than letting every memory pass an unconstrained filter.
+        let query_embedding = match memory_search
             .embedding_model_arc()
             .embed_one(user_text)
             .await
-            .ok();
+        {
+            Ok(emb) => emb,
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    channel_id = %self.id,
+                    "failed to embed query for memory injection, skipping"
+                );
+                return None;
+            }
+        };
 
         let mut deduped_count = 0usize;
         let mut unique_candidates = Vec::new();
@@ -1619,9 +1631,7 @@ impl Channel {
             };
 
             let cosine = if candidate.source == InjectionSource::Contextual {
-                query_embedding
-                    .as_ref()
-                    .map(|query_emb| cosine_similarity(query_emb, &embedding))
+                Some(cosine_similarity(&query_embedding, &embedding))
             } else {
                 None // Pinned — always kept
             };
@@ -1643,7 +1653,13 @@ impl Channel {
         // at least max_cosine × ratio to be kept. This adapts to message
         // length — long messages compress the cosine spread, so a relative
         // threshold stays meaningful regardless.
-        let dynamic_threshold = max_cosine * contextual_min_score;
+        //
+        // ABSOLUTE_MIN_COSINE is a hard floor: even when max_cosine is low
+        // (generic/off-topic message), irrelevant memories with cosine < 0.60
+        // are still discarded. Calibrated for all-MiniLM-L6-v2 (384-dim).
+        // TODO: expose as `absolute_min_cosine` in MemoryInjectionConfig.
+        const ABSOLUTE_MIN_COSINE: f32 = 0.60;
+        let dynamic_threshold = (max_cosine * contextual_min_score).max(ABSOLUTE_MIN_COSINE);
 
         tracing::debug!(
             channel_id = %self.id,
@@ -1899,16 +1915,23 @@ impl Channel {
         let history_len_before = {
             let mut guard = self.state.history.write().await;
 
+            // Prune stale injection blocks every turn, regardless of whether new memories
+            // are injected. Without this, blocks from previous turns accumulate indefinitely
+            // when injection returns None (all candidates deduped / below threshold).
+            {
+                let max_keep = self
+                    .deps
+                    .runtime_config
+                    .memory_injection
+                    .load()
+                    .max_injected_blocks_in_history;
+                prune_old_injection_blocks(&mut guard, max_keep);
+            }
+
             // Inject memory context block into canonical history before cloning.
             // This guarantees the block persists through apply_history_after_turn(),
             // which merges only newly appended entries after `history_len_before`.
             if let Some(ref context) = injected_context {
-                let memory_injection_config = self.deps.runtime_config.memory_injection.load();
-                prune_old_injection_blocks(
-                    &mut guard,
-                    memory_injection_config.max_injected_blocks_in_history,
-                );
-
                 // Use a user message format with clear prefix so LLM understands this is context.
                 let context_message = format!("{INJECTION_BLOCK_PREFIX}:\n{}", context);
                 guard.push(rig::message::Message::from(context_message));
