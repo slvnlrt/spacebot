@@ -23,6 +23,7 @@ pub mod sandbox;
 pub mod secrets;
 pub mod settings;
 pub mod skills;
+pub mod tasks;
 #[cfg(feature = "metrics")]
 pub mod telemetry;
 pub mod tools;
@@ -116,6 +117,7 @@ pub enum ProcessEvent {
         worker_id: WorkerId,
         channel_id: Option<ChannelId>,
         task: String,
+        worker_type: String,
     },
     WorkerStatus {
         agent_id: AgentId,
@@ -129,12 +131,14 @@ pub enum ProcessEvent {
         channel_id: Option<ChannelId>,
         result: String,
         notify: bool,
+        success: bool,
     },
     ToolStarted {
         agent_id: AgentId,
         process_id: ProcessId,
         channel_id: Option<ChannelId>,
         tool_name: String,
+        args: String,
     },
     ToolCompleted {
         agent_id: AgentId,
@@ -185,6 +189,13 @@ pub enum ProcessEvent {
         link_id: String,
         channel_id: ChannelId,
     },
+    TaskUpdated {
+        agent_id: AgentId,
+        task_number: i64,
+        status: String,
+        /// "created", "updated", or "deleted".
+        action: String,
+    },
 }
 
 /// Shared dependency bundle for agent processes.
@@ -194,6 +205,7 @@ pub struct AgentDeps {
     pub memory_search: Arc<memory::MemorySearch>,
     pub llm_manager: Arc<llm::LlmManager>,
     pub mcp_manager: Arc<mcp::McpManager>,
+    pub task_store: Arc<tasks::TaskStore>,
     pub cron_tool: Option<tools::CronTool>,
     pub runtime_config: Arc<config::RuntimeConfig>,
     pub event_tx: tokio::sync::broadcast::Sender<ProcessEvent>,
@@ -232,6 +244,12 @@ pub struct Agent {
 pub struct InboundMessage {
     pub id: String,
     pub source: String,
+    /// Runtime adapter key that received this message.
+    ///
+    /// Defaults to the platform source (`source`) when omitted so older payloads
+    /// and synthetic messages remain compatible.
+    #[serde(default)]
+    pub adapter: Option<String>,
     pub conversation_id: String,
     pub sender_id: String,
     /// Set by the router after binding resolution. None until routed.
@@ -242,6 +260,35 @@ pub struct InboundMessage {
     /// Platform-formatted author display (e.g., "Alice (<@123>)" for Discord).
     /// If None, channel falls back to sender_display_name from metadata.
     pub formatted_author: Option<String>,
+}
+
+impl InboundMessage {
+    /// Runtime adapter key for routing outbound operations.
+    ///
+    /// Falls back to the platform source for backward compatibility.
+    pub fn adapter_key(&self) -> &str {
+        self.adapter
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(&self.source)
+    }
+
+    /// Platform-scoped adapter selector used by bindings.
+    ///
+    /// Returns `None` for the default adapter and `Some(name)` for named
+    /// adapters (e.g. `telegram:support` -> `Some("support")`).
+    pub fn adapter_selector(&self) -> Option<&str> {
+        let adapter_key = self.adapter_key();
+        if adapter_key == self.source {
+            return None;
+        }
+
+        adapter_key
+            .strip_prefix(&self.source)
+            .and_then(|suffix| suffix.strip_prefix(':'))
+            .filter(|name| !name.is_empty())
+    }
 }
 
 /// Message content variants.
@@ -308,6 +355,10 @@ pub struct Attachment {
     pub mime_type: String,
     pub url: String,
     pub size_bytes: Option<u64>,
+    /// Optional auth header value for private URLs (e.g. Slack's `url_private`).
+    /// Excluded from serialization to prevent credential leakage.
+    #[serde(skip)]
+    pub auth_header: Option<String>,
 }
 
 /// Outbound response to messaging platforms.

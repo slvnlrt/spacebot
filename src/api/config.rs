@@ -91,6 +91,12 @@ pub(super) struct BrowserSection {
 }
 
 #[derive(Serialize, Debug)]
+pub(super) struct SandboxSection {
+    mode: String,
+    writable_paths: Vec<String>,
+}
+
+#[derive(Serialize, Debug)]
 pub(super) struct DiscordSection {
     enabled: bool,
     allow_bot_messages: bool,
@@ -108,6 +114,7 @@ pub(super) struct AgentConfigResponse {
     memory_injection: MemoryInjectionSection,
     memory_injection_overridden: bool,
     browser: BrowserSection,
+    sandbox: SandboxSection,
     discord: DiscordSection,
 }
 
@@ -139,6 +146,8 @@ pub(super) struct AgentConfigUpdateRequest {
     reset_memory_injection_override: Option<bool>,
     #[serde(default)]
     browser: Option<BrowserUpdate>,
+    #[serde(default)]
+    sandbox: Option<SandboxUpdate>,
     #[serde(default)]
     discord: Option<DiscordUpdate>,
 }
@@ -228,6 +237,12 @@ pub(super) struct BrowserUpdate {
 }
 
 #[derive(Deserialize, Debug)]
+pub(super) struct SandboxUpdate {
+    mode: Option<String>,
+    writable_paths: Option<Vec<String>>,
+}
+
+#[derive(Deserialize, Debug)]
 pub(super) struct DiscordUpdate {
     allow_bot_messages: Option<bool>,
 }
@@ -252,6 +267,7 @@ pub(super) async fn get_agent_config(
     let memory_injection = rc.memory_injection.load();
     let browser = rc.browser_config.load();
     let memory_injection_overridden = has_memory_injection_override(&state, &query.agent_id).await;
+    let sandbox = rc.sandbox.load();
 
     let response = AgentConfigResponse {
         routing: RoutingSection {
@@ -320,6 +336,17 @@ pub(super) async fn get_agent_config(
             enabled: browser.enabled,
             headless: browser.headless,
             evaluate_enabled: browser.evaluate_enabled,
+        },
+        sandbox: SandboxSection {
+            mode: match sandbox.mode {
+                crate::sandbox::SandboxMode::Enabled => "enabled".to_string(),
+                crate::sandbox::SandboxMode::Disabled => "disabled".to_string(),
+            },
+            writable_paths: sandbox
+                .writable_paths
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect(),
         },
         discord: {
             let perms = state.discord_permissions.read().await;
@@ -398,6 +425,9 @@ pub(super) async fn update_agent_config(
     }
     if let Some(browser) = &request.browser {
         update_browser_table(&mut doc, agent_idx, browser)?;
+    }
+    if let Some(sandbox) = &request.sandbox {
+        update_sandbox_table(&mut doc, agent_idx, sandbox)?;
     }
     if let Some(discord) = &request.discord {
         update_discord_table(&mut doc, discord)?;
@@ -747,6 +777,26 @@ fn update_browser_table(
     }
     if let Some(v) = browser.evaluate_enabled {
         table["evaluate_enabled"] = toml_edit::value(v);
+    }
+    Ok(())
+}
+
+fn update_sandbox_table(
+    doc: &mut toml_edit::DocumentMut,
+    agent_idx: usize,
+    sandbox: &SandboxUpdate,
+) -> Result<(), StatusCode> {
+    let agent = get_agent_table_mut(doc, agent_idx)?;
+    let table = get_or_create_subtable(agent, "sandbox")?;
+    if let Some(ref mode) = sandbox.mode {
+        table["mode"] = toml_edit::value(mode.as_str());
+    }
+    if let Some(ref paths) = sandbox.writable_paths {
+        let mut array = toml_edit::Array::new();
+        for path in paths {
+            array.push(path.as_str());
+        }
+        table["writable_paths"] = toml_edit::value(array);
     }
     Ok(())
 }

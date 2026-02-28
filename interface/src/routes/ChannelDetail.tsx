@@ -19,7 +19,7 @@ interface ChannelDetailProps {
 	onLoadMore: () => void;
 }
 
-function CancelButton({ onClick }: { onClick: () => void }) {
+function CancelButton({ onClick, className }: { onClick: () => void; className?: string }) {
 	const [cancelling, setCancelling] = useState(false);
 	return (
 		<Button
@@ -32,7 +32,7 @@ function CancelButton({ onClick }: { onClick: () => void }) {
 				setCancelling(true);
 				onClick();
 			}}
-			className="ml-auto h-7 w-7 flex-shrink-0 text-ink-faint/50 hover:bg-red-500/15 hover:text-red-400"
+			className={`h-7 w-7 flex-shrink-0 text-ink-faint/50 hover:bg-red-500/15 hover:text-red-400 ${className ?? ""}`}
 			title="Cancel"
 		>
 			<HugeiconsIcon icon={Cancel01Icon} className="h-3.5 w-3.5" />
@@ -49,11 +49,11 @@ function LiveBranchRunItem({ item, live, channelId }: { item: TimelineBranchRun;
 			</span>
 			<div className="min-w-0 flex-1">
 				<div className="rounded-md bg-violet-500/10 px-3 py-2">
-					<div className="flex items-center gap-2">
+					<div className="flex min-w-0 items-center gap-2">
 						<div className="h-2 w-2 animate-pulse rounded-full bg-violet-400" />
 						<span className="text-sm font-medium text-violet-300">Branch</span>
-						<span className="truncate text-sm text-ink-dull">{item.description}</span>
-						<CancelButton onClick={() => { api.cancelProcess(channelId, "branch", item.id).catch(console.warn); }} />
+						<span className="min-w-0 flex-1 truncate text-sm text-ink-dull">{item.description}</span>
+						<CancelButton className="ml-auto" onClick={() => { api.cancelProcess(channelId, "branch", item.id).catch(console.warn); }} />
 					</div>
 					<div className="mt-1 flex items-center gap-3 pl-4 text-tiny text-ink-faint">
 						<LiveDuration startMs={live.startedAt} />
@@ -70,21 +70,47 @@ function LiveBranchRunItem({ item, live, channelId }: { item: TimelineBranchRun;
 	);
 }
 
-function LiveWorkerRunItem({ item, live, channelId }: { item: TimelineWorkerRun; live: ActiveWorker; channelId: string }) {
+function LiveWorkerRunItem({ item, live, channelId, agentId }: { item: TimelineWorkerRun; live: ActiveWorker; channelId: string; agentId: string }) {
+	const [expanded, setExpanded] = useState(true);
+
 	return (
 		<div className="flex gap-3 px-3 py-2">
 			<span className="flex-shrink-0 pt-0.5 text-tiny text-ink-faint">
 				{formatTimestamp(new Date(item.started_at).getTime())}
 			</span>
 			<div className="min-w-0 flex-1">
-				<div className="rounded-md bg-amber-500/10 px-3 py-2">
+				<div className="w-full rounded-md bg-amber-500/10 px-3 py-2 transition-colors hover:bg-amber-500/15">
 					<div className="flex min-w-0 items-center gap-2 overflow-hidden">
-						<div className="h-2 w-2 animate-pulse rounded-full bg-amber-400" />
-						<span className="text-sm font-medium text-amber-300">Worker</span>
-						<span className="min-w-0 flex-1 truncate text-sm text-ink-dull">{item.task}</span>
+						<button
+							type="button"
+							onClick={() => setExpanded(!expanded)}
+							className="min-w-0 flex-1 text-left"
+						>
+							<div className="flex min-w-0 items-center gap-2 overflow-hidden">
+								<div className="h-2 w-2 animate-pulse rounded-full bg-amber-400" />
+								<span className="text-sm font-medium text-amber-300">Worker</span>
+								<span className={`min-w-0 flex-1 text-sm text-ink-dull ${
+									expanded ? "whitespace-normal break-words" : "truncate"
+								}`}>{item.task}</span>
+								<span className="flex-shrink-0 text-tiny leading-5 text-ink-faint">
+									{expanded ? "▾" : "▸"}
+								</span>
+							</div>
+						</button>
+						<Link
+							to="/agents/$agentId/workers"
+							params={{ agentId }}
+							search={{ worker: item.id }}
+							className="flex-shrink-0 rounded border border-amber-400/30 px-1.5 py-0.5 text-tiny font-medium text-amber-300 transition-colors hover:border-amber-400/60 hover:bg-amber-500/15"
+						>
+							Open
+						</Link>
 						<CancelButton onClick={() => { api.cancelProcess(channelId, "worker", item.id).catch(console.warn); }} />
 					</div>
+				</div>
+				{expanded && (
 					<div className="mt-1 flex min-w-0 items-center gap-3 overflow-hidden pl-4 text-tiny text-ink-faint">
+						<LiveDuration startMs={live.startedAt} />
 						<span className="truncate">{live.status}</span>
 						{live.currentTool && (
 							<span className="truncate text-amber-400/70">{live.currentTool}</span>
@@ -93,7 +119,7 @@ function LiveWorkerRunItem({ item, live, channelId }: { item: TimelineWorkerRun;
 							<span>{live.toolCalls} tool calls</span>
 						)}
 					</div>
-				</div>
+				)}
 			</div>
 		</div>
 	);
@@ -114,12 +140,18 @@ function BranchRunItem({ item }: { item: TimelineBranchRun }) {
 					variant="ghost"
 					className="h-auto w-full justify-start rounded-md bg-violet-500/10 px-3 py-2 text-left hover:bg-violet-500/15"
 				>
-					<div className="flex items-center gap-2">
-						<div className="h-2 w-2 rounded-full bg-violet-400/50" />
-						<span className="text-sm font-medium text-violet-300">Branch</span>
-						<span className="truncate text-sm text-ink-dull">{item.description}</span>
+					<div className="flex min-w-0 items-start gap-2">
+						<span className="inline-flex flex-shrink-0 items-center gap-2 self-start">
+							<span className="h-2 w-2 rounded-full bg-violet-400/50" />
+							<span className="text-sm font-medium text-violet-300">Branch</span>
+						</span>
+						<span className={`min-w-0 flex-1 text-sm text-ink-dull ${
+							expanded ? "whitespace-normal break-words" : "truncate"
+						}`}>
+							{item.description}
+						</span>
 						{item.conclusion && (
-							<span className="ml-auto text-tiny text-ink-faint">
+							<span className="flex-shrink-0 self-start text-tiny leading-5 text-ink-faint">
 								{expanded ? "▾" : "▸"}
 							</span>
 						)}
@@ -128,7 +160,7 @@ function BranchRunItem({ item }: { item: TimelineBranchRun }) {
 				{expanded && item.conclusion && (
 					<div className="mt-1 rounded-md border border-violet-500/10 bg-violet-500/5 px-3 py-2">
 						<div className="text-sm text-ink-dull">
-							<Markdown>{item.conclusion}</Markdown>
+							<Markdown className="whitespace-pre-wrap break-words">{item.conclusion}</Markdown>
 						</div>
 					</div>
 				)}
@@ -137,7 +169,7 @@ function BranchRunItem({ item }: { item: TimelineBranchRun }) {
 	);
 }
 
-function WorkerRunItem({ item }: { item: TimelineWorkerRun }) {
+function WorkerRunItem({ item, agentId }: { item: TimelineWorkerRun; agentId: string }) {
 	const [expanded, setExpanded] = useState(false);
 
 	return (
@@ -146,26 +178,42 @@ function WorkerRunItem({ item }: { item: TimelineWorkerRun }) {
 				{formatTimestamp(new Date(item.started_at).getTime())}
 			</span>
 			<div className="min-w-0 flex-1">
-				<button
-					type="button"
-					onClick={() => setExpanded(!expanded)}
-					className="w-full rounded-md bg-amber-500/10 px-3 py-2 text-left transition-colors hover:bg-amber-500/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400/60"
-				>
+				<div className="w-full rounded-md bg-amber-500/10 px-3 py-2 transition-colors hover:bg-amber-500/15">
 					<div className="flex min-w-0 items-center gap-2 overflow-hidden">
-						<div className="h-2 w-2 rounded-full bg-amber-400/50" />
-						<span className="text-sm font-medium text-amber-300">Worker</span>
-						<span className="min-w-0 flex-1 truncate text-sm text-ink-dull">{item.task}</span>
-						{item.result && (
-							<span className="ml-auto text-tiny text-ink-faint">
-								{expanded ? "▾" : "▸"}
-							</span>
-						)}
+						<button
+							type="button"
+							onClick={() => {
+								if (item.result) setExpanded(!expanded);
+							}}
+							className="min-w-0 flex-1 text-left"
+						>
+							<div className="flex min-w-0 items-center gap-2 overflow-hidden">
+								<div className="h-2 w-2 rounded-full bg-amber-400/50" />
+								<span className="text-sm font-medium text-amber-300">Worker</span>
+								<span className={`min-w-0 flex-1 text-sm text-ink-dull ${
+									expanded ? "whitespace-normal break-words" : "truncate"
+								}`}>{item.task}</span>
+								{item.result && (
+									<span className="flex-shrink-0 text-tiny leading-5 text-ink-faint">
+										{expanded ? "▾" : "▸"}
+									</span>
+								)}
+							</div>
+						</button>
+						<Link
+							to="/agents/$agentId/workers"
+							params={{ agentId }}
+							search={{ worker: item.id }}
+							className="flex-shrink-0 rounded border border-amber-400/30 px-1.5 py-0.5 text-tiny font-medium text-amber-300 transition-colors hover:border-amber-400/60 hover:bg-amber-500/15"
+						>
+							Open
+						</Link>
 					</div>
-				</button>
+				</div>
 				{expanded && item.result && (
 					<div className="mt-1 rounded-md border border-amber-500/10 bg-amber-500/5 px-3 py-2">
 						<div className="text-sm text-ink-dull">
-							<Markdown>{item.result}</Markdown>
+							<Markdown className="whitespace-pre-wrap break-words">{item.result}</Markdown>
 						</div>
 					</div>
 				)}
@@ -174,11 +222,12 @@ function WorkerRunItem({ item }: { item: TimelineWorkerRun }) {
 	);
 }
 
-function TimelineEntry({ item, liveWorkers, liveBranches, channelId }: {
+function TimelineEntry({ item, liveWorkers, liveBranches, channelId, agentId }: {
 	item: TimelineItem;
 	liveWorkers: Record<string, ActiveWorker>;
 	liveBranches: Record<string, ActiveBranch>;
 	channelId: string;
+	agentId: string;
 }) {
 	switch (item.type) {
 		case "message":
@@ -210,8 +259,8 @@ function TimelineEntry({ item, liveWorkers, liveBranches, channelId }: {
 		}
 		case "worker_run": {
 			const live = liveWorkers[item.id];
-			if (live) return <LiveWorkerRunItem item={item} live={live} channelId={channelId} />;
-			return <WorkerRunItem item={item} />;
+			if (live) return <LiveWorkerRunItem item={item} live={live} channelId={channelId} agentId={agentId} />;
+			return <WorkerRunItem item={item} agentId={agentId} />;
 		}
 	}
 }
@@ -230,10 +279,20 @@ export function ChannelDetail({ agentId, channelId, channel, liveState, onLoadMo
 
 	const scrollRef = useRef<HTMLDivElement>(null);
 	const sentinelRef = useRef<HTMLDivElement>(null);
+	const lastLoadMoreAtRef = useRef(0);
 
 	// Trigger load when the sentinel at the top of the timeline becomes visible
 	const handleIntersection = useCallback((entries: IntersectionObserverEntry[]) => {
-		if (entries[0]?.isIntersecting && hasMore && !loadingMore) {
+		const entry = entries[0];
+		if (!entry?.isIntersecting) {
+			return;
+		}
+		const now = Date.now();
+		if (now - lastLoadMoreAtRef.current < 800) {
+			return;
+		}
+		if (hasMore && !loadingMore) {
+			lastLoadMoreAtRef.current = now;
 			onLoadMore();
 		}
 	}, [hasMore, loadingMore, onLoadMore]);
@@ -302,15 +361,17 @@ export function ChannelDetail({ agentId, channelId, channel, liveState, onLoadMo
 								<span className="ml-1 text-tiny text-ink-faint">typing</span>
 							</div>
 						)}
-					<Button
-						onClick={() => setCortexOpen(!cortexOpen)}
-						variant={cortexOpen ? "secondary" : "ghost"}
-						size="icon"
-						className={`h-8 w-8 ${cortexOpen ? "bg-violet-500/20 text-violet-400" : ""}`}
-						title="Toggle cortex chat"
-					>
-						<HugeiconsIcon icon={IdeaIcon} className="h-4 w-4" />
-					</Button>
+						<div className="flex overflow-hidden rounded-md border border-app-line bg-app-darkBox">
+							<Button
+								onClick={() => setCortexOpen(!cortexOpen)}
+								variant={cortexOpen ? "secondary" : "ghost"}
+								size="icon"
+								className={cortexOpen ? "bg-app-selected text-ink" : ""}
+								title="Toggle cortex chat"
+							>
+								<HugeiconsIcon icon={IdeaIcon} className="h-4 w-4" />
+							</Button>
+						</div>
 					</div>
 				</div>
 
@@ -339,6 +400,7 @@ export function ChannelDetail({ agentId, channelId, channel, liveState, onLoadMo
 									liveWorkers={workers}
 									liveBranches={branches}
 									channelId={channelId}
+									agentId={agentId}
 								/>
 							))
 						)}

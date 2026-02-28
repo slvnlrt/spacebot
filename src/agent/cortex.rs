@@ -9,11 +9,13 @@
 //! The cortex also observes system-wide activity via signals for future use in
 //! health monitoring and memory consolidation.
 
+use crate::agent::worker::Worker;
 use crate::error::Result;
 use crate::hooks::CortexHook;
 use crate::llm::SpacebotModel;
 use crate::memory::search::{SearchConfig, SearchMode, SearchSort};
 use crate::memory::types::{Association, MemoryType, RelationType};
+use crate::tasks::{TaskStatus, UpdateTaskInput};
 use crate::{AgentDeps, ProcessEvent, ProcessType};
 
 use rig::agent::AgentBuilder;
@@ -47,6 +49,118 @@ fn bulletin_age_secs(last_refresh_unix_ms: Option<i64>) -> Option<u64> {
 
 fn should_execute_warmup(warmup_config: crate::config::WarmupConfig, force: bool) -> bool {
     warmup_config.enabled || force
+}
+
+fn should_generate_bulletin_from_bulletin_loop(
+    warmup_config: crate::config::WarmupConfig,
+    status: &crate::config::WarmupStatus,
+) -> bool {
+    // If warmup is disabled, bulletin_loop remains the source of truth.
+    if !warmup_config.enabled {
+        return true;
+    }
+
+    let age_secs = bulletin_age_secs(status.last_refresh_unix_ms).or(status.bulletin_age_secs);
+
+    let Some(age_secs) = age_secs else {
+        // No recorded bulletin refresh yet — let bulletin loop generate one.
+        return true;
+    };
+
+    // Warmup loop already refreshes bulletin on this cadence. If the cached
+    // bulletin is still fresher than warmup cadence, skip duplicate synthesis.
+    age_secs >= warmup_config.refresh_secs.max(1)
+}
+
+fn has_completed_initial_warmup(status: &crate::config::WarmupStatus) -> bool {
+    status.last_refresh_unix_ms.is_some()
+        && matches!(status.state, crate::config::WarmupState::Warm)
+}
+
+fn apply_cancelled_warmup_status(
+    status: &mut crate::config::WarmupStatus,
+    reason: &str,
+    force: bool,
+) -> bool {
+    if !matches!(status.state, crate::config::WarmupState::Warming) {
+        return false;
+    }
+
+    status.state = crate::config::WarmupState::Degraded;
+    status.last_error = Some(format!(
+        "warmup cancelled before completion (reason: {reason}, forced: {force})"
+    ));
+    status.bulletin_age_secs = bulletin_age_secs(status.last_refresh_unix_ms);
+    true
+}
+
+struct WarmupRunGuard<'a> {
+    deps: &'a AgentDeps,
+    reason: &'a str,
+    force: bool,
+    committed: bool,
+}
+
+impl<'a> WarmupRunGuard<'a> {
+    fn new(deps: &'a AgentDeps, reason: &'a str, force: bool) -> Self {
+        Self {
+            deps,
+            reason,
+            force,
+            committed: false,
+        }
+    }
+
+    fn mark_committed(&mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for WarmupRunGuard<'_> {
+    fn drop(&mut self) {
+        if self.committed {
+            return;
+        }
+
+        update_warmup_status(self.deps, |status| {
+            if apply_cancelled_warmup_status(status, self.reason, self.force) {
+                tracing::warn!(
+                    reason = self.reason,
+                    forced = self.force,
+                    "warmup run ended without terminal status; demoted state to degraded"
+                );
+            }
+        });
+    }
+}
+
+async fn maybe_generate_bulletin_under_lock<F, Fut>(
+    warmup_lock: &tokio::sync::Mutex<()>,
+    warmup_config: &arc_swap::ArcSwap<crate::config::WarmupConfig>,
+    warmup_status: &arc_swap::ArcSwap<crate::config::WarmupStatus>,
+    generate: F,
+) -> bool
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    let _warmup_guard = warmup_lock.lock().await;
+    let warmup_config = **warmup_config.load();
+    let status = warmup_status.load().as_ref().clone();
+    let age_secs = bulletin_age_secs(status.last_refresh_unix_ms).or(status.bulletin_age_secs);
+    let refresh_secs = warmup_config.refresh_secs.max(1);
+
+    if should_generate_bulletin_from_bulletin_loop(warmup_config, &status) {
+        generate().await
+    } else {
+        tracing::debug!(
+            warmup_enabled = warmup_config.enabled,
+            age_secs = ?age_secs,
+            refresh_secs,
+            "skipping bulletin loop generation because warmup bulletin is fresh"
+        );
+        true
+    }
 }
 
 /// The cortex observes system-wide activity and maintains the memory bulletin.
@@ -267,9 +381,11 @@ impl Cortex {
 
 /// Spawn the cortex bulletin loop for an agent.
 ///
-/// Generates a memory bulletin immediately on startup, then refreshes on a
-/// configurable interval. The bulletin is stored in `RuntimeConfig::memory_bulletin`
-/// and injected into every channel's system prompt.
+/// Runs bulletin/profile maintenance on a configurable interval.
+///
+/// When warmup is enabled, warmup is the primary bulletin refresher and this
+/// loop skips duplicate bulletin synthesis while the cached bulletin is fresh.
+/// When warmup is disabled (or stale), this loop generates the bulletin.
 pub fn spawn_bulletin_loop(deps: AgentDeps, logger: CortexLogger) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         if let Err(error) = run_bulletin_loop(&deps, &logger).await {
@@ -284,7 +400,8 @@ pub fn spawn_bulletin_loop(deps: AgentDeps, logger: CortexLogger) -> tokio::task
 pub fn spawn_warmup_loop(deps: AgentDeps, logger: CortexLogger) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         tracing::info!("warmup loop started");
-        let mut completed_initial_pass = false;
+        let mut completed_initial_pass =
+            has_completed_initial_warmup(deps.runtime_config.warmup_status.load().as_ref());
 
         loop {
             let warmup_config = **deps.runtime_config.warmup.load();
@@ -299,12 +416,25 @@ pub fn spawn_warmup_loop(deps: AgentDeps, logger: CortexLogger) -> tokio::task::
                 continue;
             }
 
+            if !completed_initial_pass {
+                completed_initial_pass =
+                    has_completed_initial_warmup(deps.runtime_config.warmup_status.load().as_ref());
+            }
+
             let sleep_secs = if completed_initial_pass {
                 warmup_config.refresh_secs.max(1)
             } else {
                 warmup_config.startup_delay_secs.max(1)
             };
             tokio::time::sleep(Duration::from_secs(sleep_secs)).await;
+
+            if !completed_initial_pass {
+                completed_initial_pass =
+                    has_completed_initial_warmup(deps.runtime_config.warmup_status.load().as_ref());
+                if completed_initial_pass {
+                    continue;
+                }
+            }
 
             let reason = if completed_initial_pass {
                 "scheduled"
@@ -337,6 +467,7 @@ pub async fn run_warmup_once(deps: &AgentDeps, logger: &CortexLogger, reason: &s
         status.last_error = None;
         status.bulletin_age_secs = bulletin_age_secs(status.last_refresh_unix_ms);
     });
+    let mut terminal_state_guard = WarmupRunGuard::new(deps, reason, force);
 
     let mut errors = Vec::new();
     let mut embedding_ready = false;
@@ -369,6 +500,7 @@ pub async fn run_warmup_once(deps: &AgentDeps, logger: &CortexLogger, reason: &s
             status.last_error = None;
             status.bulletin_age_secs = Some(0);
         });
+        terminal_state_guard.mark_committed();
         logger.log(
             "warmup_succeeded",
             "Warmup pass completed",
@@ -386,6 +518,7 @@ pub async fn run_warmup_once(deps: &AgentDeps, logger: &CortexLogger, reason: &s
             status.last_error = Some(last_error.clone());
             status.bulletin_age_secs = bulletin_age_secs(status.last_refresh_unix_ms);
         });
+        terminal_state_guard.mark_committed();
         logger.log(
             "warmup_failed",
             "Warmup pass failed",
@@ -428,10 +561,14 @@ async fn run_bulletin_loop(deps: &AgentDeps, logger: &CortexLogger) -> anyhow::R
 
     // Run immediately on startup, with retries
     for attempt in 0..=MAX_RETRIES {
-        let bulletin_ok = {
-            let _warmup_guard = deps.runtime_config.warmup_lock.lock().await;
-            generate_bulletin(deps, logger).await
-        };
+        let bulletin_ok = maybe_generate_bulletin_under_lock(
+            deps.runtime_config.warmup_lock.as_ref(),
+            &deps.runtime_config.warmup,
+            &deps.runtime_config.warmup_status,
+            || generate_bulletin(deps, logger),
+        )
+        .await;
+
         if bulletin_ok {
             break;
         }
@@ -463,10 +600,13 @@ async fn run_bulletin_loop(deps: &AgentDeps, logger: &CortexLogger) -> anyhow::R
 
         tokio::time::sleep(Duration::from_secs(interval)).await;
 
-        {
-            let _warmup_guard = deps.runtime_config.warmup_lock.lock().await;
-            generate_bulletin(deps, logger).await;
-        }
+        maybe_generate_bulletin_under_lock(
+            deps.runtime_config.warmup_lock.as_ref(),
+            &deps.runtime_config.warmup,
+            &deps.runtime_config.warmup_status,
+            || generate_bulletin(deps, logger),
+        )
+        .await;
         generate_profile(deps, logger).await;
     }
 }
@@ -587,7 +727,56 @@ async fn gather_bulletin_sections(deps: &AgentDeps) -> String {
         output.push('\n');
     }
 
+    // Append active tasks (non-done) from the task store.
+    match gather_active_tasks(deps).await {
+        Ok(section) if !section.is_empty() => output.push_str(&section),
+        Err(error) => {
+            tracing::warn!(%error, "failed to gather active tasks for bulletin");
+        }
+        _ => {}
+    }
+
     output
+}
+
+/// Query the task store for non-done tasks and format them as a bulletin section.
+async fn gather_active_tasks(deps: &AgentDeps) -> anyhow::Result<String> {
+    use crate::tasks::TaskStatus;
+
+    let mut all_tasks = Vec::new();
+    for status in &[
+        TaskStatus::InProgress,
+        TaskStatus::Ready,
+        TaskStatus::Backlog,
+        TaskStatus::PendingApproval,
+    ] {
+        let tasks = deps
+            .task_store
+            .list(&deps.agent_id, Some(*status), None, 20)
+            .await?;
+        all_tasks.extend(tasks);
+    }
+
+    if all_tasks.is_empty() {
+        return Ok(String::new());
+    }
+
+    let mut output = String::from("### Active Tasks\n\n");
+    for task in &all_tasks {
+        let subtask_progress = if task.subtasks.is_empty() {
+            String::new()
+        } else {
+            let done = task.subtasks.iter().filter(|s| s.completed).count();
+            format!(" [{}/{}]", done, task.subtasks.len())
+        };
+        output.push_str(&format!(
+            "- #{} [{}] ({}) {}{}\n",
+            task.task_number, task.status, task.priority, task.title, subtask_progress,
+        ));
+    }
+    output.push('\n');
+
+    Ok(output)
 }
 
 /// Generate a memory bulletin and store it in RuntimeConfig.
@@ -935,6 +1124,237 @@ pub fn spawn_association_loop(
     })
 }
 
+/// Spawn a background loop that picks up ready tasks when idle.
+pub fn spawn_ready_task_loop(deps: AgentDeps, logger: CortexLogger) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        if let Err(error) = run_ready_task_loop(&deps, &logger).await {
+            tracing::error!(%error, "cortex ready-task loop exited with error");
+        }
+    })
+}
+
+async fn run_ready_task_loop(deps: &AgentDeps, logger: &CortexLogger) -> anyhow::Result<()> {
+    tracing::info!("cortex ready-task loop started");
+
+    // Let startup settle before first pickup attempt.
+    tokio::time::sleep(Duration::from_secs(10)).await;
+
+    loop {
+        let interval = deps.runtime_config.cortex.load().tick_interval_secs;
+        tokio::time::sleep(Duration::from_secs(interval.max(5))).await;
+
+        if let Err(error) = pickup_one_ready_task(deps, logger).await {
+            tracing::warn!(%error, "ready-task pickup pass failed");
+        }
+    }
+}
+
+async fn pickup_one_ready_task(deps: &AgentDeps, logger: &CortexLogger) -> anyhow::Result<()> {
+    let Some(task) = deps.task_store.claim_next_ready(&deps.agent_id).await? else {
+        return Ok(());
+    };
+
+    logger.log(
+        "task_pickup_started",
+        &format!("Picked up ready task #{}", task.task_number),
+        Some(serde_json::json!({
+            "task_number": task.task_number,
+            "title": task.title,
+        })),
+    );
+
+    let prompt_engine = deps.runtime_config.prompts.load();
+    let worker_system_prompt = prompt_engine
+        .render_worker_prompt(
+            &deps.runtime_config.instance_dir.display().to_string(),
+            &deps.runtime_config.workspace_dir.display().to_string(),
+        )
+        .map_err(|error| anyhow::anyhow!("failed to render worker prompt: {error}"))?;
+
+    let mut task_prompt = format!("Execute task #{}: {}", task.task_number, task.title);
+    if let Some(description) = &task.description {
+        task_prompt.push_str("\n\nDescription:\n");
+        task_prompt.push_str(description);
+    }
+    if !task.subtasks.is_empty() {
+        task_prompt.push_str("\n\nSubtasks:\n");
+        for (index, subtask) in task.subtasks.iter().enumerate() {
+            let marker = if subtask.completed { "[x]" } else { "[ ]" };
+            task_prompt.push_str(&format!("{}. {} {}\n", index + 1, marker, subtask.title));
+        }
+    }
+
+    let screenshot_dir = deps
+        .runtime_config
+        .workspace_dir
+        .join(".spacebot")
+        .join("screenshots");
+    let logs_dir = deps
+        .runtime_config
+        .workspace_dir
+        .join(".spacebot")
+        .join("logs");
+    if let Err(error) = std::fs::create_dir_all(&screenshot_dir) {
+        tracing::warn!(%error, path = %screenshot_dir.display(), "failed to create screenshot directory");
+    }
+    if let Err(error) = std::fs::create_dir_all(&logs_dir) {
+        tracing::warn!(%error, path = %logs_dir.display(), "failed to create logs directory");
+    }
+
+    let browser_config = (**deps.runtime_config.browser_config.load()).clone();
+    let brave_search_key = (**deps.runtime_config.brave_search_key.load()).clone();
+    let worker = Worker::new(
+        None,
+        task_prompt,
+        worker_system_prompt,
+        deps.clone(),
+        browser_config,
+        screenshot_dir,
+        brave_search_key,
+        logs_dir,
+    );
+
+    let worker_id = worker.id;
+    deps.task_store
+        .update(
+            &deps.agent_id,
+            task.task_number,
+            UpdateTaskInput {
+                worker_id: Some(worker_id.to_string()),
+                ..Default::default()
+            },
+        )
+        .await?;
+
+    let _ = deps.event_tx.send(ProcessEvent::TaskUpdated {
+        agent_id: deps.agent_id.clone(),
+        task_number: task.task_number,
+        status: "in_progress".to_string(),
+        action: "updated".to_string(),
+    });
+
+    let task_description = format!("task #{}: {}", task.task_number, task.title);
+
+    let _ = deps.event_tx.send(ProcessEvent::WorkerStarted {
+        agent_id: deps.agent_id.clone(),
+        worker_id,
+        channel_id: None,
+        task: task_description.clone(),
+        worker_type: "task".to_string(),
+    });
+
+    // Log to worker_runs directly — task workers have no parent channel, so the
+    // channel event handler won't persist them.
+    let run_logger = crate::conversation::history::ProcessRunLogger::new(deps.sqlite_pool.clone());
+    run_logger.log_worker_started(None, worker_id, &task_description, "task", &deps.agent_id);
+
+    let task_store = deps.task_store.clone();
+    let agent_id = deps.agent_id.to_string();
+    let event_tx = deps.event_tx.clone();
+    let logger = logger.clone();
+    tokio::spawn(async move {
+        match worker.run().await {
+            Ok(result_text) => {
+                let db_updated = task_store
+                    .update(
+                        &agent_id,
+                        task.task_number,
+                        UpdateTaskInput {
+                            status: Some(TaskStatus::Done),
+                            ..Default::default()
+                        },
+                    )
+                    .await;
+
+                if let Err(ref error) = db_updated {
+                    tracing::warn!(%error, task_number = task.task_number, "failed to mark picked-up task done");
+                }
+
+                run_logger.log_worker_completed(worker_id, &result_text, true);
+
+                // Only emit task SSE event if the DB write succeeded.
+                if db_updated.is_ok() {
+                    let _ = event_tx.send(ProcessEvent::TaskUpdated {
+                        agent_id: Arc::from(agent_id.as_str()),
+                        task_number: task.task_number,
+                        status: "done".to_string(),
+                        action: "updated".to_string(),
+                    });
+                }
+
+                logger.log(
+                    "task_pickup_completed",
+                    &format!("Completed picked-up task #{}", task.task_number),
+                    Some(serde_json::json!({
+                        "task_number": task.task_number,
+                        "worker_id": worker_id.to_string(),
+                    })),
+                );
+
+                let _ = event_tx.send(ProcessEvent::WorkerComplete {
+                    agent_id: Arc::from(agent_id.as_str()),
+                    worker_id,
+                    channel_id: None,
+                    result: result_text,
+                    notify: true,
+                    success: true,
+                });
+            }
+            Err(error) => {
+                let error_message = format!("Worker failed: {error}");
+                run_logger.log_worker_completed(worker_id, &error_message, false);
+
+                let requeue_result = task_store
+                    .update(
+                        &agent_id,
+                        task.task_number,
+                        UpdateTaskInput {
+                            status: Some(TaskStatus::Ready),
+                            clear_worker_id: true,
+                            ..Default::default()
+                        },
+                    )
+                    .await;
+
+                if let Err(ref update_error) = requeue_result {
+                    tracing::warn!(%update_error, task_number = task.task_number, "failed to return task to ready after failure");
+                }
+
+                // Only emit task SSE event if the DB write succeeded.
+                if requeue_result.is_ok() {
+                    let _ = event_tx.send(ProcessEvent::TaskUpdated {
+                        agent_id: Arc::from(agent_id.as_str()),
+                        task_number: task.task_number,
+                        status: "ready".to_string(),
+                        action: "updated".to_string(),
+                    });
+                }
+
+                logger.log(
+                    "task_pickup_failed",
+                    &format!("Picked-up task #{} failed: {error}", task.task_number),
+                    Some(serde_json::json!({
+                        "task_number": task.task_number,
+                        "worker_id": worker_id.to_string(),
+                        "error": error.to_string(),
+                    })),
+                );
+
+                let _ = event_tx.send(ProcessEvent::WorkerComplete {
+                    agent_id: Arc::from(agent_id.as_str()),
+                    worker_id,
+                    channel_id: None,
+                    result: format!("Worker failed: {error}"),
+                    notify: true,
+                    success: false,
+                });
+            }
+        }
+    });
+
+    Ok(())
+}
+
 async fn run_association_loop(deps: &AgentDeps, logger: &CortexLogger) -> anyhow::Result<()> {
     tracing::info!("cortex association loop started");
 
@@ -1097,7 +1517,13 @@ async fn fetch_memories_for_association(
 
 #[cfg(test)]
 mod tests {
-    use super::should_execute_warmup;
+    use super::{
+        apply_cancelled_warmup_status, has_completed_initial_warmup,
+        maybe_generate_bulletin_under_lock, should_execute_warmup,
+        should_generate_bulletin_from_bulletin_loop,
+    };
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
     fn run_warmup_once_semantics_skip_when_disabled_without_force() {
@@ -1127,5 +1553,168 @@ mod tests {
         };
 
         assert!(should_execute_warmup(warmup_config, false));
+    }
+
+    #[test]
+    fn initial_warmup_completion_detected_when_status_has_refresh_timestamp() {
+        let status = crate::config::WarmupStatus {
+            state: crate::config::WarmupState::Warm,
+            last_refresh_unix_ms: Some(1_700_000_000_000),
+            ..Default::default()
+        };
+
+        assert!(has_completed_initial_warmup(&status));
+    }
+
+    #[test]
+    fn initial_warmup_completion_not_detected_without_refresh_timestamp() {
+        let status = crate::config::WarmupStatus::default();
+
+        assert!(!has_completed_initial_warmup(&status));
+    }
+
+    #[test]
+    fn initial_warmup_completion_not_detected_when_timestamp_exists_but_state_is_not_warm() {
+        let status = crate::config::WarmupStatus {
+            state: crate::config::WarmupState::Cold,
+            last_refresh_unix_ms: Some(1_700_000_000_000),
+            ..Default::default()
+        };
+
+        assert!(!has_completed_initial_warmup(&status));
+    }
+
+    #[test]
+    fn cancelled_warmup_demotes_warming_state_to_degraded() {
+        let mut status = crate::config::WarmupStatus {
+            state: crate::config::WarmupState::Warming,
+            ..Default::default()
+        };
+
+        let changed = apply_cancelled_warmup_status(&mut status, "startup", false);
+
+        assert!(changed);
+        assert_eq!(status.state, crate::config::WarmupState::Degraded);
+        assert!(
+            status
+                .last_error
+                .as_deref()
+                .is_some_and(|error| error.contains("warmup cancelled before completion"))
+        );
+    }
+
+    #[test]
+    fn cancelled_warmup_does_not_override_terminal_state() {
+        let mut status = crate::config::WarmupStatus {
+            state: crate::config::WarmupState::Warm,
+            last_refresh_unix_ms: Some(1_700_000_000_000),
+            ..Default::default()
+        };
+
+        let changed = apply_cancelled_warmup_status(&mut status, "scheduled", false);
+
+        assert!(!changed);
+        assert_eq!(status.state, crate::config::WarmupState::Warm);
+    }
+
+    #[test]
+    fn bulletin_loop_generation_runs_when_warmup_disabled() {
+        let warmup_config = crate::config::WarmupConfig {
+            enabled: false,
+            ..Default::default()
+        };
+        let status = crate::config::WarmupStatus {
+            bulletin_age_secs: Some(0),
+            ..Default::default()
+        };
+
+        assert!(should_generate_bulletin_from_bulletin_loop(
+            warmup_config,
+            &status
+        ));
+    }
+
+    #[test]
+    fn bulletin_loop_generation_skips_when_warmup_enabled_and_fresh() {
+        let warmup_config = crate::config::WarmupConfig {
+            enabled: true,
+            refresh_secs: 900,
+            ..Default::default()
+        };
+        let status = crate::config::WarmupStatus {
+            bulletin_age_secs: Some(10),
+            ..Default::default()
+        };
+
+        assert!(!should_generate_bulletin_from_bulletin_loop(
+            warmup_config,
+            &status
+        ));
+    }
+
+    #[test]
+    fn bulletin_loop_generation_runs_when_warmup_enabled_and_stale() {
+        let warmup_config = crate::config::WarmupConfig {
+            enabled: true,
+            refresh_secs: 900,
+            ..Default::default()
+        };
+        let status = crate::config::WarmupStatus {
+            bulletin_age_secs: Some(901),
+            ..Default::default()
+        };
+
+        assert!(should_generate_bulletin_from_bulletin_loop(
+            warmup_config,
+            &status
+        ));
+    }
+
+    #[tokio::test]
+    async fn bulletin_loop_generation_lock_snapshot_skips_after_fresh_update() {
+        let warmup_lock = Arc::new(tokio::sync::Mutex::new(()));
+        let warmup_config = Arc::new(arc_swap::ArcSwap::from_pointee(
+            crate::config::WarmupConfig::default(),
+        ));
+        let warmup_status = Arc::new(arc_swap::ArcSwap::from_pointee(
+            crate::config::WarmupStatus {
+                bulletin_age_secs: Some(901), // stale at first
+                ..Default::default()
+            },
+        ));
+
+        let calls = Arc::new(AtomicUsize::new(0));
+
+        // Hold lock so we can update status before helper takes its snapshot.
+        let guard = warmup_lock.as_ref().lock().await;
+
+        let warmup_lock_for_task = Arc::clone(&warmup_lock);
+        let warmup_config_for_task = Arc::clone(&warmup_config);
+        let warmup_status_for_task = Arc::clone(&warmup_status);
+        let calls_for_task = Arc::clone(&calls);
+        let task = tokio::spawn(async move {
+            maybe_generate_bulletin_under_lock(
+                warmup_lock_for_task.as_ref(),
+                warmup_config_for_task.as_ref(),
+                warmup_status_for_task.as_ref(),
+                || async {
+                    calls_for_task.fetch_add(1, Ordering::SeqCst);
+                    true
+                },
+            )
+            .await
+        });
+
+        // Warmup refresh lands before lock is released; helper should observe
+        // fresh status and skip generation.
+        warmup_status.store(Arc::new(crate::config::WarmupStatus {
+            bulletin_age_secs: Some(10),
+            ..Default::default()
+        }));
+        drop(guard);
+
+        let result = task.await.expect("task should join");
+        assert!(result);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 }

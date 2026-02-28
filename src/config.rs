@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 const CRON_TIMEZONE_ENV_VAR: &str = "SPACEBOT_CRON_TIMEZONE";
+const USER_TIMEZONE_ENV_VAR: &str = "SPACEBOT_USER_TIMEZONE";
 
 /// OpenTelemetry export configuration.
 ///
@@ -137,9 +138,13 @@ impl Default for MetricsConfig {
 /// API types supported by LLM providers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ApiType {
-    /// OpenAI Completions API (https://api.openai.com/v1/completions)
+    /// OpenAI Chat Completions API (`/v1/chat/completions`)
     OpenAiCompletions,
-    /// OpenAI Responses API (https://api.openai.com/v1/chat/completions)
+    /// OpenAI-compatible Chat Completions API (`/chat/completions`)
+    OpenAiChatCompletions,
+    /// Kilo Gateway API (`/chat/completions`) with required gateway headers
+    KiloGateway,
+    /// OpenAI Responses API (`/v1/responses`)
     OpenAiResponses,
     /// Anthropic Messages API (https://api.anthropic.com/v1/messages)
     Anthropic,
@@ -154,12 +159,14 @@ impl<'de> serde::Deserialize<'de> for ApiType {
         let s = String::deserialize(deserializer)?;
         match s.as_str() {
             "openai_completions" => Ok(Self::OpenAiCompletions),
+            "openai_chat_completions" => Ok(Self::OpenAiChatCompletions),
+            "kilo_gateway" => Ok(Self::KiloGateway),
             "openai_responses" => Ok(Self::OpenAiResponses),
             "anthropic" => Ok(Self::Anthropic),
             "gemini" => Ok(Self::Gemini),
             other => Err(serde::de::Error::invalid_value(
                 serde::de::Unexpected::Str(other),
-                &"one of \"openai_completions\", \"openai_responses\", \"anthropic\", or \"gemini\"",
+                &"one of \"openai_completions\", \"openai_chat_completions\", \"kilo_gateway\", \"openai_responses\", \"anthropic\", or \"gemini\"",
             )),
         }
     }
@@ -172,6 +179,10 @@ pub struct ProviderConfig {
     pub base_url: String,
     pub api_key: String,
     pub name: Option<String>,
+    /// When true, use `Authorization: Bearer` instead of `x-api-key` for
+    /// Anthropic requests. Set automatically when the key originates from
+    /// `ANTHROPIC_AUTH_TOKEN` (proxy-compatible auth).
+    pub use_bearer_auth: bool,
 }
 
 impl std::fmt::Debug for ProviderConfig {
@@ -181,6 +192,7 @@ impl std::fmt::Debug for ProviderConfig {
             .field("base_url", &self.base_url)
             .field("api_key", &"[REDACTED]")
             .field("name", &self.name)
+            .field("use_bearer_auth", &self.use_bearer_auth)
             .finish()
     }
 }
@@ -191,6 +203,7 @@ pub struct LlmConfig {
     pub anthropic_key: Option<String>,
     pub openai_key: Option<String>,
     pub openrouter_key: Option<String>,
+    pub kilo_key: Option<String>,
     pub zhipu_key: Option<String>,
     pub groq_key: Option<String>,
     pub together_key: Option<String>,
@@ -202,6 +215,7 @@ pub struct LlmConfig {
     pub ollama_key: Option<String>,
     pub ollama_base_url: Option<String>,
     pub opencode_zen_key: Option<String>,
+    pub opencode_go_key: Option<String>,
     pub nvidia_key: Option<String>,
     pub minimax_key: Option<String>,
     pub minimax_cn_key: Option<String>,
@@ -225,6 +239,7 @@ impl std::fmt::Debug for LlmConfig {
                 "openrouter_key",
                 &self.openrouter_key.as_ref().map(|_| "[REDACTED]"),
             )
+            .field("kilo_key", &self.kilo_key.as_ref().map(|_| "[REDACTED]"))
             .field("zhipu_key", &self.zhipu_key.as_ref().map(|_| "[REDACTED]"))
             .field("groq_key", &self.groq_key.as_ref().map(|_| "[REDACTED]"))
             .field(
@@ -258,6 +273,10 @@ impl std::fmt::Debug for LlmConfig {
                 &self.opencode_zen_key.as_ref().map(|_| "[REDACTED]"),
             )
             .field(
+                "opencode_go_key",
+                &self.opencode_go_key.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field(
                 "nvidia_key",
                 &self.nvidia_key.as_ref().map(|_| "[REDACTED]"),
             )
@@ -284,6 +303,7 @@ impl LlmConfig {
         self.anthropic_key.is_some()
             || self.openai_key.is_some()
             || self.openrouter_key.is_some()
+            || self.kilo_key.is_some()
             || self.zhipu_key.is_some()
             || self.groq_key.is_some()
             || self.together_key.is_some()
@@ -295,6 +315,7 @@ impl LlmConfig {
             || self.ollama_key.is_some()
             || self.ollama_base_url.is_some()
             || self.opencode_zen_key.is_some()
+            || self.opencode_go_key.is_some()
             || self.nvidia_key.is_some()
             || self.minimax_key.is_some()
             || self.minimax_cn_key.is_some()
@@ -307,7 +328,10 @@ impl LlmConfig {
 const ANTHROPIC_PROVIDER_BASE_URL: &str = "https://api.anthropic.com";
 const OPENAI_PROVIDER_BASE_URL: &str = "https://api.openai.com";
 const OPENROUTER_PROVIDER_BASE_URL: &str = "https://openrouter.ai/api";
+const KILO_PROVIDER_BASE_URL: &str = "https://api.kilo.ai/api/gateway";
+const OLLAMA_PROVIDER_BASE_URL: &str = "http://localhost:11434";
 const OPENCODE_ZEN_PROVIDER_BASE_URL: &str = "https://opencode.ai/zen";
+const OPENCODE_GO_PROVIDER_BASE_URL: &str = "https://opencode.ai/zen/go";
 const MINIMAX_PROVIDER_BASE_URL: &str = "https://api.minimax.io/anthropic";
 const MINIMAX_CN_PROVIDER_BASE_URL: &str = "https://api.minimaxi.com/anthropic";
 const MOONSHOT_PROVIDER_BASE_URL: &str = "https://api.moonshot.ai";
@@ -323,6 +347,180 @@ const NVIDIA_PROVIDER_BASE_URL: &str = "https://integrate.api.nvidia.com";
 const FIREWORKS_PROVIDER_BASE_URL: &str = "https://api.fireworks.ai/inference";
 pub(crate) const GEMINI_PROVIDER_BASE_URL: &str =
     "https://generativelanguage.googleapis.com/v1beta/openai";
+
+/// Returns the default ProviderConfig for a provider ID and API key.
+/// Used by API tests and other code that needs provider configs without duplicating metadata.
+pub(crate) fn default_provider_config(
+    provider_id: &str,
+    api_key: impl Into<String>,
+) -> Option<ProviderConfig> {
+    let api_key = api_key.into();
+    Some(match provider_id {
+        "anthropic" => ProviderConfig {
+            api_type: ApiType::Anthropic,
+            base_url: ANTHROPIC_PROVIDER_BASE_URL.to_string(),
+            api_key,
+            name: None,
+            use_bearer_auth: false,
+        },
+        "openai" => ProviderConfig {
+            api_type: ApiType::OpenAiCompletions,
+            base_url: OPENAI_PROVIDER_BASE_URL.to_string(),
+            api_key,
+            name: None,
+            use_bearer_auth: false,
+        },
+        "openrouter" => ProviderConfig {
+            api_type: ApiType::OpenAiCompletions,
+            base_url: OPENROUTER_PROVIDER_BASE_URL.to_string(),
+            api_key,
+            name: None,
+            use_bearer_auth: false,
+        },
+        "kilo" => ProviderConfig {
+            api_type: ApiType::KiloGateway,
+            base_url: KILO_PROVIDER_BASE_URL.to_string(),
+            api_key,
+            name: Some("Kilo Gateway".to_string()),
+            use_bearer_auth: false,
+        },
+        "zhipu" => ProviderConfig {
+            api_type: ApiType::OpenAiChatCompletions,
+            base_url: ZHIPU_PROVIDER_BASE_URL.to_string(),
+            api_key,
+            name: Some("Z.AI (GLM)".to_string()),
+            use_bearer_auth: false,
+        },
+        "groq" => ProviderConfig {
+            api_type: ApiType::OpenAiCompletions,
+            base_url: GROQ_PROVIDER_BASE_URL.to_string(),
+            api_key,
+            name: None,
+            use_bearer_auth: false,
+        },
+        "together" => ProviderConfig {
+            api_type: ApiType::OpenAiCompletions,
+            base_url: TOGETHER_PROVIDER_BASE_URL.to_string(),
+            api_key,
+            name: None,
+            use_bearer_auth: false,
+        },
+        "fireworks" => ProviderConfig {
+            api_type: ApiType::OpenAiCompletions,
+            base_url: FIREWORKS_PROVIDER_BASE_URL.to_string(),
+            api_key,
+            name: None,
+            use_bearer_auth: false,
+        },
+        "deepseek" => ProviderConfig {
+            api_type: ApiType::OpenAiCompletions,
+            base_url: DEEPSEEK_PROVIDER_BASE_URL.to_string(),
+            api_key,
+            name: None,
+            use_bearer_auth: false,
+        },
+        "xai" => ProviderConfig {
+            api_type: ApiType::OpenAiCompletions,
+            base_url: XAI_PROVIDER_BASE_URL.to_string(),
+            api_key,
+            name: None,
+            use_bearer_auth: false,
+        },
+        "mistral" => ProviderConfig {
+            api_type: ApiType::OpenAiCompletions,
+            base_url: MISTRAL_PROVIDER_BASE_URL.to_string(),
+            api_key,
+            name: None,
+            use_bearer_auth: false,
+        },
+        "gemini" => ProviderConfig {
+            api_type: ApiType::Gemini,
+            base_url: GEMINI_PROVIDER_BASE_URL.to_string(),
+            api_key,
+            name: None,
+            use_bearer_auth: false,
+        },
+        "ollama" => ProviderConfig {
+            api_type: ApiType::OpenAiCompletions,
+            base_url: api_key,
+            api_key: String::new(),
+            name: None,
+            use_bearer_auth: false,
+        },
+        "opencode-zen" => ProviderConfig {
+            api_type: ApiType::OpenAiCompletions,
+            base_url: OPENCODE_ZEN_PROVIDER_BASE_URL.to_string(),
+            api_key,
+            name: None,
+            use_bearer_auth: false,
+        },
+        "opencode-go" => ProviderConfig {
+            api_type: ApiType::OpenAiCompletions,
+            base_url: OPENCODE_GO_PROVIDER_BASE_URL.to_string(),
+            api_key,
+            name: None,
+            use_bearer_auth: false,
+        },
+        "nvidia" => ProviderConfig {
+            api_type: ApiType::OpenAiCompletions,
+            base_url: NVIDIA_PROVIDER_BASE_URL.to_string(),
+            api_key,
+            name: None,
+            use_bearer_auth: false,
+        },
+        "minimax" => ProviderConfig {
+            api_type: ApiType::Anthropic,
+            base_url: MINIMAX_PROVIDER_BASE_URL.to_string(),
+            api_key,
+            name: None,
+            use_bearer_auth: false,
+        },
+        "minimax-cn" => ProviderConfig {
+            api_type: ApiType::Anthropic,
+            base_url: MINIMAX_CN_PROVIDER_BASE_URL.to_string(),
+            api_key,
+            name: None,
+            use_bearer_auth: false,
+        },
+        "moonshot" => ProviderConfig {
+            api_type: ApiType::OpenAiCompletions,
+            base_url: MOONSHOT_PROVIDER_BASE_URL.to_string(),
+            api_key,
+            name: None,
+            use_bearer_auth: false,
+        },
+        "zai-coding-plan" => ProviderConfig {
+            api_type: ApiType::OpenAiChatCompletions,
+            base_url: ZAI_CODING_PLAN_BASE_URL.to_string(),
+            api_key,
+            name: Some("Z.AI Coding Plan".to_string()),
+            use_bearer_auth: false,
+        },
+        _ => return None,
+    })
+}
+
+fn add_shorthand_provider(
+    providers: &mut std::collections::HashMap<String, ProviderConfig>,
+    provider_id: &str,
+    key: Option<String>,
+    api_type: ApiType,
+    base_url: &str,
+    name: Option<&str>,
+    use_bearer_auth: bool,
+) {
+    if let Some(api_key) = key {
+        providers
+            .entry(provider_id.to_string())
+            .or_insert_with(|| ProviderConfig {
+                api_type,
+                base_url: base_url.to_string(),
+                api_key,
+                name: name.map(str::to_string),
+                use_bearer_auth,
+            });
+    }
+}
 
 /// Defaults inherited by all agents. Individual agents can override any field.
 #[derive(Clone)]
@@ -345,6 +543,8 @@ pub struct DefaultsConfig {
     pub brave_search_key: Option<String>,
     /// Default timezone used when evaluating cron active hours.
     pub cron_timezone: Option<String>,
+    /// Default timezone for channel/worker temporal context.
+    pub user_timezone: Option<String>,
     pub history_backfill_count: usize,
     pub cron: Vec<CronDef>,
     pub opencode: OpenCodeConfig,
@@ -375,6 +575,8 @@ impl std::fmt::Debug for DefaultsConfig {
                 "brave_search_key",
                 &self.brave_search_key.as_ref().map(|_| "[REDACTED]"),
             )
+            .field("cron_timezone", &self.cron_timezone)
+            .field("user_timezone", &self.user_timezone)
             .field("history_backfill_count", &self.history_backfill_count)
             .field("cron", &self.cron)
             .field("opencode", &self.opencode)
@@ -872,6 +1074,8 @@ pub struct AgentConfig {
     pub brave_search_key: Option<String>,
     /// Optional timezone override for cron active-hours evaluation.
     pub cron_timezone: Option<String>,
+    /// Optional timezone override for channel/worker temporal context.
+    pub user_timezone: Option<String>,
     /// Sandbox configuration for process containment.
     pub sandbox: Option<crate::sandbox::SandboxConfig>,
     /// Cron job definitions for this agent.
@@ -883,6 +1087,9 @@ pub struct AgentConfig {
 pub struct CronDef {
     pub id: String,
     pub prompt: String,
+    /// Optional cron expression (wall-clock schedule) in standard 5-field format.
+    /// When set, this takes precedence over `interval_secs`.
+    pub cron_expr: Option<String>,
     pub interval_secs: u64,
     /// Delivery target in "adapter:target" format (e.g. "discord:123456789").
     pub delivery_target: String,
@@ -921,6 +1128,7 @@ pub struct ResolvedAgentConfig {
     pub mcp: Vec<McpServerConfig>,
     pub brave_search_key: Option<String>,
     pub cron_timezone: Option<String>,
+    pub user_timezone: Option<String>,
     /// Sandbox configuration for process containment.
     pub sandbox: crate::sandbox::SandboxConfig,
     /// Number of messages to fetch from the platform when a new channel is created.
@@ -947,6 +1155,7 @@ impl Default for DefaultsConfig {
             mcp: Vec::new(),
             brave_search_key: None,
             cron_timezone: None,
+            user_timezone: None,
             history_backfill_count: 50,
             cron: Vec::new(),
             opencode: OpenCodeConfig::default(),
@@ -960,6 +1169,17 @@ impl AgentConfig {
     /// Resolve this agent config against instance defaults and base paths.
     pub fn resolve(&self, instance_dir: &Path, defaults: &DefaultsConfig) -> ResolvedAgentConfig {
         let agent_root = instance_dir.join("agents").join(&self.id);
+        let resolved_cron_timezone = resolve_cron_timezone(
+            &self.id,
+            self.cron_timezone.as_deref(),
+            defaults.cron_timezone.as_deref(),
+        );
+        let resolved_user_timezone = resolve_user_timezone(
+            &self.id,
+            self.user_timezone.as_deref(),
+            defaults.user_timezone.as_deref(),
+            resolved_cron_timezone.as_deref(),
+        );
 
         ResolvedAgentConfig {
             id: self.id.clone(),
@@ -1005,11 +1225,8 @@ impl AgentConfig {
                 .brave_search_key
                 .clone()
                 .or_else(|| defaults.brave_search_key.clone()),
-            cron_timezone: resolve_cron_timezone(
-                &self.id,
-                self.cron_timezone.as_deref(),
-                defaults.cron_timezone.as_deref(),
-            ),
+            cron_timezone: resolved_cron_timezone,
+            user_timezone: resolved_user_timezone,
             sandbox: self.sandbox.clone().unwrap_or_default(),
             history_backfill_count: defaults.history_backfill_count,
             cron: self.cron.clone(),
@@ -1054,11 +1271,22 @@ impl ResolvedAgentConfig {
     }
 }
 
+/// Normalize an adapter selector: trim whitespace, return `None` if empty.
+fn normalize_adapter(adapter: Option<String>) -> Option<String> {
+    adapter
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
 /// Routes a messaging platform conversation to a specific agent.
 #[derive(Debug, Clone)]
 pub struct Binding {
     pub agent_id: String,
     pub channel: String,
+    /// Optional named adapter selector (platform-scoped).
+    ///
+    /// `None` targets the default adapter for this platform.
+    pub adapter: Option<String>,
     pub guild_id: Option<String>,
     pub workspace_id: Option<String>, // Slack workspace (team) ID
     pub chat_id: Option<String>,
@@ -1071,9 +1299,23 @@ pub struct Binding {
 }
 
 impl Binding {
+    /// Runtime adapter key for this binding.
+    pub fn runtime_adapter_key(&self) -> String {
+        binding_runtime_adapter_key(self.channel.as_str(), self.adapter.as_deref())
+    }
+
+    /// Whether this binding targets the default adapter for its platform.
+    pub fn uses_default_adapter(&self) -> bool {
+        self.adapter.is_none()
+    }
+
     /// Check if this binding matches an inbound message.
     fn matches(&self, message: &crate::InboundMessage) -> bool {
         if self.channel != message.source {
+            return false;
+        }
+
+        if !binding_adapter_matches(self, message) {
             return false;
         }
 
@@ -1183,6 +1425,274 @@ impl Binding {
     }
 }
 
+/// Build a runtime adapter key from platform and optional named selector.
+pub fn binding_runtime_adapter_key(platform: &str, adapter: Option<&str>) -> String {
+    if let Some(name) = adapter
+        && !name.is_empty()
+    {
+        return format!("{platform}:{name}");
+    }
+    platform.to_string()
+}
+
+/// Match a binding's adapter selector against an inbound message adapter.
+fn binding_adapter_matches(binding: &Binding, message: &crate::InboundMessage) -> bool {
+    match (&binding.adapter, message.adapter_selector()) {
+        (None, None) => true,
+        (Some(expected), Some(actual)) => expected == actual,
+        _ => false,
+    }
+}
+
+#[derive(Debug, Clone)]
+struct AdapterValidationState {
+    default_present: bool,
+    named_instances: std::collections::HashSet<String>,
+}
+
+fn is_named_adapter_platform(platform: &str) -> bool {
+    matches!(
+        platform,
+        "discord" | "slack" | "telegram" | "twitch" | "email"
+    )
+}
+
+fn validate_named_messaging_adapters(
+    messaging: &MessagingConfig,
+    bindings: &[Binding],
+) -> Result<()> {
+    let adapter_states = build_adapter_validation_states(messaging)?;
+
+    for binding in bindings {
+        if !is_named_adapter_platform(binding.channel.as_str()) {
+            if binding.adapter.is_some() {
+                return Err(ConfigError::Invalid(format!(
+                    "binding for channel '{}' can't set adapter: this platform does not support named adapters",
+                    binding.channel
+                ))
+                .into());
+            }
+            continue;
+        }
+
+        let state = adapter_states.get(binding.channel.as_str()).ok_or_else(|| {
+            ConfigError::Invalid(format!(
+                "binding for channel '{}' can't be resolved: no messaging config exists for that platform",
+                binding.channel
+            ))
+        })?;
+
+        // adapter is already normalized at ingest time via normalize_adapter().
+        match binding.adapter.as_deref() {
+            Some(adapter_name) => {
+                if !state.named_instances.contains(adapter_name) {
+                    return Err(ConfigError::Invalid(format!(
+                        "binding for channel '{}' references missing adapter '{}'",
+                        binding.channel, adapter_name
+                    ))
+                    .into());
+                }
+            }
+            None => {
+                if !state.default_present {
+                    return Err(ConfigError::Invalid(format!(
+                        "binding for channel '{}' requires the default adapter, but no default credentials are configured",
+                        binding.channel
+                    ))
+                    .into());
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn build_adapter_validation_states(
+    messaging: &MessagingConfig,
+) -> Result<std::collections::HashMap<&'static str, AdapterValidationState>> {
+    let mut states = std::collections::HashMap::new();
+
+    if let Some(discord) = &messaging.discord {
+        let named_instances = validate_instance_names(
+            "discord",
+            discord
+                .instances
+                .iter()
+                .map(|instance| instance.name.as_str()),
+        )?;
+        validate_runtime_keys(
+            "discord",
+            !discord.token.trim().is_empty(),
+            &named_instances,
+        )?;
+        states.insert(
+            "discord",
+            AdapterValidationState {
+                default_present: !discord.token.trim().is_empty(),
+                named_instances,
+            },
+        );
+    }
+
+    if let Some(slack) = &messaging.slack {
+        let named_instances = validate_instance_names(
+            "slack",
+            slack
+                .instances
+                .iter()
+                .map(|instance| instance.name.as_str()),
+        )?;
+        let default_present =
+            !slack.bot_token.trim().is_empty() && !slack.app_token.trim().is_empty();
+        validate_runtime_keys("slack", default_present, &named_instances)?;
+        states.insert(
+            "slack",
+            AdapterValidationState {
+                default_present,
+                named_instances,
+            },
+        );
+    }
+
+    if let Some(telegram) = &messaging.telegram {
+        let named_instances = validate_instance_names(
+            "telegram",
+            telegram
+                .instances
+                .iter()
+                .map(|instance| instance.name.as_str()),
+        )?;
+        let default_present = !telegram.token.trim().is_empty();
+        validate_runtime_keys("telegram", default_present, &named_instances)?;
+        states.insert(
+            "telegram",
+            AdapterValidationState {
+                default_present,
+                named_instances,
+            },
+        );
+    }
+
+    if let Some(twitch) = &messaging.twitch {
+        let named_instances = validate_instance_names(
+            "twitch",
+            twitch
+                .instances
+                .iter()
+                .map(|instance| instance.name.as_str()),
+        )?;
+        let default_present =
+            !twitch.username.trim().is_empty() && !twitch.oauth_token.trim().is_empty();
+        validate_runtime_keys("twitch", default_present, &named_instances)?;
+        states.insert(
+            "twitch",
+            AdapterValidationState {
+                default_present,
+                named_instances,
+            },
+        );
+    }
+
+    if let Some(email) = &messaging.email {
+        let named_instances = validate_instance_names(
+            "email",
+            email
+                .instances
+                .iter()
+                .map(|instance| instance.name.as_str()),
+        )?;
+        let default_present = !email.imap_host.trim().is_empty()
+            && !email.imap_username.trim().is_empty()
+            && !email.imap_password.trim().is_empty()
+            && !email.smtp_host.trim().is_empty();
+        validate_runtime_keys("email", default_present, &named_instances)?;
+        states.insert(
+            "email",
+            AdapterValidationState {
+                default_present,
+                named_instances,
+            },
+        );
+    }
+
+    Ok(states)
+}
+
+fn validate_instance_names<'a>(
+    platform: &str,
+    names: impl Iterator<Item = &'a str>,
+) -> Result<std::collections::HashSet<String>> {
+    let mut seen = std::collections::HashSet::new();
+
+    for name in names {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            return Err(ConfigError::Invalid(format!(
+                "messaging.{platform}.instances name can't be empty"
+            ))
+            .into());
+        }
+        if trimmed != name {
+            return Err(ConfigError::Invalid(format!(
+                "messaging.{platform}.instances name '{}' can't contain leading or trailing whitespace",
+                name
+            ))
+            .into());
+        }
+        if trimmed.eq_ignore_ascii_case("default") {
+            return Err(ConfigError::Invalid(format!(
+                "messaging.{platform}.instances name '{}' is reserved",
+                name
+            ))
+            .into());
+        }
+        if trimmed.contains(':') {
+            return Err(ConfigError::Invalid(format!(
+                "messaging.{platform}.instances name '{}' can't contain ':'",
+                name
+            ))
+            .into());
+        }
+        if !seen.insert(trimmed.to_string()) {
+            return Err(ConfigError::Invalid(format!(
+                "messaging.{platform}.instances has duplicate name '{}'",
+                name
+            ))
+            .into());
+        }
+    }
+
+    Ok(seen)
+}
+
+fn validate_runtime_keys(
+    platform: &str,
+    default_present: bool,
+    named_instances: &std::collections::HashSet<String>,
+) -> Result<()> {
+    let mut runtime_keys = std::collections::HashSet::new();
+
+    if default_present && !runtime_keys.insert(platform.to_string()) {
+        return Err(ConfigError::Invalid(format!(
+            "messaging.{platform} has duplicate runtime adapter key '{platform}'"
+        ))
+        .into());
+    }
+
+    for instance_name in named_instances {
+        let runtime_key = format!("{platform}:{instance_name}");
+        if !runtime_keys.insert(runtime_key.clone()) {
+            return Err(ConfigError::Invalid(format!(
+                "messaging.{platform} has duplicate runtime adapter key '{runtime_key}'"
+            ))
+            .into());
+        }
+    }
+
+    Ok(())
+}
+
 /// Resolve which agent should handle an inbound message.
 ///
 /// Checks bindings in order. First match wins. Falls back to the default
@@ -1206,6 +1716,7 @@ pub struct MessagingConfig {
     pub discord: Option<DiscordConfig>,
     pub slack: Option<SlackConfig>,
     pub telegram: Option<TelegramConfig>,
+    pub email: Option<EmailConfig>,
     pub webhook: Option<WebhookConfig>,
     pub twitch: Option<TwitchConfig>,
 }
@@ -1214,10 +1725,35 @@ pub struct MessagingConfig {
 pub struct DiscordConfig {
     pub enabled: bool,
     pub token: String,
+    /// Additional named Discord bot instances for this platform.
+    pub instances: Vec<DiscordInstanceConfig>,
     /// User IDs allowed to DM the bot. If empty, DMs are ignored entirely.
     pub dm_allowed_users: Vec<String>,
     /// Whether to process messages from other bots (self-messages are always ignored).
     pub allow_bot_messages: bool,
+}
+
+#[derive(Clone)]
+pub struct DiscordInstanceConfig {
+    pub name: String,
+    pub enabled: bool,
+    pub token: String,
+    /// User IDs allowed to DM this bot instance.
+    pub dm_allowed_users: Vec<String>,
+    /// Whether this bot instance processes messages from other bots.
+    pub allow_bot_messages: bool,
+}
+
+impl std::fmt::Debug for DiscordInstanceConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DiscordInstanceConfig")
+            .field("name", &self.name)
+            .field("enabled", &self.enabled)
+            .field("token", &"[REDACTED]")
+            .field("dm_allowed_users", &self.dm_allowed_users)
+            .field("allow_bot_messages", &self.allow_bot_messages)
+            .finish()
+    }
 }
 
 impl std::fmt::Debug for DiscordConfig {
@@ -1225,6 +1761,7 @@ impl std::fmt::Debug for DiscordConfig {
         f.debug_struct("DiscordConfig")
             .field("enabled", &self.enabled)
             .field("token", &"[REDACTED]")
+            .field("instances", &self.instances)
             .field("dm_allowed_users", &self.dm_allowed_users)
             .field("allow_bot_messages", &self.allow_bot_messages)
             .finish()
@@ -1250,10 +1787,37 @@ pub struct SlackConfig {
     pub enabled: bool,
     pub bot_token: String,
     pub app_token: String,
+    /// Additional named Slack app instances for this platform.
+    pub instances: Vec<SlackInstanceConfig>,
     /// User IDs allowed to DM the bot. If empty, DMs are ignored entirely.
     pub dm_allowed_users: Vec<String>,
     /// Slash command definitions. If empty, all slash commands are ignored.
     pub commands: Vec<SlackCommandConfig>,
+}
+
+#[derive(Clone)]
+pub struct SlackInstanceConfig {
+    pub name: String,
+    pub enabled: bool,
+    pub bot_token: String,
+    pub app_token: String,
+    /// User IDs allowed to DM this app instance.
+    pub dm_allowed_users: Vec<String>,
+    /// Slash command definitions for this app instance.
+    pub commands: Vec<SlackCommandConfig>,
+}
+
+impl std::fmt::Debug for SlackInstanceConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SlackInstanceConfig")
+            .field("name", &self.name)
+            .field("enabled", &self.enabled)
+            .field("bot_token", &"[REDACTED]")
+            .field("app_token", &"[REDACTED]")
+            .field("dm_allowed_users", &self.dm_allowed_users)
+            .field("commands", &self.commands)
+            .finish()
+    }
 }
 
 impl std::fmt::Debug for SlackConfig {
@@ -1262,6 +1826,7 @@ impl std::fmt::Debug for SlackConfig {
             .field("enabled", &self.enabled)
             .field("bot_token", &"[REDACTED]")
             .field("app_token", &"[REDACTED]")
+            .field("instances", &self.instances)
             .field("dm_allowed_users", &self.dm_allowed_users)
             .field("commands", &self.commands)
             .finish()
@@ -1294,8 +1859,30 @@ pub struct SlackPermissions {
 impl SlackPermissions {
     /// Build from the current config's slack settings and bindings.
     pub fn from_config(slack: &SlackConfig, bindings: &[Binding]) -> Self {
-        let slack_bindings: Vec<&Binding> =
-            bindings.iter().filter(|b| b.channel == "slack").collect();
+        Self::from_bindings_for_adapter(slack.dm_allowed_users.clone(), bindings, None)
+    }
+
+    /// Build permissions for a named Slack adapter instance.
+    pub fn from_instance_config(instance: &SlackInstanceConfig, bindings: &[Binding]) -> Self {
+        Self::from_bindings_for_adapter(
+            instance.dm_allowed_users.clone(),
+            bindings,
+            Some(instance.name.as_str()),
+        )
+    }
+
+    fn from_bindings_for_adapter(
+        seed_dm_allowed_users: Vec<String>,
+        bindings: &[Binding],
+        adapter_selector: Option<&str>,
+    ) -> Self {
+        let slack_bindings: Vec<&Binding> = bindings
+            .iter()
+            .filter(|binding| {
+                binding.channel == "slack"
+                    && binding_adapter_selector_matches(binding, adapter_selector)
+            })
+            .collect();
 
         let workspace_filter = {
             let workspace_ids: Vec<String> = slack_bindings
@@ -1325,7 +1912,7 @@ impl SlackPermissions {
             filter
         };
 
-        let mut dm_allowed_users = slack.dm_allowed_users.clone();
+        let mut dm_allowed_users = seed_dm_allowed_users;
 
         for binding in &slack_bindings {
             for id in &binding.dm_allowed_users {
@@ -1346,8 +1933,37 @@ impl SlackPermissions {
 impl DiscordPermissions {
     /// Build from the current config's discord settings and bindings.
     pub fn from_config(discord: &DiscordConfig, bindings: &[Binding]) -> Self {
-        let discord_bindings: Vec<&Binding> =
-            bindings.iter().filter(|b| b.channel == "discord").collect();
+        Self::from_bindings_for_adapter(
+            discord.dm_allowed_users.clone(),
+            discord.allow_bot_messages,
+            bindings,
+            None,
+        )
+    }
+
+    /// Build permissions for a named Discord adapter instance.
+    pub fn from_instance_config(instance: &DiscordInstanceConfig, bindings: &[Binding]) -> Self {
+        Self::from_bindings_for_adapter(
+            instance.dm_allowed_users.clone(),
+            instance.allow_bot_messages,
+            bindings,
+            Some(instance.name.as_str()),
+        )
+    }
+
+    fn from_bindings_for_adapter(
+        seed_dm_allowed_users: Vec<String>,
+        allow_bot_messages: bool,
+        bindings: &[Binding],
+        adapter_selector: Option<&str>,
+    ) -> Self {
+        let discord_bindings: Vec<&Binding> = bindings
+            .iter()
+            .filter(|binding| {
+                binding.channel == "discord"
+                    && binding_adapter_selector_matches(binding, adapter_selector)
+            })
+            .collect();
 
         let guild_filter = {
             let guild_ids: Vec<u64> = discord_bindings
@@ -1382,8 +1998,7 @@ impl DiscordPermissions {
             filter
         };
 
-        let mut dm_allowed_users: Vec<u64> = discord
-            .dm_allowed_users
+        let mut dm_allowed_users: Vec<u64> = seed_dm_allowed_users
             .iter()
             .filter_map(|id| id.parse::<u64>().ok())
             .collect();
@@ -1403,7 +2018,7 @@ impl DiscordPermissions {
             guild_filter,
             channel_filter,
             dm_allowed_users,
-            allow_bot_messages: discord.allow_bot_messages,
+            allow_bot_messages,
         }
     }
 }
@@ -1412,8 +2027,30 @@ impl DiscordPermissions {
 pub struct TelegramConfig {
     pub enabled: bool,
     pub token: String,
+    /// Additional named Telegram bot instances for this platform.
+    pub instances: Vec<TelegramInstanceConfig>,
     /// User IDs allowed to DM the bot. If empty, DMs are ignored entirely.
     pub dm_allowed_users: Vec<String>,
+}
+
+#[derive(Clone)]
+pub struct TelegramInstanceConfig {
+    pub name: String,
+    pub enabled: bool,
+    pub token: String,
+    /// User IDs allowed to DM this bot instance.
+    pub dm_allowed_users: Vec<String>,
+}
+
+impl std::fmt::Debug for TelegramInstanceConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TelegramInstanceConfig")
+            .field("name", &self.name)
+            .field("enabled", &self.enabled)
+            .field("token", &"[REDACTED]")
+            .field("dm_allowed_users", &self.dm_allowed_users)
+            .finish()
+    }
 }
 
 impl std::fmt::Debug for TelegramConfig {
@@ -1421,7 +2058,106 @@ impl std::fmt::Debug for TelegramConfig {
         f.debug_struct("TelegramConfig")
             .field("enabled", &self.enabled)
             .field("token", &"[REDACTED]")
+            .field("instances", &self.instances)
             .field("dm_allowed_users", &self.dm_allowed_users)
+            .finish()
+    }
+}
+
+#[derive(Clone)]
+pub struct EmailConfig {
+    pub enabled: bool,
+    pub imap_host: String,
+    pub imap_port: u16,
+    pub imap_username: String,
+    pub imap_password: String,
+    pub imap_use_tls: bool,
+    pub smtp_host: String,
+    pub smtp_port: u16,
+    pub smtp_username: String,
+    pub smtp_password: String,
+    pub smtp_use_starttls: bool,
+    pub from_address: String,
+    pub from_name: Option<String>,
+    pub poll_interval_secs: u64,
+    pub folders: Vec<String>,
+    pub allowed_senders: Vec<String>,
+    pub max_body_bytes: usize,
+    pub max_attachment_bytes: usize,
+    pub instances: Vec<EmailInstanceConfig>,
+}
+
+/// Per-instance config for a named email adapter.
+#[derive(Clone)]
+pub struct EmailInstanceConfig {
+    pub name: String,
+    pub enabled: bool,
+    pub imap_host: String,
+    pub imap_port: u16,
+    pub imap_username: String,
+    pub imap_password: String,
+    pub imap_use_tls: bool,
+    pub smtp_host: String,
+    pub smtp_port: u16,
+    pub smtp_username: String,
+    pub smtp_password: String,
+    pub smtp_use_starttls: bool,
+    pub from_address: String,
+    pub from_name: Option<String>,
+    pub poll_interval_secs: u64,
+    pub folders: Vec<String>,
+    pub allowed_senders: Vec<String>,
+    pub max_body_bytes: usize,
+    pub max_attachment_bytes: usize,
+}
+
+impl std::fmt::Debug for EmailInstanceConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EmailInstanceConfig")
+            .field("name", &self.name)
+            .field("enabled", &self.enabled)
+            .field("imap_host", &self.imap_host)
+            .field("imap_port", &self.imap_port)
+            .field("imap_username", &"[REDACTED]")
+            .field("imap_password", &"[REDACTED]")
+            .field("imap_use_tls", &self.imap_use_tls)
+            .field("smtp_host", &self.smtp_host)
+            .field("smtp_port", &self.smtp_port)
+            .field("smtp_username", &"[REDACTED]")
+            .field("smtp_password", &"[REDACTED]")
+            .field("smtp_use_starttls", &self.smtp_use_starttls)
+            .field("from_address", &"[REDACTED]")
+            .field("from_name", &self.from_name)
+            .field("poll_interval_secs", &self.poll_interval_secs)
+            .field("folders", &self.folders)
+            .field("allowed_senders", &"[REDACTED]")
+            .field("max_body_bytes", &self.max_body_bytes)
+            .field("max_attachment_bytes", &self.max_attachment_bytes)
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for EmailConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EmailConfig")
+            .field("enabled", &self.enabled)
+            .field("imap_host", &self.imap_host)
+            .field("imap_port", &self.imap_port)
+            .field("imap_username", &"[REDACTED]")
+            .field("imap_password", &"[REDACTED]")
+            .field("imap_use_tls", &self.imap_use_tls)
+            .field("smtp_host", &self.smtp_host)
+            .field("smtp_port", &self.smtp_port)
+            .field("smtp_username", &"[REDACTED]")
+            .field("smtp_password", &"[REDACTED]")
+            .field("smtp_use_starttls", &self.smtp_use_starttls)
+            .field("from_address", &"[REDACTED]")
+            .field("from_name", &self.from_name)
+            .field("poll_interval_secs", &self.poll_interval_secs)
+            .field("folders", &self.folders)
+            .field("allowed_senders", &"[REDACTED]")
+            .field("max_body_bytes", &self.max_body_bytes)
+            .field("max_attachment_bytes", &self.max_attachment_bytes)
             .finish()
     }
 }
@@ -1440,9 +2176,29 @@ pub struct TelegramPermissions {
 impl TelegramPermissions {
     /// Build from the current config's telegram settings and bindings.
     pub fn from_config(telegram: &TelegramConfig, bindings: &[Binding]) -> Self {
+        Self::from_bindings_for_adapter(telegram.dm_allowed_users.clone(), bindings, None)
+    }
+
+    /// Build permissions for a named Telegram adapter instance.
+    pub fn from_instance_config(instance: &TelegramInstanceConfig, bindings: &[Binding]) -> Self {
+        Self::from_bindings_for_adapter(
+            instance.dm_allowed_users.clone(),
+            bindings,
+            Some(instance.name.as_str()),
+        )
+    }
+
+    fn from_bindings_for_adapter(
+        seed_dm_allowed_users: Vec<String>,
+        bindings: &[Binding],
+        adapter_selector: Option<&str>,
+    ) -> Self {
         let telegram_bindings: Vec<&Binding> = bindings
             .iter()
-            .filter(|b| b.channel == "telegram")
+            .filter(|binding| {
+                binding.channel == "telegram"
+                    && binding_adapter_selector_matches(binding, adapter_selector)
+            })
             .collect();
 
         let chat_filter = {
@@ -1457,8 +2213,7 @@ impl TelegramPermissions {
             }
         };
 
-        let mut dm_allowed_users: Vec<i64> = telegram
-            .dm_allowed_users
+        let mut dm_allowed_users: Vec<i64> = seed_dm_allowed_users
             .iter()
             .filter_map(|id| id.parse::<i64>().ok())
             .collect();
@@ -1488,10 +2243,49 @@ pub struct TwitchConfig {
     pub client_id: Option<String>,
     pub client_secret: Option<String>,
     pub refresh_token: Option<String>,
+    /// Additional named Twitch bot instances for this platform.
+    pub instances: Vec<TwitchInstanceConfig>,
     /// Channels to join (without the # prefix).
     pub channels: Vec<String>,
     /// Optional prefix that triggers the bot (e.g. "!ask"). If empty, all messages are processed.
     pub trigger_prefix: Option<String>,
+}
+
+#[derive(Clone)]
+pub struct TwitchInstanceConfig {
+    pub name: String,
+    pub enabled: bool,
+    pub username: String,
+    pub oauth_token: String,
+    pub client_id: Option<String>,
+    pub client_secret: Option<String>,
+    pub refresh_token: Option<String>,
+    /// Channels to join (without the # prefix).
+    pub channels: Vec<String>,
+    /// Optional prefix that triggers the bot for this instance.
+    pub trigger_prefix: Option<String>,
+}
+
+impl std::fmt::Debug for TwitchInstanceConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TwitchInstanceConfig")
+            .field("name", &self.name)
+            .field("enabled", &self.enabled)
+            .field("username", &self.username)
+            .field("oauth_token", &"[REDACTED]")
+            .field("client_id", &self.client_id)
+            .field(
+                "client_secret",
+                &self.client_secret.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field(
+                "refresh_token",
+                &self.refresh_token.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("channels", &self.channels)
+            .field("trigger_prefix", &self.trigger_prefix)
+            .finish()
+    }
 }
 
 impl std::fmt::Debug for TwitchConfig {
@@ -1500,6 +2294,7 @@ impl std::fmt::Debug for TwitchConfig {
             .field("enabled", &self.enabled)
             .field("username", &self.username)
             .field("oauth_token", &"[REDACTED]")
+            .field("instances", &self.instances)
             .field("channels", &self.channels)
             .field("trigger_prefix", &self.trigger_prefix)
             .finish()
@@ -1520,8 +2315,22 @@ pub struct TwitchPermissions {
 impl TwitchPermissions {
     /// Build from the current config's twitch settings and bindings.
     pub fn from_config(_twitch: &TwitchConfig, bindings: &[Binding]) -> Self {
-        let twitch_bindings: Vec<&Binding> =
-            bindings.iter().filter(|b| b.channel == "twitch").collect();
+        Self::from_bindings_for_adapter(bindings, None)
+    }
+
+    /// Build permissions for a named Twitch adapter instance.
+    pub fn from_instance_config(instance: &TwitchInstanceConfig, bindings: &[Binding]) -> Self {
+        Self::from_bindings_for_adapter(bindings, Some(instance.name.as_str()))
+    }
+
+    fn from_bindings_for_adapter(bindings: &[Binding], adapter_selector: Option<&str>) -> Self {
+        let twitch_bindings: Vec<&Binding> = bindings
+            .iter()
+            .filter(|binding| {
+                binding.channel == "twitch"
+                    && binding_adapter_selector_matches(binding, adapter_selector)
+            })
+            .collect();
 
         let channel_filter = {
             let channel_ids: Vec<String> = twitch_bindings
@@ -1548,6 +2357,16 @@ impl TwitchPermissions {
             channel_filter,
             allowed_users,
         }
+    }
+}
+
+fn binding_adapter_selector_matches(binding: &Binding, adapter_selector: Option<&str>) -> bool {
+    match (binding.adapter.as_deref(), adapter_selector) {
+        (None, None) => true,
+        (Some(binding_selector), Some(requested_selector)) => {
+            binding_selector == requested_selector
+        }
+        _ => false,
     }
 }
 
@@ -1712,6 +2531,7 @@ struct TomlLlmConfigFields {
     anthropic_key: Option<String>,
     openai_key: Option<String>,
     openrouter_key: Option<String>,
+    kilo_key: Option<String>,
     zhipu_key: Option<String>,
     groq_key: Option<String>,
     together_key: Option<String>,
@@ -1723,6 +2543,7 @@ struct TomlLlmConfigFields {
     ollama_key: Option<String>,
     ollama_base_url: Option<String>,
     opencode_zen_key: Option<String>,
+    opencode_go_key: Option<String>,
     nvidia_key: Option<String>,
     minimax_key: Option<String>,
     minimax_cn_key: Option<String>,
@@ -1740,6 +2561,7 @@ struct TomlLlmConfig {
     anthropic_key: Option<String>,
     openai_key: Option<String>,
     openrouter_key: Option<String>,
+    kilo_key: Option<String>,
     zhipu_key: Option<String>,
     groq_key: Option<String>,
     together_key: Option<String>,
@@ -1751,6 +2573,7 @@ struct TomlLlmConfig {
     ollama_key: Option<String>,
     ollama_base_url: Option<String>,
     opencode_zen_key: Option<String>,
+    opencode_go_key: Option<String>,
     nvidia_key: Option<String>,
     minimax_key: Option<String>,
     minimax_cn_key: Option<String>,
@@ -1793,6 +2616,7 @@ impl<'de> Deserialize<'de> for TomlLlmConfig {
             anthropic_key: fields.anthropic_key,
             openai_key: fields.openai_key,
             openrouter_key: fields.openrouter_key,
+            kilo_key: fields.kilo_key,
             zhipu_key: fields.zhipu_key,
             groq_key: fields.groq_key,
             together_key: fields.together_key,
@@ -1804,6 +2628,7 @@ impl<'de> Deserialize<'de> for TomlLlmConfig {
             ollama_key: fields.ollama_key,
             ollama_base_url: fields.ollama_base_url,
             opencode_zen_key: fields.opencode_zen_key,
+            opencode_go_key: fields.opencode_go_key,
             nvidia_key: fields.nvidia_key,
             minimax_key: fields.minimax_key,
             minimax_cn_key: fields.minimax_cn_key,
@@ -1833,6 +2658,7 @@ struct TomlDefaultsConfig {
     mcp: Vec<TomlMcpServerConfig>,
     brave_search_key: Option<String>,
     cron_timezone: Option<String>,
+    user_timezone: Option<String>,
     opencode: Option<TomlOpenCodeConfig>,
     worker_log_mode: Option<String>,
     memory_injection: Option<TomlMemoryInjectionConfig>,
@@ -1995,6 +2821,7 @@ struct TomlAgentConfig {
     mcp: Option<Vec<TomlMcpServerConfig>>,
     brave_search_key: Option<String>,
     cron_timezone: Option<String>,
+    user_timezone: Option<String>,
     sandbox: Option<crate::sandbox::SandboxConfig>,
     #[serde(default)]
     cron: Vec<TomlCronDef>,
@@ -2004,6 +2831,7 @@ struct TomlAgentConfig {
 struct TomlCronDef {
     id: String,
     prompt: String,
+    cron_expr: Option<String>,
     interval_secs: Option<u64>,
     delivery_target: String,
     active_start_hour: Option<u8>,
@@ -2020,12 +2848,27 @@ struct TomlMessagingConfig {
     discord: Option<TomlDiscordConfig>,
     slack: Option<TomlSlackConfig>,
     telegram: Option<TomlTelegramConfig>,
+    email: Option<TomlEmailConfig>,
     webhook: Option<TomlWebhookConfig>,
     twitch: Option<TomlTwitchConfig>,
 }
 
 #[derive(Deserialize)]
 struct TomlDiscordConfig {
+    #[serde(default)]
+    enabled: bool,
+    token: Option<String>,
+    #[serde(default)]
+    instances: Vec<TomlDiscordInstanceConfig>,
+    #[serde(default)]
+    dm_allowed_users: Vec<String>,
+    #[serde(default)]
+    allow_bot_messages: bool,
+}
+
+#[derive(Deserialize)]
+struct TomlDiscordInstanceConfig {
+    name: String,
     #[serde(default)]
     enabled: bool,
     token: Option<String>,
@@ -2037,6 +2880,21 @@ struct TomlDiscordConfig {
 
 #[derive(Deserialize)]
 struct TomlSlackConfig {
+    #[serde(default)]
+    enabled: bool,
+    bot_token: Option<String>,
+    app_token: Option<String>,
+    #[serde(default)]
+    instances: Vec<TomlSlackInstanceConfig>,
+    #[serde(default)]
+    dm_allowed_users: Vec<String>,
+    #[serde(default)]
+    commands: Vec<TomlSlackCommandConfig>,
+}
+
+#[derive(Deserialize)]
+struct TomlSlackInstanceConfig {
+    name: String,
     #[serde(default)]
     enabled: bool,
     bot_token: Option<String>,
@@ -2060,7 +2918,86 @@ struct TomlTelegramConfig {
     enabled: bool,
     token: Option<String>,
     #[serde(default)]
+    instances: Vec<TomlTelegramInstanceConfig>,
+    #[serde(default)]
     dm_allowed_users: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct TomlTelegramInstanceConfig {
+    name: String,
+    #[serde(default)]
+    enabled: bool,
+    token: Option<String>,
+    #[serde(default)]
+    dm_allowed_users: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct TomlEmailConfig {
+    #[serde(default)]
+    enabled: bool,
+    imap_host: Option<String>,
+    #[serde(default = "default_email_imap_port")]
+    imap_port: u16,
+    imap_username: Option<String>,
+    imap_password: Option<String>,
+    #[serde(default = "default_email_imap_use_tls")]
+    imap_use_tls: bool,
+    smtp_host: Option<String>,
+    #[serde(default = "default_email_smtp_port")]
+    smtp_port: u16,
+    smtp_username: Option<String>,
+    smtp_password: Option<String>,
+    #[serde(default = "default_email_smtp_use_starttls")]
+    smtp_use_starttls: bool,
+    from_address: Option<String>,
+    from_name: Option<String>,
+    #[serde(default = "default_email_poll_interval_secs")]
+    poll_interval_secs: u64,
+    #[serde(default = "default_email_folders")]
+    folders: Vec<String>,
+    #[serde(default)]
+    allowed_senders: Vec<String>,
+    #[serde(default = "default_email_max_body_bytes")]
+    max_body_bytes: usize,
+    #[serde(default = "default_email_max_attachment_bytes")]
+    max_attachment_bytes: usize,
+    #[serde(default)]
+    instances: Vec<TomlEmailInstanceConfig>,
+}
+
+#[derive(Deserialize)]
+struct TomlEmailInstanceConfig {
+    name: String,
+    #[serde(default)]
+    enabled: bool,
+    imap_host: Option<String>,
+    #[serde(default = "default_email_imap_port")]
+    imap_port: u16,
+    imap_username: Option<String>,
+    imap_password: Option<String>,
+    #[serde(default = "default_email_imap_use_tls")]
+    imap_use_tls: bool,
+    smtp_host: Option<String>,
+    #[serde(default = "default_email_smtp_port")]
+    smtp_port: u16,
+    smtp_username: Option<String>,
+    smtp_password: Option<String>,
+    #[serde(default = "default_email_smtp_use_starttls")]
+    smtp_use_starttls: bool,
+    from_address: Option<String>,
+    from_name: Option<String>,
+    #[serde(default = "default_email_poll_interval_secs")]
+    poll_interval_secs: u64,
+    #[serde(default = "default_email_folders")]
+    folders: Vec<String>,
+    #[serde(default)]
+    allowed_senders: Vec<String>,
+    #[serde(default = "default_email_max_body_bytes")]
+    max_body_bytes: usize,
+    #[serde(default = "default_email_max_attachment_bytes")]
+    max_attachment_bytes: usize,
 }
 
 #[derive(Deserialize)]
@@ -2084,6 +3021,23 @@ struct TomlTwitchConfig {
     client_secret: Option<String>,
     refresh_token: Option<String>,
     #[serde(default)]
+    instances: Vec<TomlTwitchInstanceConfig>,
+    #[serde(default)]
+    channels: Vec<String>,
+    trigger_prefix: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct TomlTwitchInstanceConfig {
+    name: String,
+    #[serde(default)]
+    enabled: bool,
+    username: Option<String>,
+    oauth_token: Option<String>,
+    client_id: Option<String>,
+    client_secret: Option<String>,
+    refresh_token: Option<String>,
+    #[serde(default)]
     channels: Vec<String>,
     trigger_prefix: Option<String>,
 }
@@ -2095,10 +3049,44 @@ fn default_webhook_bind() -> String {
     "127.0.0.1".into()
 }
 
+fn default_email_imap_port() -> u16 {
+    993
+}
+
+fn default_email_imap_use_tls() -> bool {
+    true
+}
+
+fn default_email_smtp_port() -> u16 {
+    587
+}
+
+fn default_email_smtp_use_starttls() -> bool {
+    true
+}
+
+fn default_email_poll_interval_secs() -> u64 {
+    30
+}
+
+fn default_email_folders() -> Vec<String> {
+    vec!["INBOX".to_string()]
+}
+
+fn default_email_max_body_bytes() -> usize {
+    256 * 1024
+}
+
+fn default_email_max_attachment_bytes() -> usize {
+    10 * 1024 * 1024
+}
+
 #[derive(Deserialize)]
 struct TomlBinding {
     agent_id: String,
     channel: String,
+    #[serde(default)]
+    adapter: Option<String>,
     guild_id: Option<String>,
     workspace_id: Option<String>,
     chat_id: Option<String>,
@@ -2132,27 +3120,67 @@ fn resolve_cron_timezone(
     agent_timezone: Option<&str>,
     default_timezone: Option<&str>,
 ) -> Option<String> {
-    let timezone = agent_timezone
-        .and_then(normalize_timezone)
-        .or_else(|| default_timezone.and_then(normalize_timezone))
-        .or_else(|| {
-            std::env::var(CRON_TIMEZONE_ENV_VAR)
-                .ok()
-                .and_then(|value| normalize_timezone(&value))
-        });
+    let env_timezone = std::env::var(CRON_TIMEZONE_ENV_VAR)
+        .ok()
+        .and_then(|value| normalize_timezone(&value));
 
-    let timezone = timezone?;
+    for timezone in [
+        agent_timezone.and_then(normalize_timezone),
+        default_timezone.and_then(normalize_timezone),
+        env_timezone,
+    ] {
+        let Some(timezone) = timezone else {
+            continue;
+        };
 
-    if timezone.parse::<Tz>().is_err() {
+        if timezone.parse::<Tz>().is_ok() {
+            return Some(timezone);
+        }
+
         tracing::warn!(
             agent_id,
             cron_timezone = %timezone,
             "invalid cron timezone configured, falling back to system local timezone"
         );
-        return None;
     }
 
-    Some(timezone)
+    None
+}
+
+fn resolve_user_timezone(
+    agent_id: &str,
+    agent_timezone: Option<&str>,
+    default_timezone: Option<&str>,
+    fallback_timezone: Option<&str>,
+) -> Option<String> {
+    let env_timezone = std::env::var(USER_TIMEZONE_ENV_VAR)
+        .ok()
+        .and_then(|value| normalize_timezone(&value));
+
+    for (source, timezone) in [
+        ("agent", agent_timezone.and_then(normalize_timezone)),
+        ("defaults", default_timezone.and_then(normalize_timezone)),
+        ("env", env_timezone),
+        (
+            "cron_or_system",
+            fallback_timezone.and_then(normalize_timezone),
+        ),
+    ] {
+        let Some(timezone) = timezone else {
+            continue;
+        };
+        if timezone.parse::<Tz>().is_ok() {
+            return Some(timezone);
+        }
+        tracing::warn!(
+            agent_id,
+            user_timezone = %timezone,
+            user_timezone_source = source,
+            "invalid user timezone configured, trying next fallback"
+        );
+    }
+
+    None
 }
 
 fn parse_otlp_headers(value: Option<String>) -> Result<HashMap<String, String>> {
@@ -2331,6 +3359,7 @@ impl Config {
         let has_legacy_keys = std::env::var("ANTHROPIC_API_KEY").is_ok()
             || std::env::var("OPENAI_API_KEY").is_ok()
             || std::env::var("OPENROUTER_API_KEY").is_ok()
+            || std::env::var("KILO_API_KEY").is_ok()
             || std::env::var("ZHIPU_API_KEY").is_ok()
             || std::env::var("GROQ_API_KEY").is_ok()
             || std::env::var("TOGETHER_API_KEY").is_ok()
@@ -2342,7 +3371,9 @@ impl Config {
             || std::env::var("OLLAMA_API_KEY").is_ok()
             || std::env::var("OLLAMA_BASE_URL").is_ok()
             || std::env::var("OPENCODE_ZEN_API_KEY").is_ok()
+            || std::env::var("OPENCODE_GO_API_KEY").is_ok()
             || std::env::var("MINIMAX_API_KEY").is_ok()
+            || std::env::var("MINIMAX_CN_API_KEY").is_ok()
             || std::env::var("MOONSHOT_API_KEY").is_ok()
             || std::env::var("ZAI_CODING_PLAN_API_KEY").is_ok();
 
@@ -2363,7 +3394,10 @@ impl Config {
             || std::env::var("ANTHROPIC_OAUTH_TOKEN").is_ok()
             || std::env::var("OPENAI_API_KEY").is_ok()
             || std::env::var("OPENROUTER_API_KEY").is_ok()
-            || std::env::var("OPENCODE_ZEN_API_KEY").is_ok();
+            || std::env::var("KILO_API_KEY").is_ok()
+            || std::env::var("OPENCODE_ZEN_API_KEY").is_ok()
+            || std::env::var("OPENCODE_GO_API_KEY").is_ok()
+            || std::env::var("MINIMAX_CN_API_KEY").is_ok();
 
         !has_provider_env_vars && !has_legacy_bootstrap_vars
     }
@@ -2372,11 +3406,17 @@ impl Config {
     pub fn load() -> Result<Self> {
         let instance_dir = Self::default_instance_dir();
 
+        Self::load_for_instance(&instance_dir)
+    }
+
+    /// Load configuration for a specific instance directory.
+    pub fn load_for_instance(instance_dir: &Path) -> Result<Self> {
         let config_path = instance_dir.join("config.toml");
+
         if config_path.exists() {
             Self::load_from_path(&config_path)
         } else {
-            Self::load_from_env(&instance_dir)
+            Self::load_from_env(instance_dir)
         }
     }
 
@@ -2398,12 +3438,15 @@ impl Config {
 
     /// Load from environment variables only (no config file).
     pub fn load_from_env(instance_dir: &Path) -> Result<Self> {
+        let anthropic_from_auth_token = std::env::var("ANTHROPIC_API_KEY").is_err()
+            && std::env::var("ANTHROPIC_AUTH_TOKEN").is_ok();
         let mut llm = LlmConfig {
             anthropic_key: std::env::var("ANTHROPIC_API_KEY")
                 .ok()
                 .or_else(|| std::env::var("ANTHROPIC_AUTH_TOKEN").ok()),
             openai_key: std::env::var("OPENAI_API_KEY").ok(),
             openrouter_key: std::env::var("OPENROUTER_API_KEY").ok(),
+            kilo_key: std::env::var("KILO_API_KEY").ok(),
             zhipu_key: std::env::var("ZHIPU_API_KEY").ok(),
             groq_key: std::env::var("GROQ_API_KEY").ok(),
             together_key: std::env::var("TOGETHER_API_KEY").ok(),
@@ -2415,6 +3458,7 @@ impl Config {
             ollama_key: std::env::var("OLLAMA_API_KEY").ok(),
             ollama_base_url: std::env::var("OLLAMA_BASE_URL").ok(),
             opencode_zen_key: std::env::var("OPENCODE_ZEN_API_KEY").ok(),
+            opencode_go_key: std::env::var("OPENCODE_GO_API_KEY").ok(),
             nvidia_key: std::env::var("NVIDIA_API_KEY").ok(),
             minimax_key: std::env::var("MINIMAX_API_KEY").ok(),
             minimax_cn_key: std::env::var("MINIMAX_CN_API_KEY").ok(),
@@ -2434,17 +3478,7 @@ impl Config {
                     base_url,
                     api_key: anthropic_key,
                     name: None,
-                });
-        }
-
-        if let Some(openai_key) = llm.openai_key.clone() {
-            llm.providers
-                .entry("openai".to_string())
-                .or_insert_with(|| ProviderConfig {
-                    api_type: ApiType::OpenAiCompletions,
-                    base_url: OPENAI_PROVIDER_BASE_URL.to_string(),
-                    api_key: openai_key,
-                    name: None,
+                    use_bearer_auth: anthropic_from_auth_token,
                 });
         }
 
@@ -2456,41 +3490,57 @@ impl Config {
                     base_url: OPENROUTER_PROVIDER_BASE_URL.to_string(),
                     api_key: openrouter_key,
                     name: None,
+                    use_bearer_auth: false,
                 });
         }
 
-        if let Some(zhipu_key) = llm.zhipu_key.clone() {
-            llm.providers
-                .entry("zhipu".to_string())
-                .or_insert_with(|| ProviderConfig {
-                    api_type: ApiType::OpenAiCompletions,
-                    base_url: ZHIPU_PROVIDER_BASE_URL.to_string(),
-                    api_key: zhipu_key,
-                    name: None,
-                });
-        }
+        add_shorthand_provider(
+            &mut llm.providers,
+            "kilo",
+            llm.kilo_key.clone(),
+            ApiType::KiloGateway,
+            KILO_PROVIDER_BASE_URL,
+            Some("Kilo Gateway"),
+            false,
+        );
+        add_shorthand_provider(
+            &mut llm.providers,
+            "zhipu",
+            llm.zhipu_key.clone(),
+            ApiType::OpenAiChatCompletions,
+            ZHIPU_PROVIDER_BASE_URL,
+            Some("Z.AI (GLM)"),
+            false,
+        );
+        add_shorthand_provider(
+            &mut llm.providers,
+            "zai-coding-plan",
+            llm.zai_coding_plan_key.clone(),
+            ApiType::OpenAiChatCompletions,
+            ZAI_CODING_PLAN_BASE_URL,
+            Some("Z.AI Coding Plan"),
+            false,
+        );
 
-        if let Some(zai_coding_plan_key) = llm.zai_coding_plan_key.clone() {
-            llm.providers
-                .entry("zai-coding-plan".to_string())
-                .or_insert_with(|| ProviderConfig {
-                    api_type: ApiType::OpenAiCompletions,
-                    base_url: ZAI_CODING_PLAN_BASE_URL.to_string(),
-                    api_key: zai_coding_plan_key,
-                    name: None,
-                });
-        }
+        add_shorthand_provider(
+            &mut llm.providers,
+            "opencode-zen",
+            llm.opencode_zen_key.clone(),
+            ApiType::OpenAiCompletions,
+            OPENCODE_ZEN_PROVIDER_BASE_URL,
+            None,
+            false,
+        );
 
-        if let Some(opencode_zen_key) = llm.opencode_zen_key.clone() {
-            llm.providers
-                .entry("opencode-zen".to_string())
-                .or_insert_with(|| ProviderConfig {
-                    api_type: ApiType::OpenAiCompletions,
-                    base_url: OPENCODE_ZEN_PROVIDER_BASE_URL.to_string(),
-                    api_key: opencode_zen_key,
-                    name: None,
-                });
-        }
+        add_shorthand_provider(
+            &mut llm.providers,
+            "opencode-go",
+            llm.opencode_go_key.clone(),
+            ApiType::OpenAiCompletions,
+            OPENCODE_GO_PROVIDER_BASE_URL,
+            None,
+            false,
+        );
 
         if let Some(minimax_key) = llm.minimax_key.clone() {
             llm.providers
@@ -2500,6 +3550,7 @@ impl Config {
                     base_url: MINIMAX_PROVIDER_BASE_URL.to_string(),
                     api_key: minimax_key,
                     name: None,
+                    use_bearer_auth: false,
                 });
         }
 
@@ -2511,6 +3562,107 @@ impl Config {
                     base_url: MINIMAX_CN_PROVIDER_BASE_URL.to_string(),
                     api_key: minimax_cn_key,
                     name: None,
+                    use_bearer_auth: false,
+                });
+        }
+
+        if let Some(openai_key) = llm.openai_key.clone() {
+            llm.providers
+                .entry("openai".to_string())
+                .or_insert_with(|| ProviderConfig {
+                    api_type: ApiType::OpenAiCompletions,
+                    base_url: OPENAI_PROVIDER_BASE_URL.to_string(),
+                    api_key: openai_key,
+                    name: None,
+                    use_bearer_auth: false,
+                });
+        }
+
+        if let Some(openrouter_key) = llm.openrouter_key.clone() {
+            llm.providers
+                .entry("openrouter".to_string())
+                .or_insert_with(|| ProviderConfig {
+                    api_type: ApiType::OpenAiCompletions,
+                    base_url: OPENROUTER_PROVIDER_BASE_URL.to_string(),
+                    api_key: openrouter_key,
+                    name: None,
+                    use_bearer_auth: false,
+                });
+        }
+
+        add_shorthand_provider(
+            &mut llm.providers,
+            "kilo",
+            llm.kilo_key.clone(),
+            ApiType::KiloGateway,
+            KILO_PROVIDER_BASE_URL,
+            Some("Kilo Gateway"),
+            false,
+        );
+        add_shorthand_provider(
+            &mut llm.providers,
+            "zhipu",
+            llm.zhipu_key.clone(),
+            ApiType::OpenAiChatCompletions,
+            ZHIPU_PROVIDER_BASE_URL,
+            Some("Z.AI (GLM)"),
+            false,
+        );
+        add_shorthand_provider(
+            &mut llm.providers,
+            "zai-coding-plan",
+            llm.zai_coding_plan_key.clone(),
+            ApiType::OpenAiChatCompletions,
+            ZAI_CODING_PLAN_BASE_URL,
+            Some("Z.AI Coding Plan"),
+            false,
+        );
+
+        if let Some(opencode_zen_key) = llm.opencode_zen_key.clone() {
+            llm.providers
+                .entry("opencode-zen".to_string())
+                .or_insert_with(|| ProviderConfig {
+                    api_type: ApiType::OpenAiCompletions,
+                    base_url: OPENCODE_ZEN_PROVIDER_BASE_URL.to_string(),
+                    api_key: opencode_zen_key,
+                    name: None,
+                    use_bearer_auth: false,
+                });
+        }
+
+        if let Some(opencode_go_key) = llm.opencode_go_key.clone() {
+            llm.providers
+                .entry("opencode-go".to_string())
+                .or_insert_with(|| ProviderConfig {
+                    api_type: ApiType::OpenAiCompletions,
+                    base_url: OPENCODE_GO_PROVIDER_BASE_URL.to_string(),
+                    api_key: opencode_go_key,
+                    name: None,
+                    use_bearer_auth: false,
+                });
+        }
+
+        if let Some(minimax_key) = llm.minimax_key.clone() {
+            llm.providers
+                .entry("minimax".to_string())
+                .or_insert_with(|| ProviderConfig {
+                    api_type: ApiType::Anthropic,
+                    base_url: MINIMAX_PROVIDER_BASE_URL.to_string(),
+                    api_key: minimax_key,
+                    name: None,
+                    use_bearer_auth: false,
+                });
+        }
+
+        if let Some(minimax_cn_key) = llm.minimax_cn_key.clone() {
+            llm.providers
+                .entry("minimax-cn".to_string())
+                .or_insert_with(|| ProviderConfig {
+                    api_type: ApiType::Anthropic,
+                    base_url: MINIMAX_CN_PROVIDER_BASE_URL.to_string(),
+                    api_key: minimax_cn_key,
+                    name: None,
+                    use_bearer_auth: false,
                 });
         }
 
@@ -2522,6 +3674,7 @@ impl Config {
                     base_url: MOONSHOT_PROVIDER_BASE_URL.to_string(),
                     api_key: moonshot_key,
                     name: None,
+                    use_bearer_auth: false,
                 });
         }
 
@@ -2533,6 +3686,7 @@ impl Config {
                     base_url: NVIDIA_PROVIDER_BASE_URL.to_string(),
                     api_key: nvidia_key,
                     name: None,
+                    use_bearer_auth: false,
                 });
         }
 
@@ -2544,6 +3698,7 @@ impl Config {
                     base_url: FIREWORKS_PROVIDER_BASE_URL.to_string(),
                     api_key: fireworks_key,
                     name: None,
+                    use_bearer_auth: false,
                 });
         }
 
@@ -2555,6 +3710,7 @@ impl Config {
                     base_url: DEEPSEEK_PROVIDER_BASE_URL.to_string(),
                     api_key: deepseek_key,
                     name: None,
+                    use_bearer_auth: false,
                 });
         }
 
@@ -2566,6 +3722,7 @@ impl Config {
                     base_url: GEMINI_PROVIDER_BASE_URL.to_string(),
                     api_key: gemini_key,
                     name: None,
+                    use_bearer_auth: false,
                 });
         }
 
@@ -2577,6 +3734,7 @@ impl Config {
                     base_url: GROQ_PROVIDER_BASE_URL.to_string(),
                     api_key: groq_key,
                     name: None,
+                    use_bearer_auth: false,
                 });
         }
 
@@ -2588,6 +3746,7 @@ impl Config {
                     base_url: TOGETHER_PROVIDER_BASE_URL.to_string(),
                     api_key: together_key,
                     name: None,
+                    use_bearer_auth: false,
                 });
         }
 
@@ -2599,6 +3758,7 @@ impl Config {
                     base_url: XAI_PROVIDER_BASE_URL.to_string(),
                     api_key: xai_key,
                     name: None,
+                    use_bearer_auth: false,
                 });
         }
 
@@ -2610,6 +3770,7 @@ impl Config {
                     base_url: MISTRAL_PROVIDER_BASE_URL.to_string(),
                     api_key: mistral_key,
                     name: None,
+                    use_bearer_auth: false,
                 });
         }
 
@@ -2621,9 +3782,10 @@ impl Config {
                     base_url: llm
                         .ollama_base_url
                         .clone()
-                        .unwrap_or_else(|| "http://localhost:11434".to_string()),
+                        .unwrap_or_else(|| OLLAMA_PROVIDER_BASE_URL.to_string()),
                     api_key: llm.ollama_key.clone().unwrap_or_default(),
                     name: None,
+                    use_bearer_auth: false,
                 });
         }
 
@@ -2632,6 +3794,7 @@ impl Config {
 
         // Env-only routing: check for env overrides on channel/worker models.
         // SPACEBOT_MODEL overrides all process types at once; specific vars take precedence.
+        // ANTHROPIC_MODEL sets all anthropic/* models to the specified value.
         let mut routing = RoutingConfig::default();
         if let Ok(model) = std::env::var("SPACEBOT_MODEL") {
             routing.channel = model.clone();
@@ -2639,6 +3802,19 @@ impl Config {
             routing.worker = model.clone();
             routing.compactor = model.clone();
             routing.cortex = model;
+        }
+        if let Ok(anthropic_model) = std::env::var("ANTHROPIC_MODEL") {
+            // ANTHROPIC_MODEL sets all anthropic/* routes to the specified model
+            let channel = format!("anthropic/{}", anthropic_model);
+            let branch = format!("anthropic/{}", anthropic_model);
+            let worker = format!("anthropic/{}", anthropic_model);
+            let compactor = format!("anthropic/{}", anthropic_model);
+            let cortex = format!("anthropic/{}", anthropic_model);
+            routing.channel = channel;
+            routing.branch = branch;
+            routing.worker = worker;
+            routing.compactor = compactor;
+            routing.cortex = cortex;
         }
         if let Ok(channel_model) = std::env::var("SPACEBOT_CHANNEL_MODEL") {
             routing.channel = channel_model;
@@ -2673,6 +3849,7 @@ impl Config {
             mcp: None,
             brave_search_key: None,
             cron_timezone: None,
+            user_timezone: None,
             sandbox: None,
             cron: Vec::new(),
         }];
@@ -2747,6 +3924,13 @@ impl Config {
             }
         }
 
+        let toml_llm_anthropic_key_was_none = toml
+            .llm
+            .anthropic_key
+            .as_deref()
+            .and_then(resolve_env_value)
+            .is_none();
+
         let mut llm = LlmConfig {
             anthropic_key: toml
                 .llm
@@ -2767,6 +3951,9 @@ impl Config {
                 .as_deref()
                 .and_then(resolve_env_value)
                 .or_else(|| std::env::var("OPENROUTER_API_KEY").ok()),
+            kilo_key: std::env::var("KILO_API_KEY")
+                .ok()
+                .or_else(|| toml.llm.kilo_key.as_deref().and_then(resolve_env_value)),
             zhipu_key: toml
                 .llm
                 .zhipu_key
@@ -2833,6 +4020,12 @@ impl Config {
                 .as_deref()
                 .and_then(resolve_env_value)
                 .or_else(|| std::env::var("OPENCODE_ZEN_API_KEY").ok()),
+            opencode_go_key: std::env::var("OPENCODE_GO_API_KEY").ok().or_else(|| {
+                toml.llm
+                    .opencode_go_key
+                    .as_deref()
+                    .and_then(resolve_env_value)
+            }),
             nvidia_key: toml
                 .llm
                 .nvidia_key
@@ -2878,11 +4071,20 @@ impl Config {
                             base_url: config.base_url,
                             api_key,
                             name: config.name,
+                            use_bearer_auth: false,
                         },
                     ))
                 })
                 .collect::<anyhow::Result<_>>()?,
         };
+
+        // Detect if the Anthropic key came from ANTHROPIC_AUTH_TOKEN (proxy auth).
+        // In from_toml, the key may come from toml config, ANTHROPIC_API_KEY, or
+        // ANTHROPIC_AUTH_TOKEN (in that priority order). We only set use_bearer_auth
+        // if AUTH_TOKEN was the actual source.
+        let anthropic_from_auth_token = toml_llm_anthropic_key_was_none
+            && std::env::var("ANTHROPIC_API_KEY").is_err()
+            && std::env::var("ANTHROPIC_AUTH_TOKEN").is_ok();
 
         if let Some(anthropic_key) = llm.anthropic_key.clone() {
             let base_url = std::env::var("ANTHROPIC_BASE_URL")
@@ -2894,6 +4096,7 @@ impl Config {
                     base_url,
                     api_key: anthropic_key,
                     name: None,
+                    use_bearer_auth: anthropic_from_auth_token,
                 });
         }
 
@@ -2905,6 +4108,7 @@ impl Config {
                     base_url: OPENAI_PROVIDER_BASE_URL.to_string(),
                     api_key: openai_key,
                     name: None,
+                    use_bearer_auth: false,
                 });
         }
 
@@ -2916,41 +4120,57 @@ impl Config {
                     base_url: OPENROUTER_PROVIDER_BASE_URL.to_string(),
                     api_key: openrouter_key,
                     name: None,
+                    use_bearer_auth: false,
                 });
         }
 
-        if let Some(zhipu_key) = llm.zhipu_key.clone() {
-            llm.providers
-                .entry("zhipu".to_string())
-                .or_insert_with(|| ProviderConfig {
-                    api_type: ApiType::OpenAiCompletions,
-                    base_url: ZHIPU_PROVIDER_BASE_URL.to_string(),
-                    api_key: zhipu_key,
-                    name: None,
-                });
-        }
+        add_shorthand_provider(
+            &mut llm.providers,
+            "kilo",
+            llm.kilo_key.clone(),
+            ApiType::KiloGateway,
+            KILO_PROVIDER_BASE_URL,
+            Some("Kilo Gateway"),
+            false,
+        );
+        add_shorthand_provider(
+            &mut llm.providers,
+            "zhipu",
+            llm.zhipu_key.clone(),
+            ApiType::OpenAiChatCompletions,
+            ZHIPU_PROVIDER_BASE_URL,
+            Some("Z.AI (GLM)"),
+            false,
+        );
+        add_shorthand_provider(
+            &mut llm.providers,
+            "zai-coding-plan",
+            llm.zai_coding_plan_key.clone(),
+            ApiType::OpenAiChatCompletions,
+            ZAI_CODING_PLAN_BASE_URL,
+            Some("Z.AI Coding Plan"),
+            false,
+        );
 
-        if let Some(zai_coding_plan_key) = llm.zai_coding_plan_key.clone() {
-            llm.providers
-                .entry("zai-coding-plan".to_string())
-                .or_insert_with(|| ProviderConfig {
-                    api_type: ApiType::OpenAiCompletions,
-                    base_url: ZAI_CODING_PLAN_BASE_URL.to_string(),
-                    api_key: zai_coding_plan_key,
-                    name: None,
-                });
-        }
+        add_shorthand_provider(
+            &mut llm.providers,
+            "opencode-zen",
+            llm.opencode_zen_key.clone(),
+            ApiType::OpenAiCompletions,
+            OPENCODE_ZEN_PROVIDER_BASE_URL,
+            None,
+            false,
+        );
 
-        if let Some(opencode_zen_key) = llm.opencode_zen_key.clone() {
-            llm.providers
-                .entry("opencode-zen".to_string())
-                .or_insert_with(|| ProviderConfig {
-                    api_type: ApiType::OpenAiCompletions,
-                    base_url: OPENCODE_ZEN_PROVIDER_BASE_URL.to_string(),
-                    api_key: opencode_zen_key,
-                    name: None,
-                });
-        }
+        add_shorthand_provider(
+            &mut llm.providers,
+            "opencode-go",
+            llm.opencode_go_key.clone(),
+            ApiType::OpenAiCompletions,
+            OPENCODE_GO_PROVIDER_BASE_URL,
+            None,
+            false,
+        );
 
         if let Some(minimax_key) = llm.minimax_key.clone() {
             llm.providers
@@ -2960,6 +4180,7 @@ impl Config {
                     base_url: MINIMAX_PROVIDER_BASE_URL.to_string(),
                     api_key: minimax_key,
                     name: None,
+                    use_bearer_auth: false,
                 });
         }
 
@@ -2971,6 +4192,7 @@ impl Config {
                     base_url: MINIMAX_CN_PROVIDER_BASE_URL.to_string(),
                     api_key: minimax_cn_key,
                     name: None,
+                    use_bearer_auth: false,
                 });
         }
 
@@ -2982,6 +4204,7 @@ impl Config {
                     base_url: MOONSHOT_PROVIDER_BASE_URL.to_string(),
                     api_key: moonshot_key,
                     name: None,
+                    use_bearer_auth: false,
                 });
         }
 
@@ -2993,6 +4216,7 @@ impl Config {
                     base_url: NVIDIA_PROVIDER_BASE_URL.to_string(),
                     api_key: nvidia_key,
                     name: None,
+                    use_bearer_auth: false,
                 });
         }
 
@@ -3004,6 +4228,7 @@ impl Config {
                     base_url: FIREWORKS_PROVIDER_BASE_URL.to_string(),
                     api_key: fireworks_key,
                     name: None,
+                    use_bearer_auth: false,
                 });
         }
 
@@ -3015,6 +4240,7 @@ impl Config {
                     base_url: DEEPSEEK_PROVIDER_BASE_URL.to_string(),
                     api_key: deepseek_key,
                     name: None,
+                    use_bearer_auth: false,
                 });
         }
 
@@ -3026,6 +4252,7 @@ impl Config {
                     base_url: GEMINI_PROVIDER_BASE_URL.to_string(),
                     api_key: gemini_key,
                     name: None,
+                    use_bearer_auth: false,
                 });
         }
 
@@ -3037,6 +4264,7 @@ impl Config {
                     base_url: GROQ_PROVIDER_BASE_URL.to_string(),
                     api_key: groq_key,
                     name: None,
+                    use_bearer_auth: false,
                 });
         }
 
@@ -3048,6 +4276,7 @@ impl Config {
                     base_url: TOGETHER_PROVIDER_BASE_URL.to_string(),
                     api_key: together_key,
                     name: None,
+                    use_bearer_auth: false,
                 });
         }
 
@@ -3059,6 +4288,7 @@ impl Config {
                     base_url: XAI_PROVIDER_BASE_URL.to_string(),
                     api_key: xai_key,
                     name: None,
+                    use_bearer_auth: false,
                 });
         }
 
@@ -3070,6 +4300,7 @@ impl Config {
                     base_url: MISTRAL_PROVIDER_BASE_URL.to_string(),
                     api_key: mistral_key,
                     name: None,
+                    use_bearer_auth: false,
                 });
         }
 
@@ -3081,9 +4312,10 @@ impl Config {
                     base_url: llm
                         .ollama_base_url
                         .clone()
-                        .unwrap_or_else(|| "http://localhost:11434".to_string()),
+                        .unwrap_or_else(|| OLLAMA_PROVIDER_BASE_URL.to_string()),
                     api_key: llm.ollama_key.clone().unwrap_or_default(),
                     name: None,
+                    use_bearer_auth: false,
                 });
         }
 
@@ -3252,6 +4484,11 @@ impl Config {
                 .cron_timezone
                 .as_deref()
                 .and_then(resolve_env_value),
+            user_timezone: toml
+                .defaults
+                .user_timezone
+                .as_deref()
+                .and_then(resolve_env_value),
             history_backfill_count: base_defaults.history_backfill_count,
             cron: Vec::new(),
             opencode: toml
@@ -3361,6 +4598,7 @@ impl Config {
                     .map(|h| CronDef {
                         id: h.id,
                         prompt: h.prompt,
+                        cron_expr: h.cron_expr,
                         interval_secs: h.interval_secs.unwrap_or(3600),
                         delivery_target: h.delivery_target,
                         active_hours: match (h.active_start_hour, h.active_end_hour) {
@@ -3537,6 +4775,7 @@ impl Config {
                     },
                     brave_search_key: a.brave_search_key.as_deref().and_then(resolve_env_value),
                     cron_timezone: a.cron_timezone.as_deref().and_then(resolve_env_value),
+                    user_timezone: a.user_timezone.as_deref().and_then(resolve_env_value),
                     sandbox: a.sandbox,
                     cron,
                 })
@@ -3567,6 +4806,7 @@ impl Config {
                 mcp: None,
                 brave_search_key: None,
                 cron_timezone: None,
+                user_timezone: None,
                 sandbox: None,
                 cron: Vec::new(),
             });
@@ -3580,33 +4820,94 @@ impl Config {
 
         let messaging = MessagingConfig {
             discord: toml.messaging.discord.and_then(|d| {
-                let token = d
-                    .token
-                    .as_deref()
-                    .and_then(resolve_env_value)
-                    .or_else(|| std::env::var("DISCORD_BOT_TOKEN").ok())?;
+                let instances = d
+                    .instances
+                    .into_iter()
+                    .map(|instance| {
+                        let token = instance.token.as_deref().and_then(resolve_env_value);
+                        if instance.enabled && token.is_none() {
+                            tracing::warn!(
+                                adapter = %instance.name,
+                                "discord instance is enabled but token is missing/unresolvable — disabling"
+                            );
+                        }
+                        DiscordInstanceConfig {
+                            name: instance.name,
+                            enabled: instance.enabled && token.is_some(),
+                            token: token.unwrap_or_default(),
+                            dm_allowed_users: instance.dm_allowed_users,
+                            allow_bot_messages: instance.allow_bot_messages,
+                        }
+                    })
+                    .collect::<Vec<_>>();
+
+                let token = std::env::var("DISCORD_BOT_TOKEN")
+                    .ok()
+                    .or_else(|| d.token.as_deref().and_then(resolve_env_value));
+
+                if token.is_none() && instances.is_empty() {
+                    return None;
+                }
+
                 Some(DiscordConfig {
                     enabled: d.enabled,
-                    token,
+                    token: token.unwrap_or_default(),
+                    instances,
                     dm_allowed_users: d.dm_allowed_users,
                     allow_bot_messages: d.allow_bot_messages,
                 })
             }),
             slack: toml.messaging.slack.and_then(|s| {
-                let bot_token = s
-                    .bot_token
-                    .as_deref()
-                    .and_then(resolve_env_value)
-                    .or_else(|| std::env::var("SLACK_BOT_TOKEN").ok())?;
-                let app_token = s
-                    .app_token
-                    .as_deref()
-                    .and_then(resolve_env_value)
-                    .or_else(|| std::env::var("SLACK_APP_TOKEN").ok())?;
+                let instances = s
+                    .instances
+                    .into_iter()
+                    .map(|instance| {
+                        let bot_token =
+                            instance.bot_token.as_deref().and_then(resolve_env_value);
+                        let app_token =
+                            instance.app_token.as_deref().and_then(resolve_env_value);
+                        if instance.enabled && (bot_token.is_none() || app_token.is_none()) {
+                            tracing::warn!(
+                                adapter = %instance.name,
+                                "slack instance is enabled but tokens are missing/unresolvable — disabling"
+                            );
+                        }
+                        let has_credentials = bot_token.is_some() && app_token.is_some();
+                        SlackInstanceConfig {
+                            name: instance.name,
+                            enabled: instance.enabled && has_credentials,
+                            bot_token: bot_token.unwrap_or_default(),
+                            app_token: app_token.unwrap_or_default(),
+                            dm_allowed_users: instance.dm_allowed_users,
+                            commands: instance
+                                .commands
+                                .into_iter()
+                                .map(|command| SlackCommandConfig {
+                                    command: command.command,
+                                    agent_id: command.agent_id,
+                                    description: command.description,
+                                })
+                                .collect(),
+                        }
+                    })
+                    .collect::<Vec<_>>();
+
+                let bot_token = std::env::var("SLACK_BOT_TOKEN")
+                    .ok()
+                    .or_else(|| s.bot_token.as_deref().and_then(resolve_env_value));
+                let app_token = std::env::var("SLACK_APP_TOKEN")
+                    .ok()
+                    .or_else(|| s.app_token.as_deref().and_then(resolve_env_value));
+
+                if (bot_token.is_none() || app_token.is_none()) && instances.is_empty() {
+                    return None;
+                }
+
                 Some(SlackConfig {
                     enabled: s.enabled,
-                    bot_token,
-                    app_token,
+                    bot_token: bot_token.unwrap_or_default(),
+                    app_token: app_token.unwrap_or_default(),
+                    instances,
                     dm_allowed_users: s.dm_allowed_users,
                     commands: s
                         .commands
@@ -3620,15 +4921,182 @@ impl Config {
                 })
             }),
             telegram: toml.messaging.telegram.and_then(|t| {
-                let token = t
-                    .token
-                    .as_deref()
-                    .and_then(resolve_env_value)
-                    .or_else(|| std::env::var("TELEGRAM_BOT_TOKEN").ok())?;
+                let instances = t
+                    .instances
+                    .into_iter()
+                    .map(|instance| {
+                        let token = instance.token.as_deref().and_then(resolve_env_value);
+                        if instance.enabled && token.is_none() {
+                            tracing::warn!(
+                                adapter = %instance.name,
+                                "telegram instance is enabled but token is missing/unresolvable — disabling"
+                            );
+                        }
+                        TelegramInstanceConfig {
+                            name: instance.name,
+                            enabled: instance.enabled && token.is_some(),
+                            token: token.unwrap_or_default(),
+                            dm_allowed_users: instance.dm_allowed_users,
+                        }
+                    })
+                    .collect::<Vec<_>>();
+
+                let token = std::env::var("TELEGRAM_BOT_TOKEN")
+                    .ok()
+                    .or_else(|| t.token.as_deref().and_then(resolve_env_value));
+
+                if token.is_none() && instances.is_empty() {
+                    return None;
+                }
+
                 Some(TelegramConfig {
                     enabled: t.enabled,
-                    token,
+                    token: token.unwrap_or_default(),
+                    instances,
                     dm_allowed_users: t.dm_allowed_users,
+                })
+            }),
+            email: toml.messaging.email.and_then(|email| {
+                let instances = email
+                    .instances
+                    .into_iter()
+                    .map(|instance| {
+                        let imap_host =
+                            instance.imap_host.as_deref().and_then(resolve_env_value);
+                        let imap_username =
+                            instance.imap_username.as_deref().and_then(resolve_env_value);
+                        let imap_password =
+                            instance.imap_password.as_deref().and_then(resolve_env_value);
+                        let smtp_host =
+                            instance.smtp_host.as_deref().and_then(resolve_env_value);
+
+                        let has_credentials = imap_host.is_some()
+                            && imap_username.is_some()
+                            && imap_password.is_some()
+                            && smtp_host.is_some();
+
+                        if instance.enabled && !has_credentials {
+                            tracing::warn!(
+                                adapter = %instance.name,
+                                "email instance is enabled but credentials are missing/unresolvable — disabling"
+                            );
+                        }
+
+                        let imap_username_val = imap_username.unwrap_or_default();
+                        let imap_password_val = imap_password.unwrap_or_default();
+                        let smtp_username = instance
+                            .smtp_username
+                            .as_deref()
+                            .and_then(resolve_env_value)
+                            .unwrap_or_else(|| imap_username_val.clone());
+                        let smtp_password = instance
+                            .smtp_password
+                            .as_deref()
+                            .and_then(resolve_env_value)
+                            .unwrap_or_else(|| imap_password_val.clone());
+                        let from_address = instance
+                            .from_address
+                            .as_deref()
+                            .and_then(resolve_env_value)
+                            .unwrap_or_else(|| smtp_username.clone());
+                        let from_name =
+                            instance.from_name.as_deref().and_then(resolve_env_value);
+
+                        EmailInstanceConfig {
+                            name: instance.name,
+                            enabled: instance.enabled && has_credentials,
+                            imap_host: imap_host.unwrap_or_default(),
+                            imap_port: instance.imap_port,
+                            imap_username: imap_username_val,
+                            imap_password: imap_password_val,
+                            imap_use_tls: instance.imap_use_tls,
+                            smtp_host: smtp_host.unwrap_or_default(),
+                            smtp_port: instance.smtp_port,
+                            smtp_username,
+                            smtp_password,
+                            smtp_use_starttls: instance.smtp_use_starttls,
+                            from_address,
+                            from_name,
+                            poll_interval_secs: instance.poll_interval_secs,
+                            folders: if instance.folders.is_empty() {
+                                vec!["INBOX".to_string()]
+                            } else {
+                                instance.folders
+                            },
+                            allowed_senders: instance.allowed_senders,
+                            max_body_bytes: instance.max_body_bytes,
+                            max_attachment_bytes: instance.max_attachment_bytes,
+                        }
+                    })
+                    .collect::<Vec<_>>();
+
+                let imap_host = std::env::var("EMAIL_IMAP_HOST")
+                    .ok()
+                    .or_else(|| email.imap_host.as_deref().and_then(resolve_env_value));
+                let imap_username = std::env::var("EMAIL_IMAP_USERNAME")
+                    .ok()
+                    .or_else(|| email.imap_username.as_deref().and_then(resolve_env_value));
+                let imap_password = std::env::var("EMAIL_IMAP_PASSWORD")
+                    .ok()
+                    .or_else(|| email.imap_password.as_deref().and_then(resolve_env_value));
+                let smtp_host = std::env::var("EMAIL_SMTP_HOST")
+                    .ok()
+                    .or_else(|| email.smtp_host.as_deref().and_then(resolve_env_value));
+
+                let has_default = imap_host.is_some()
+                    && imap_username.is_some()
+                    && imap_password.is_some()
+                    && smtp_host.is_some();
+
+                if !has_default && instances.is_empty() {
+                    return None;
+                }
+
+                let imap_host = imap_host.unwrap_or_default();
+                let imap_username = imap_username.unwrap_or_default();
+                let imap_password = imap_password.unwrap_or_default();
+                let smtp_host = smtp_host.unwrap_or_default();
+                let smtp_username = std::env::var("EMAIL_SMTP_USERNAME")
+                    .ok()
+                    .or_else(|| email.smtp_username.as_deref().and_then(resolve_env_value))
+                    .unwrap_or_else(|| imap_username.clone());
+                let smtp_password = std::env::var("EMAIL_SMTP_PASSWORD")
+                    .ok()
+                    .or_else(|| email.smtp_password.as_deref().and_then(resolve_env_value))
+                    .unwrap_or_else(|| imap_password.clone());
+
+                let from_address = std::env::var("EMAIL_FROM_ADDRESS")
+                    .ok()
+                    .or_else(|| email.from_address.as_deref().and_then(resolve_env_value))
+                    .unwrap_or_else(|| smtp_username.clone());
+                let from_name = std::env::var("EMAIL_FROM_NAME")
+                    .ok()
+                    .or_else(|| email.from_name.as_deref().and_then(resolve_env_value));
+
+                Some(EmailConfig {
+                    enabled: email.enabled,
+                    imap_host,
+                    imap_port: email.imap_port,
+                    imap_username,
+                    imap_password,
+                    imap_use_tls: email.imap_use_tls,
+                    smtp_host,
+                    smtp_port: email.smtp_port,
+                    smtp_username,
+                    smtp_password,
+                    smtp_use_starttls: email.smtp_use_starttls,
+                    from_address,
+                    from_name,
+                    poll_interval_secs: email.poll_interval_secs,
+                    folders: if email.folders.is_empty() {
+                        vec!["INBOX".to_string()]
+                    } else {
+                        email.folders
+                    },
+                    allowed_senders: email.allowed_senders,
+                    max_body_bytes: email.max_body_bytes,
+                    max_attachment_bytes: email.max_attachment_bytes,
+                    instances,
                 })
             }),
             webhook: toml.messaging.webhook.map(|w| WebhookConfig {
@@ -3638,16 +5106,56 @@ impl Config {
                 auth_token: w.auth_token.as_deref().and_then(resolve_env_value),
             }),
             twitch: toml.messaging.twitch.and_then(|t| {
-                let username = t
-                    .username
-                    .as_deref()
-                    .and_then(resolve_env_value)
-                    .or_else(|| std::env::var("TWITCH_BOT_USERNAME").ok())?;
-                let oauth_token = t
-                    .oauth_token
-                    .as_deref()
-                    .and_then(resolve_env_value)
-                    .or_else(|| std::env::var("TWITCH_OAUTH_TOKEN").ok())?;
+                let instances = t
+                    .instances
+                    .into_iter()
+                    .map(|instance| {
+                        let username = instance.username.as_deref().and_then(resolve_env_value);
+                        let oauth_token = instance
+                            .oauth_token
+                            .as_deref()
+                            .and_then(resolve_env_value);
+                        if instance.enabled && (username.is_none() || oauth_token.is_none()) {
+                            tracing::warn!(
+                                adapter = %instance.name,
+                                "twitch instance is enabled but credentials are missing/unresolvable — disabling"
+                            );
+                        }
+                        let has_credentials = username.is_some() && oauth_token.is_some();
+                        let client_id = instance.client_id.as_deref().and_then(resolve_env_value);
+                        let client_secret = instance
+                            .client_secret
+                            .as_deref()
+                            .and_then(resolve_env_value);
+                        let refresh_token = instance
+                            .refresh_token
+                            .as_deref()
+                            .and_then(resolve_env_value);
+                        TwitchInstanceConfig {
+                            name: instance.name,
+                            enabled: instance.enabled && has_credentials,
+                            username: username.unwrap_or_default(),
+                            oauth_token: oauth_token.unwrap_or_default(),
+                            client_id,
+                            client_secret,
+                            refresh_token,
+                            channels: instance.channels,
+                            trigger_prefix: instance.trigger_prefix,
+                        }
+                    })
+                    .collect::<Vec<_>>();
+
+                let username = std::env::var("TWITCH_BOT_USERNAME")
+                    .ok()
+                    .or_else(|| t.username.as_deref().and_then(resolve_env_value));
+                let oauth_token = std::env::var("TWITCH_OAUTH_TOKEN")
+                    .ok()
+                    .or_else(|| t.oauth_token.as_deref().and_then(resolve_env_value));
+
+                if (username.is_none() || oauth_token.is_none()) && instances.is_empty() {
+                    return None;
+                }
+
                 let client_id = t
                     .client_id
                     .as_deref()
@@ -3665,23 +5173,25 @@ impl Config {
                     .or_else(|| std::env::var("TWITCH_REFRESH_TOKEN").ok());
                 Some(TwitchConfig {
                     enabled: t.enabled,
-                    username,
-                    oauth_token,
+                    username: username.unwrap_or_default(),
+                    oauth_token: oauth_token.unwrap_or_default(),
                     client_id,
                     client_secret,
                     refresh_token,
+                    instances,
                     channels: t.channels,
                     trigger_prefix: t.trigger_prefix,
                 })
             }),
         };
 
-        let bindings = toml
+        let bindings: Vec<Binding> = toml
             .bindings
             .into_iter()
             .map(|b| Binding {
                 agent_id: b.agent_id,
                 channel: b.channel,
+                adapter: normalize_adapter(b.adapter),
                 guild_id: b.guild_id,
                 workspace_id: b.workspace_id,
                 chat_id: b.chat_id,
@@ -3690,6 +5200,8 @@ impl Config {
                 dm_allowed_users: b.dm_allowed_users,
             })
             .collect();
+
+        validate_named_messaging_adapters(&messaging, &bindings)?;
 
         let api = ApiConfig {
             enabled: toml.api.enabled,
@@ -3841,6 +5353,7 @@ pub struct RuntimeConfig {
     pub history_backfill_count: ArcSwap<usize>,
     pub brave_search_key: ArcSwap<Option<String>>,
     pub cron_timezone: ArcSwap<Option<String>>,
+    pub user_timezone: ArcSwap<Option<String>>,
     pub cortex: ArcSwap<CortexConfig>,
     /// Memory injection configuration for the pre-hook system.
     pub memory_injection: ArcSwap<MemoryInjectionConfig>,
@@ -3903,6 +5416,7 @@ impl RuntimeConfig {
             history_backfill_count: ArcSwap::from_pointee(agent_config.history_backfill_count),
             brave_search_key: ArcSwap::from_pointee(agent_config.brave_search_key.clone()),
             cron_timezone: ArcSwap::from_pointee(agent_config.cron_timezone.clone()),
+            user_timezone: ArcSwap::from_pointee(agent_config.user_timezone.clone()),
             cortex: ArcSwap::from_pointee(agent_config.cortex),
             memory_injection: ArcSwap::from_pointee(agent_config.memory_injection.clone()),
             warmup: ArcSwap::from_pointee(agent_config.warmup),
@@ -3991,6 +5505,7 @@ impl RuntimeConfig {
         self.brave_search_key
             .store(Arc::new(resolved.brave_search_key));
         self.cron_timezone.store(Arc::new(resolved.cron_timezone));
+        self.user_timezone.store(Arc::new(resolved.user_timezone));
         self.cortex.store(Arc::new(resolved.cortex));
         self.memory_injection
             .store(Arc::new(resolved.memory_injection));
@@ -4258,95 +5773,283 @@ pub fn spawn_file_watcher(
                     let instance_dir = instance_dir.clone();
 
                     rt.spawn(async move {
-                        // Discord: start if enabled and not already running
+                        // Discord: start default + named instances that are enabled and not already running.
                         if let Some(discord_config) = &config.messaging.discord
-                            && discord_config.enabled && !manager.has_adapter("discord").await {
-                                let perms = match discord_permissions {
-                                    Some(ref existing) => existing.clone(),
-                                    None => {
-                                        let perms = DiscordPermissions::from_config(discord_config, &config.bindings);
-                                        Arc::new(arc_swap::ArcSwap::from_pointee(perms))
+                            && discord_config.enabled {
+                                if !discord_config.token.is_empty() && !manager.has_adapter("discord").await {
+                                    let permissions = match discord_permissions {
+                                        Some(ref existing) => existing.clone(),
+                                        None => {
+                                            let permissions = DiscordPermissions::from_config(discord_config, &config.bindings);
+                                            Arc::new(arc_swap::ArcSwap::from_pointee(permissions))
+                                        }
+                                    };
+                                    let adapter = crate::messaging::discord::DiscordAdapter::new(
+                                        "discord",
+                                        &discord_config.token,
+                                        permissions,
+                                    );
+                                    if let Err(error) = manager.register_and_start(adapter).await {
+                                        tracing::error!(%error, "failed to hot-start discord adapter from config change");
                                     }
-                                };
-                                let adapter = crate::messaging::discord::DiscordAdapter::new(
-                                    &discord_config.token,
-                                    perms,
-                                );
-                                if let Err(error) = manager.register_and_start(adapter).await {
-                                    tracing::error!(%error, "failed to hot-start discord adapter from config change");
+                                }
+
+                                for instance in discord_config.instances.iter().filter(|instance| instance.enabled) {
+                                    let runtime_key = binding_runtime_adapter_key(
+                                        "discord",
+                                        Some(instance.name.as_str()),
+                                    );
+                                    if manager.has_adapter(runtime_key.as_str()).await {
+                                        // TODO: named instance permissions are not hot-updated on
+                                        // config reload because each instance owns its own
+                                        // Arc<ArcSwap> with no external handle. Fixing this
+                                        // requires either a permission-update method on the
+                                        // Messaging trait or a shared handle registry. Permissions
+                                        // will be correct after a full restart.
+                                        continue;
+                                    }
+
+                                    let permissions = Arc::new(arc_swap::ArcSwap::from_pointee(
+                                        DiscordPermissions::from_instance_config(instance, &config.bindings),
+                                    ));
+                                    let adapter = crate::messaging::discord::DiscordAdapter::new(
+                                        runtime_key,
+                                        &instance.token,
+                                        permissions,
+                                    );
+                                    if let Err(error) = manager.register_and_start(adapter).await {
+                                        tracing::error!(%error, adapter = %instance.name, "failed to hot-start named discord adapter from config change");
+                                    }
                                 }
                             }
 
-                        // Slack: start if enabled and not already running
+                        // Slack: start default + named instances that are enabled and not already running.
                         if let Some(slack_config) = &config.messaging.slack
-                            && slack_config.enabled && !manager.has_adapter("slack").await {
-                                let perms = match slack_permissions {
-                                    Some(ref existing) => existing.clone(),
-                                    None => {
-                                        let perms = SlackPermissions::from_config(slack_config, &config.bindings);
-                                        Arc::new(arc_swap::ArcSwap::from_pointee(perms))
-                                    }
-                                };
-                                match crate::messaging::slack::SlackAdapter::new(
-                                    &slack_config.bot_token,
-                                    &slack_config.app_token,
-                                    perms,
-                                    slack_config.commands.clone(),
-                                ) {
-                                    Ok(adapter) => {
-                                        if let Err(error) = manager.register_and_start(adapter).await {
-                                            tracing::error!(%error, "failed to hot-start slack adapter from config change");
+                            && slack_config.enabled {
+                                if !slack_config.bot_token.is_empty()
+                                    && !slack_config.app_token.is_empty()
+                                    && !manager.has_adapter("slack").await
+                                {
+                                    let permissions = match slack_permissions {
+                                        Some(ref existing) => existing.clone(),
+                                        None => {
+                                            let permissions = SlackPermissions::from_config(slack_config, &config.bindings);
+                                            Arc::new(arc_swap::ArcSwap::from_pointee(permissions))
+                                        }
+                                    };
+                                    match crate::messaging::slack::SlackAdapter::new(
+                                        "slack",
+                                        &slack_config.bot_token,
+                                        &slack_config.app_token,
+                                        permissions,
+                                        slack_config.commands.clone(),
+                                    ) {
+                                        Ok(adapter) => {
+                                            if let Err(error) = manager.register_and_start(adapter).await {
+                                                tracing::error!(%error, "failed to hot-start slack adapter from config change");
+                                            }
+                                        }
+                                        Err(error) => {
+                                            tracing::error!(%error, "failed to build slack adapter from config change");
                                         }
                                     }
-                                    Err(error) => {
-                                        tracing::error!(%error, "failed to build slack adapter from config change");
+                                }
+
+                                for instance in slack_config.instances.iter().filter(|instance| instance.enabled) {
+                                    let runtime_key = binding_runtime_adapter_key(
+                                        "slack",
+                                        Some(instance.name.as_str()),
+                                    );
+                                    if manager.has_adapter(runtime_key.as_str()).await {
+                                        // TODO: named instance permissions not hot-updated (see discord block comment)
+                                        continue;
+                                    }
+
+                                    let permissions = Arc::new(arc_swap::ArcSwap::from_pointee(
+                                        SlackPermissions::from_instance_config(instance, &config.bindings),
+                                    ));
+                                    match crate::messaging::slack::SlackAdapter::new(
+                                        runtime_key,
+                                        &instance.bot_token,
+                                        &instance.app_token,
+                                        permissions,
+                                        instance.commands.clone(),
+                                    ) {
+                                        Ok(adapter) => {
+                                            if let Err(error) = manager.register_and_start(adapter).await {
+                                                tracing::error!(%error, adapter = %instance.name, "failed to hot-start named slack adapter from config change");
+                                            }
+                                        }
+                                        Err(error) => {
+                                            tracing::error!(%error, adapter = %instance.name, "failed to build named slack adapter from config change");
+                                        }
                                     }
                                 }
                             }
 
-                        // Telegram: start if enabled and not already running
+                        // Telegram: start default + named instances that are enabled and not already running.
                         if let Some(telegram_config) = &config.messaging.telegram
-                            && telegram_config.enabled && !manager.has_adapter("telegram").await {
-                                let perms = match telegram_permissions {
-                                    Some(ref existing) => existing.clone(),
-                                    None => {
-                                        let perms = TelegramPermissions::from_config(telegram_config, &config.bindings);
-                                        Arc::new(arc_swap::ArcSwap::from_pointee(perms))
+                            && telegram_config.enabled {
+                                if !telegram_config.token.is_empty()
+                                    && !manager.has_adapter("telegram").await
+                                {
+                                    let permissions = match telegram_permissions {
+                                        Some(ref existing) => existing.clone(),
+                                        None => {
+                                            let permissions = TelegramPermissions::from_config(telegram_config, &config.bindings);
+                                            Arc::new(arc_swap::ArcSwap::from_pointee(permissions))
+                                        }
+                                    };
+                                    let adapter = crate::messaging::telegram::TelegramAdapter::new(
+                                        "telegram",
+                                        &telegram_config.token,
+                                        permissions,
+                                    );
+                                    if let Err(error) = manager.register_and_start(adapter).await {
+                                        tracing::error!(%error, "failed to hot-start telegram adapter from config change");
                                     }
-                                };
-                                let adapter = crate::messaging::telegram::TelegramAdapter::new(
-                                    &telegram_config.token,
-                                    perms,
-                                );
-                                if let Err(error) = manager.register_and_start(adapter).await {
-                                    tracing::error!(%error, "failed to hot-start telegram adapter from config change");
+                                }
+
+                                for instance in telegram_config.instances.iter().filter(|instance| instance.enabled) {
+                                    let runtime_key = binding_runtime_adapter_key(
+                                        "telegram",
+                                        Some(instance.name.as_str()),
+                                    );
+                                    if manager.has_adapter(runtime_key.as_str()).await {
+                                        // TODO: named instance permissions not hot-updated (see discord block comment)
+                                        continue;
+                                    }
+
+                                    let permissions = Arc::new(arc_swap::ArcSwap::from_pointee(
+                                        TelegramPermissions::from_instance_config(instance, &config.bindings),
+                                    ));
+                                    let adapter = crate::messaging::telegram::TelegramAdapter::new(
+                                        runtime_key,
+                                        &instance.token,
+                                        permissions,
+                                    );
+                                    if let Err(error) = manager.register_and_start(adapter).await {
+                                        tracing::error!(%error, adapter = %instance.name, "failed to hot-start named telegram adapter from config change");
+                                    }
                                 }
                             }
 
-                        // Twitch: start if enabled and not already running
-                        if let Some(twitch_config) = &config.messaging.twitch
-                            && twitch_config.enabled && !manager.has_adapter("twitch").await {
-                                let perms = match twitch_permissions {
-                                    Some(ref existing) => existing.clone(),
-                                    None => {
-                                        let perms = TwitchPermissions::from_config(twitch_config, &config.bindings);
-                                        Arc::new(arc_swap::ArcSwap::from_pointee(perms))
+                        // Email: start default + named instances that are enabled and not already running.
+                        if let Some(email_config) = &config.messaging.email
+                            && email_config.enabled {
+                                if !email_config.imap_host.is_empty() && !manager.has_adapter("email").await {
+                                    match crate::messaging::email::EmailAdapter::from_config(email_config) {
+                                        Ok(adapter) => {
+                                            if let Err(error) = manager.register_and_start(adapter).await {
+                                                tracing::error!(%error, "failed to hot-start email adapter from config change");
+                                            }
+                                        }
+                                        Err(error) => {
+                                            tracing::error!(%error, "failed to build email adapter from config change");
+                                        }
                                     }
-                                };
-                                let token_path = instance_dir.join("twitch_token.json");
-                                let adapter = crate::messaging::twitch::TwitchAdapter::new(
-                                    &twitch_config.username,
-                                    &twitch_config.oauth_token,
-                                    twitch_config.client_id.clone(),
-                                    twitch_config.client_secret.clone(),
-                                    twitch_config.refresh_token.clone(),
-                                    Some(token_path),
-                                    twitch_config.channels.clone(),
-                                    twitch_config.trigger_prefix.clone(),
-                                    perms,
-                                );
-                                if let Err(error) = manager.register_and_start(adapter).await {
-                                    tracing::error!(%error, "failed to hot-start twitch adapter from config change");
+                                }
+
+                                for instance in email_config.instances.iter().filter(|instance| instance.enabled) {
+                                    let runtime_key = binding_runtime_adapter_key(
+                                        "email",
+                                        Some(instance.name.as_str()),
+                                    );
+                                    if manager.has_adapter(runtime_key.as_str()).await {
+                                        continue;
+                                    }
+
+                                    match crate::messaging::email::EmailAdapter::from_instance_config(
+                                        runtime_key.as_str(),
+                                        instance,
+                                    ) {
+                                        Ok(adapter) => {
+                                            if let Err(error) = manager.register_and_start(adapter).await {
+                                                tracing::error!(%error, adapter = %instance.name, "failed to hot-start named email adapter from config change");
+                                            }
+                                        }
+                                        Err(error) => {
+                                            tracing::error!(%error, adapter = %instance.name, "failed to build named email adapter from config change");
+                                        }
+                                    }
+                                }
+                            }
+
+                        // Twitch: start default + named instances that are enabled and not already running.
+                        if let Some(twitch_config) = &config.messaging.twitch
+                            && twitch_config.enabled {
+                                if !twitch_config.username.is_empty()
+                                    && !twitch_config.oauth_token.is_empty()
+                                    && !manager.has_adapter("twitch").await
+                                {
+                                    let permissions = match twitch_permissions {
+                                        Some(ref existing) => existing.clone(),
+                                        None => {
+                                            let permissions = TwitchPermissions::from_config(twitch_config, &config.bindings);
+                                            Arc::new(arc_swap::ArcSwap::from_pointee(permissions))
+                                        }
+                                    };
+                                    let token_path = instance_dir.join("twitch_token.json");
+                                    let adapter = crate::messaging::twitch::TwitchAdapter::new(
+                                        "twitch",
+                                        &twitch_config.username,
+                                        &twitch_config.oauth_token,
+                                        twitch_config.client_id.clone(),
+                                        twitch_config.client_secret.clone(),
+                                        twitch_config.refresh_token.clone(),
+                                        Some(token_path),
+                                        twitch_config.channels.clone(),
+                                        twitch_config.trigger_prefix.clone(),
+                                        permissions,
+                                    );
+                                    if let Err(error) = manager.register_and_start(adapter).await {
+                                        tracing::error!(%error, "failed to hot-start twitch adapter from config change");
+                                    }
+                                }
+
+                                for instance in twitch_config.instances.iter().filter(|instance| instance.enabled) {
+                                    let runtime_key = binding_runtime_adapter_key(
+                                        "twitch",
+                                        Some(instance.name.as_str()),
+                                    );
+                                    if manager.has_adapter(runtime_key.as_str()).await {
+                                        // TODO: named instance permissions not hot-updated (see discord block comment)
+                                        continue;
+                                    }
+
+                                    let token_file_name = {
+                                        use std::hash::{Hash, Hasher};
+                                        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                                        instance.name.hash(&mut hasher);
+                                        let name_hash = hasher.finish();
+                                        format!(
+                                            "twitch_token_{}_{name_hash:016x}.json",
+                                            instance
+                                                .name
+                                                .chars()
+                                                .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
+                                                .collect::<String>()
+                                        )
+                                    };
+                                    let token_path = instance_dir.join(token_file_name);
+                                    let permissions = Arc::new(arc_swap::ArcSwap::from_pointee(
+                                        TwitchPermissions::from_instance_config(instance, &config.bindings),
+                                    ));
+                                    let adapter = crate::messaging::twitch::TwitchAdapter::new(
+                                        runtime_key,
+                                        &instance.username,
+                                        &instance.oauth_token,
+                                        instance.client_id.clone(),
+                                        instance.client_secret.clone(),
+                                        instance.refresh_token.clone(),
+                                        Some(token_path),
+                                        instance.channels.clone(),
+                                        instance.trigger_prefix.clone(),
+                                        permissions,
+                                    );
+                                    if let Err(error) = manager.register_and_start(adapter).await {
+                                        tracing::error!(%error, adapter = %instance.name, "failed to hot-start named twitch adapter from config change");
+                                    }
                                 }
                             }
                     });
@@ -4425,11 +6128,14 @@ pub fn run_onboarding() -> anyhow::Result<Option<PathBuf>> {
         "DeepSeek",
         "xAI (Grok)",
         "Mistral AI",
+        "Gemini",
         "Ollama",
         "OpenCode Zen",
+        "OpenCode Go",
         "MiniMax",
         "Moonshot AI (Kimi)",
         "Z.AI Coding Plan",
+        "Kilo Gateway",
     ];
     let provider_idx = Select::new()
         .with_prompt("Which LLM provider do you want to use?")
@@ -4486,13 +6192,15 @@ pub fn run_onboarding() -> anyhow::Result<Option<PathBuf>> {
         10 => ("Google Gemini API key", "gemini_key", "gemini"),
         11 => ("Ollama base URL (optional)", "ollama_base_url", "ollama"),
         12 => ("OpenCode Zen API key", "opencode_zen_key", "opencode-zen"),
-        13 => ("MiniMax API key", "minimax_key", "minimax"),
-        14 => ("Moonshot API key", "moonshot_key", "moonshot"),
-        15 => (
+        13 => ("OpenCode Go API key", "opencode_go_key", "opencode-go"),
+        14 => ("MiniMax API key", "minimax_key", "minimax"),
+        15 => ("Moonshot API key", "moonshot_key", "moonshot"),
+        16 => (
             "Z.AI Coding Plan API key",
             "zai_coding_plan_key",
             "zai-coding-plan",
         ),
+        17 => ("Kilo Gateway API key", "kilo_key", "kilo"),
         _ => unreachable!(),
     };
     let is_secret = provider_id != "ollama";
@@ -4705,14 +6413,16 @@ mod tests {
 
     impl EnvGuard {
         fn new() -> Self {
-            const KEYS: [&str; 22] = [
+            const KEYS: [&str; 26] = [
                 "SPACEBOT_DIR",
                 "SPACEBOT_DEPLOYMENT",
                 "SPACEBOT_CRON_TIMEZONE",
+                "SPACEBOT_USER_TIMEZONE",
                 "ANTHROPIC_API_KEY",
                 "ANTHROPIC_OAUTH_TOKEN",
                 "OPENAI_API_KEY",
                 "OPENROUTER_API_KEY",
+                "KILO_API_KEY",
                 "ZHIPU_API_KEY",
                 "GROQ_API_KEY",
                 "TOGETHER_API_KEY",
@@ -4725,7 +6435,9 @@ mod tests {
                 "OLLAMA_API_KEY",
                 "OLLAMA_BASE_URL",
                 "OPENCODE_ZEN_API_KEY",
+                "OPENCODE_GO_API_KEY",
                 "MINIMAX_API_KEY",
+                "MINIMAX_CN_API_KEY",
                 "MOONSHOT_API_KEY",
                 "ZAI_CODING_PLAN_API_KEY",
             ];
@@ -4784,22 +6496,40 @@ api_key = "test-key"
         assert_eq!(result1.unwrap().api_type, ApiType::OpenAiCompletions);
 
         let toml2 = r#"
-api_type = "openai_responses"
-base_url = "https://api.openai.com"
+api_type = "openai_chat_completions"
+base_url = "https://api.example.com"
 api_key = "test-key"
 "#;
         let result2: StdResult<TomlProviderConfig, toml::de::Error> = toml::from_str(toml2);
         assert!(result2.is_ok(), "Error: {:?}", result2.err());
-        assert_eq!(result2.unwrap().api_type, ApiType::OpenAiResponses);
+        assert_eq!(result2.unwrap().api_type, ApiType::OpenAiChatCompletions);
 
         let toml3 = r#"
-api_type = "anthropic"
-base_url = "https://api.anthropic.com"
+api_type = "kilo_gateway"
+base_url = "https://api.kilo.ai/api/gateway"
 api_key = "test-key"
 "#;
         let result3: StdResult<TomlProviderConfig, toml::de::Error> = toml::from_str(toml3);
         assert!(result3.is_ok(), "Error: {:?}", result3.err());
-        assert_eq!(result3.unwrap().api_type, ApiType::Anthropic);
+        assert_eq!(result3.unwrap().api_type, ApiType::KiloGateway);
+
+        let toml4 = r#"
+api_type = "openai_responses"
+base_url = "https://api.openai.com"
+api_key = "test-key"
+"#;
+        let result4: StdResult<TomlProviderConfig, toml::de::Error> = toml::from_str(toml4);
+        assert!(result4.is_ok(), "Error: {:?}", result4.err());
+        assert_eq!(result4.unwrap().api_type, ApiType::OpenAiResponses);
+
+        let toml5 = r#"
+api_type = "anthropic"
+base_url = "https://api.anthropic.com"
+api_key = "test-key"
+"#;
+        let result5: StdResult<TomlProviderConfig, toml::de::Error> = toml::from_str(toml5);
+        assert!(result5.is_ok(), "Error: {:?}", result5.err());
+        assert_eq!(result5.unwrap().api_type, ApiType::Anthropic);
     }
 
     #[test]
@@ -4810,6 +6540,8 @@ api_key = "test-key"
         let error = result.unwrap_err();
         assert!(error.to_string().contains("invalid value"));
         assert!(error.to_string().contains("openai_completions"));
+        assert!(error.to_string().contains("openai_chat_completions"));
+        assert!(error.to_string().contains("kilo_gateway"));
         assert!(error.to_string().contains("openai_responses"));
         assert!(error.to_string().contains("anthropic"));
     }
@@ -5093,6 +6825,7 @@ bind = "127.0.0.1"
             enabled: true,
             bot_token: "xoxb-test".into(),
             app_token: "xapp-test".into(),
+            instances: vec![],
             dm_allowed_users,
             commands: vec![],
         }
@@ -5103,6 +6836,7 @@ bind = "127.0.0.1"
         Binding {
             agent_id: "test-agent".into(),
             channel: "slack".into(),
+            adapter: None,
             guild_id: None,
             workspace_id: workspace_id.map(String::from),
             chat_id: None,
@@ -5268,6 +7002,159 @@ id = "main"
     }
 
     #[test]
+    fn test_cron_timezone_invalid_default_uses_env_fallback() {
+        let _lock = env_test_lock()
+            .lock()
+            .expect("failed to lock env test mutex");
+        let _env = EnvGuard::new();
+
+        unsafe {
+            std::env::set_var(CRON_TIMEZONE_ENV_VAR, "Asia/Tokyo");
+        }
+
+        let toml = r#"
+[defaults]
+cron_timezone = "Not/A-Real-Tz"
+
+[[agents]]
+id = "main"
+"#;
+
+        let parsed: TomlConfig = toml::from_str(toml).expect("failed to parse test TOML");
+        let config = Config::from_toml(parsed, PathBuf::from(".")).expect("failed to build Config");
+        let resolved = config.agents[0].resolve(&config.instance_dir, &config.defaults);
+        assert_eq!(resolved.cron_timezone.as_deref(), Some("Asia/Tokyo"));
+    }
+
+    #[test]
+    fn test_user_timezone_resolution_precedence() {
+        let _lock = env_test_lock()
+            .lock()
+            .expect("failed to lock env test mutex");
+        let _env = EnvGuard::new();
+
+        unsafe {
+            std::env::set_var(USER_TIMEZONE_ENV_VAR, "Asia/Tokyo");
+        }
+
+        let toml = r#"
+[defaults]
+user_timezone = "America/New_York"
+
+[[agents]]
+id = "main"
+user_timezone = "Europe/Berlin"
+"#;
+
+        let parsed: TomlConfig = toml::from_str(toml).expect("failed to parse test TOML");
+        let config = Config::from_toml(parsed, PathBuf::from(".")).expect("failed to build Config");
+        let resolved = config.agents[0].resolve(&config.instance_dir, &config.defaults);
+        assert_eq!(resolved.user_timezone.as_deref(), Some("Europe/Berlin"));
+
+        let toml_without_agent_override = r#"
+[defaults]
+user_timezone = "America/New_York"
+
+[[agents]]
+id = "main"
+"#;
+        let parsed: TomlConfig =
+            toml::from_str(toml_without_agent_override).expect("failed to parse test TOML");
+        let config = Config::from_toml(parsed, PathBuf::from(".")).expect("failed to build Config");
+        let resolved = config.agents[0].resolve(&config.instance_dir, &config.defaults);
+        assert_eq!(resolved.user_timezone.as_deref(), Some("America/New_York"));
+
+        let toml_without_default = r#"
+[[agents]]
+id = "main"
+"#;
+        let parsed: TomlConfig =
+            toml::from_str(toml_without_default).expect("failed to parse test TOML");
+        let config = Config::from_toml(parsed, PathBuf::from(".")).expect("failed to build Config");
+        let resolved = config.agents[0].resolve(&config.instance_dir, &config.defaults);
+        assert_eq!(resolved.user_timezone.as_deref(), Some("Asia/Tokyo"));
+    }
+
+    #[test]
+    fn test_user_timezone_falls_back_to_cron_timezone() {
+        let _lock = env_test_lock()
+            .lock()
+            .expect("failed to lock env test mutex");
+        let _env = EnvGuard::new();
+
+        let toml = r#"
+[defaults]
+cron_timezone = "America/Los_Angeles"
+
+[[agents]]
+id = "main"
+"#;
+
+        let parsed: TomlConfig = toml::from_str(toml).expect("failed to parse test TOML");
+        let config = Config::from_toml(parsed, PathBuf::from(".")).expect("failed to build Config");
+        let resolved = config.agents[0].resolve(&config.instance_dir, &config.defaults);
+        assert_eq!(
+            resolved.cron_timezone.as_deref(),
+            Some("America/Los_Angeles")
+        );
+        assert_eq!(
+            resolved.user_timezone.as_deref(),
+            Some("America/Los_Angeles")
+        );
+    }
+
+    #[test]
+    fn test_user_timezone_invalid_falls_back_to_cron_timezone() {
+        let _lock = env_test_lock()
+            .lock()
+            .expect("failed to lock env test mutex");
+        let _env = EnvGuard::new();
+
+        let toml = r#"
+[defaults]
+cron_timezone = "America/Los_Angeles"
+user_timezone = "Not/A-Real-Tz"
+
+[[agents]]
+id = "main"
+"#;
+
+        let parsed: TomlConfig = toml::from_str(toml).expect("failed to parse test TOML");
+        let config = Config::from_toml(parsed, PathBuf::from(".")).expect("failed to build Config");
+        let resolved = config.agents[0].resolve(&config.instance_dir, &config.defaults);
+        assert_eq!(
+            resolved.user_timezone.as_deref(),
+            Some("America/Los_Angeles")
+        );
+    }
+
+    #[test]
+    fn test_user_timezone_invalid_config_uses_env_fallback() {
+        let _lock = env_test_lock()
+            .lock()
+            .expect("failed to lock env test mutex");
+        let _env = EnvGuard::new();
+
+        unsafe {
+            std::env::set_var(USER_TIMEZONE_ENV_VAR, "Asia/Tokyo");
+        }
+
+        let toml = r#"
+[defaults]
+cron_timezone = "America/Los_Angeles"
+user_timezone = "Not/A-Real-Tz"
+
+[[agents]]
+id = "main"
+"#;
+
+        let parsed: TomlConfig = toml::from_str(toml).expect("failed to parse test TOML");
+        let config = Config::from_toml(parsed, PathBuf::from(".")).expect("failed to build Config");
+        let resolved = config.agents[0].resolve(&config.instance_dir, &config.defaults);
+        assert_eq!(resolved.user_timezone.as_deref(), Some("Asia/Tokyo"));
+    }
+
+    #[test]
     fn ollama_base_url_registers_provider() {
         let toml = r#"
 [llm]
@@ -5331,6 +7218,15 @@ id = "main"
             .get("ollama")
             .expect("ollama provider should be registered");
         assert_eq!(provider.base_url, "http://remote-ollama:11434");
+    }
+
+    #[test]
+    fn default_provider_config_ollama_uses_base_url_and_empty_api_key() {
+        let provider = default_provider_config("ollama", "http://remote-ollama.local:11434")
+            .expect("ollama provider should be supported");
+        assert_eq!(provider.api_type, ApiType::OpenAiCompletions);
+        assert_eq!(provider.base_url, "http://remote-ollama.local:11434");
+        assert_eq!(provider.api_key, "");
     }
 
     #[test]
@@ -5529,6 +7425,7 @@ startup_delay_secs = 2
             ("anthropic_key", "test-key", "anthropic", "anthropic.com"),
             ("openai_key", "test-key", "openai", "openai.com"),
             ("openrouter_key", "test-key", "openrouter", "openrouter.ai"),
+            ("kilo_key", "test-key", "kilo", "api.kilo.ai"),
             ("deepseek_key", "test-key", "deepseek", "deepseek.com"),
             ("minimax_key", "test-key", "minimax", "minimax.io"),
             ("minimax_cn_key", "test-key", "minimax-cn", "minimaxi.com"),
@@ -5541,6 +7438,18 @@ startup_delay_secs = 2
             ("together_key", "test-key", "together", "together"),
             ("xai_key", "test-key", "xai", "x.ai"),
             ("mistral_key", "test-key", "mistral", "mistral.ai"),
+            (
+                "opencode_zen_key",
+                "test-key",
+                "opencode-zen",
+                "opencode.ai/zen",
+            ),
+            (
+                "opencode_go_key",
+                "test-key",
+                "opencode-go",
+                "opencode.ai/zen/go",
+            ),
             (
                 "ollama_base_url",
                 "http://localhost:11434",
@@ -5592,6 +7501,7 @@ startup_delay_secs = 2
                 "openrouter",
                 "openrouter.ai",
             ),
+            ("KILO_API_KEY", "test-key", "kilo", "api.kilo.ai"),
             ("DEEPSEEK_API_KEY", "test-key", "deepseek", "deepseek.com"),
             ("MINIMAX_API_KEY", "test-key", "minimax", "minimax.io"),
             ("NVIDIA_API_KEY", "test-key", "nvidia", "nvidia.com"),
@@ -5602,6 +7512,18 @@ startup_delay_secs = 2
             ("TOGETHER_API_KEY", "test-key", "together", "together"),
             ("XAI_API_KEY", "test-key", "xai", "x.ai"),
             ("MISTRAL_API_KEY", "test-key", "mistral", "mistral.ai"),
+            (
+                "OPENCODE_ZEN_API_KEY",
+                "test-key",
+                "opencode-zen",
+                "opencode.ai/zen",
+            ),
+            (
+                "OPENCODE_GO_API_KEY",
+                "test-key",
+                "opencode-go",
+                "opencode.ai/zen/go",
+            ),
             (
                 "OLLAMA_BASE_URL",
                 "http://localhost:11434",
@@ -5633,5 +7555,430 @@ startup_delay_secs = 2
                 provider.base_url
             );
         }
+    }
+
+    // --- Named Messaging Adapter Tests ---
+
+    #[test]
+    fn runtime_adapter_key_default() {
+        assert_eq!(binding_runtime_adapter_key("telegram", None), "telegram");
+    }
+
+    #[test]
+    fn runtime_adapter_key_named() {
+        assert_eq!(
+            binding_runtime_adapter_key("telegram", Some("support")),
+            "telegram:support"
+        );
+    }
+
+    #[test]
+    fn runtime_adapter_key_empty_name_is_default() {
+        assert_eq!(binding_runtime_adapter_key("discord", Some("")), "discord");
+    }
+
+    #[test]
+    fn binding_runtime_adapter_key_method() {
+        let binding = Binding {
+            agent_id: "main".into(),
+            channel: "telegram".into(),
+            adapter: Some("sales".into()),
+            guild_id: None,
+            workspace_id: None,
+            chat_id: None,
+            channel_ids: vec![],
+            require_mention: false,
+            dm_allowed_users: vec![],
+        };
+        assert_eq!(binding.runtime_adapter_key(), "telegram:sales");
+    }
+
+    #[test]
+    fn binding_uses_default_adapter() {
+        let binding = Binding {
+            agent_id: "main".into(),
+            channel: "discord".into(),
+            adapter: None,
+            guild_id: None,
+            workspace_id: None,
+            chat_id: None,
+            channel_ids: vec![],
+            require_mention: false,
+            dm_allowed_users: vec![],
+        };
+        assert!(binding.uses_default_adapter());
+    }
+
+    fn test_inbound_message(source: &str, adapter: Option<&str>) -> crate::InboundMessage {
+        crate::InboundMessage {
+            id: "test".into(),
+            source: source.into(),
+            adapter: adapter.map(String::from),
+            conversation_id: "conv".into(),
+            sender_id: "user1".into(),
+            agent_id: None,
+            content: crate::MessageContent::Text("hello".into()),
+            timestamp: chrono::Utc::now(),
+            metadata: Default::default(),
+            formatted_author: None,
+        }
+    }
+
+    #[test]
+    fn adapter_matches_default_binding_default_message() {
+        let binding = Binding {
+            agent_id: "main".into(),
+            channel: "telegram".into(),
+            adapter: None,
+            guild_id: None,
+            workspace_id: None,
+            chat_id: None,
+            channel_ids: vec![],
+            require_mention: false,
+            dm_allowed_users: vec![],
+        };
+        let message = test_inbound_message("telegram", None);
+        assert!(binding_adapter_matches(&binding, &message));
+    }
+
+    #[test]
+    fn adapter_matches_named_binding_named_message() {
+        let binding = Binding {
+            agent_id: "main".into(),
+            channel: "telegram".into(),
+            adapter: Some("support".into()),
+            guild_id: None,
+            workspace_id: None,
+            chat_id: None,
+            channel_ids: vec![],
+            require_mention: false,
+            dm_allowed_users: vec![],
+        };
+        let message = test_inbound_message("telegram", Some("telegram:support"));
+        assert!(binding_adapter_matches(&binding, &message));
+    }
+
+    #[test]
+    fn adapter_mismatch_named_vs_default() {
+        let binding = Binding {
+            agent_id: "main".into(),
+            channel: "telegram".into(),
+            adapter: Some("support".into()),
+            guild_id: None,
+            workspace_id: None,
+            chat_id: None,
+            channel_ids: vec![],
+            require_mention: false,
+            dm_allowed_users: vec![],
+        };
+        let message = test_inbound_message("telegram", None);
+        assert!(!binding_adapter_matches(&binding, &message));
+    }
+
+    #[test]
+    fn adapter_mismatch_default_vs_named() {
+        let binding = Binding {
+            agent_id: "main".into(),
+            channel: "telegram".into(),
+            adapter: None,
+            guild_id: None,
+            workspace_id: None,
+            chat_id: None,
+            channel_ids: vec![],
+            require_mention: false,
+            dm_allowed_users: vec![],
+        };
+        let message = test_inbound_message("telegram", Some("telegram:support"));
+        assert!(!binding_adapter_matches(&binding, &message));
+    }
+
+    #[test]
+    fn adapter_mismatch_different_names() {
+        let binding = Binding {
+            agent_id: "main".into(),
+            channel: "telegram".into(),
+            adapter: Some("support".into()),
+            guild_id: None,
+            workspace_id: None,
+            chat_id: None,
+            channel_ids: vec![],
+            require_mention: false,
+            dm_allowed_users: vec![],
+        };
+        let message = test_inbound_message("telegram", Some("telegram:sales"));
+        assert!(!binding_adapter_matches(&binding, &message));
+    }
+
+    #[test]
+    fn validate_named_adapters_valid_config() {
+        let messaging = MessagingConfig {
+            discord: None,
+            slack: None,
+            telegram: Some(TelegramConfig {
+                enabled: true,
+                token: "tok".into(),
+                instances: vec![TelegramInstanceConfig {
+                    name: "support".into(),
+                    enabled: true,
+                    token: "tok2".into(),
+                    dm_allowed_users: vec![],
+                }],
+                dm_allowed_users: vec![],
+            }),
+            email: None,
+            webhook: None,
+            twitch: None,
+        };
+        let bindings = vec![
+            Binding {
+                agent_id: "main".into(),
+                channel: "telegram".into(),
+                adapter: None,
+                guild_id: None,
+                workspace_id: None,
+                chat_id: None,
+                channel_ids: vec![],
+                require_mention: false,
+                dm_allowed_users: vec![],
+            },
+            Binding {
+                agent_id: "support-agent".into(),
+                channel: "telegram".into(),
+                adapter: Some("support".into()),
+                guild_id: None,
+                workspace_id: None,
+                chat_id: None,
+                channel_ids: vec![],
+                require_mention: false,
+                dm_allowed_users: vec![],
+            },
+        ];
+        assert!(validate_named_messaging_adapters(&messaging, &bindings).is_ok());
+    }
+
+    #[test]
+    fn validate_named_adapters_missing_instance() {
+        let messaging = MessagingConfig {
+            discord: None,
+            slack: None,
+            telegram: Some(TelegramConfig {
+                enabled: true,
+                token: "tok".into(),
+                instances: vec![],
+                dm_allowed_users: vec![],
+            }),
+            email: None,
+            webhook: None,
+            twitch: None,
+        };
+        let bindings = vec![Binding {
+            agent_id: "main".into(),
+            channel: "telegram".into(),
+            adapter: Some("nonexistent".into()),
+            guild_id: None,
+            workspace_id: None,
+            chat_id: None,
+            channel_ids: vec![],
+            require_mention: false,
+            dm_allowed_users: vec![],
+        }];
+        assert!(validate_named_messaging_adapters(&messaging, &bindings).is_err());
+    }
+
+    #[test]
+    fn validate_named_adapters_duplicate_names_rejected() {
+        let result = validate_instance_names("telegram", ["support", "support"].into_iter());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_named_adapters_empty_name_rejected() {
+        let result = validate_instance_names("telegram", [""].into_iter());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_named_adapters_default_name_rejected() {
+        let result = validate_instance_names("telegram", ["default"].into_iter());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_adapter_on_unsupported_platform_rejected() {
+        let messaging = MessagingConfig {
+            discord: None,
+            slack: None,
+            telegram: None,
+            email: Some(EmailConfig {
+                enabled: true,
+                imap_host: "imap.test.com".into(),
+                imap_port: 993,
+                imap_username: "user".into(),
+                imap_password: "pass".into(),
+                imap_use_tls: true,
+                smtp_host: "smtp.test.com".into(),
+                smtp_port: 587,
+                smtp_username: "user".into(),
+                smtp_password: "pass".into(),
+                smtp_use_starttls: true,
+                from_address: "bot@test.com".into(),
+                from_name: None,
+                poll_interval_secs: 60,
+                folders: vec![],
+                allowed_senders: vec![],
+                max_body_bytes: 1_000_000,
+                max_attachment_bytes: 10_000_000,
+                instances: vec![],
+            }),
+            webhook: None,
+            twitch: None,
+        };
+        let bindings = vec![Binding {
+            agent_id: "main".into(),
+            channel: "email".into(),
+            adapter: Some("named".into()),
+            guild_id: None,
+            workspace_id: None,
+            chat_id: None,
+            channel_ids: vec![],
+            require_mention: false,
+            dm_allowed_users: vec![],
+        }];
+        assert!(validate_named_messaging_adapters(&messaging, &bindings).is_err());
+    }
+
+    #[test]
+    fn validate_binding_without_default_adapter_rejected() {
+        let messaging = MessagingConfig {
+            discord: None,
+            slack: None,
+            telegram: Some(TelegramConfig {
+                enabled: true,
+                token: "".into(), // no default credential
+                instances: vec![TelegramInstanceConfig {
+                    name: "support".into(),
+                    enabled: true,
+                    token: "tok".into(),
+                    dm_allowed_users: vec![],
+                }],
+                dm_allowed_users: vec![],
+            }),
+            email: None,
+            webhook: None,
+            twitch: None,
+        };
+        // Binding targets default adapter, but no default credentials exist
+        let bindings = vec![Binding {
+            agent_id: "main".into(),
+            channel: "telegram".into(),
+            adapter: None,
+            guild_id: None,
+            workspace_id: None,
+            chat_id: None,
+            channel_ids: vec![],
+            require_mention: false,
+            dm_allowed_users: vec![],
+        }];
+        assert!(validate_named_messaging_adapters(&messaging, &bindings).is_err());
+    }
+
+    #[test]
+    fn inbound_message_adapter_selector_default() {
+        let message = test_inbound_message("telegram", None);
+        assert_eq!(message.adapter_selector(), None);
+    }
+
+    #[test]
+    fn inbound_message_adapter_selector_named() {
+        let message = test_inbound_message("telegram", Some("telegram:support"));
+        assert_eq!(message.adapter_selector(), Some("support"));
+    }
+
+    #[test]
+    fn inbound_message_adapter_key_default() {
+        let message = test_inbound_message("telegram", None);
+        assert_eq!(message.adapter_key(), "telegram");
+    }
+
+    #[test]
+    fn inbound_message_adapter_key_named() {
+        let message = test_inbound_message("telegram", Some("telegram:support"));
+        assert_eq!(message.adapter_key(), "telegram:support");
+    }
+
+    #[test]
+    fn toml_round_trip_with_named_instances() {
+        let _guard = env_test_lock().lock().unwrap();
+        let guard = EnvGuard::new();
+
+        let toml_content = r#"
+[messaging.telegram]
+enabled = true
+token = "default-token"
+
+[[messaging.telegram.instances]]
+name = "support"
+enabled = true
+token = "support-token"
+
+[[bindings]]
+agent_id = "main"
+channel = "telegram"
+
+[[bindings]]
+agent_id = "support-bot"
+channel = "telegram"
+adapter = "support"
+chat_id = "-100111"
+"#;
+        let config_path = guard.test_dir.join("config.toml");
+        std::fs::write(&config_path, toml_content).unwrap();
+
+        let config = Config::load_from_path(&config_path).unwrap();
+        let telegram = config.messaging.telegram.as_ref().unwrap();
+        assert_eq!(telegram.token, "default-token");
+        assert_eq!(telegram.instances.len(), 1);
+        assert_eq!(telegram.instances[0].name, "support");
+        assert_eq!(telegram.instances[0].token, "support-token");
+
+        assert_eq!(config.bindings.len(), 2);
+        assert!(config.bindings[0].adapter.is_none());
+        assert_eq!(config.bindings[1].adapter.as_deref(), Some("support"));
+        assert_eq!(config.bindings[1].chat_id.as_deref(), Some("-100111"));
+    }
+
+    #[test]
+    fn toml_backward_compat_no_adapter_field() {
+        let _guard = env_test_lock().lock().unwrap();
+        let guard = EnvGuard::new();
+
+        let toml_content = r#"
+[messaging.discord]
+enabled = true
+token = "my-discord-token"
+
+[[bindings]]
+agent_id = "main"
+channel = "discord"
+guild_id = "123456"
+"#;
+        let config_path = guard.test_dir.join("config.toml");
+        std::fs::write(&config_path, toml_content).unwrap();
+
+        let config = Config::load_from_path(&config_path).unwrap();
+        assert!(config.bindings[0].adapter.is_none());
+        assert_eq!(config.bindings[0].guild_id.as_deref(), Some("123456"));
+    }
+
+    #[test]
+    fn normalize_adapter_trims_and_clears_empty() {
+        assert_eq!(normalize_adapter(None), None);
+        assert_eq!(normalize_adapter(Some("".into())), None);
+        assert_eq!(normalize_adapter(Some("   ".into())), None);
+        assert_eq!(
+            normalize_adapter(Some(" support ".into())),
+            Some("support".into())
+        );
+        assert_eq!(normalize_adapter(Some("ops".into())), Some("ops".into()));
     }
 }

@@ -53,6 +53,7 @@ export interface WorkerStartedEvent {
 	channel_id: string | null;
 	worker_id: string;
 	task: string;
+	worker_type?: string;
 }
 
 export interface WorkerStatusEvent {
@@ -69,6 +70,7 @@ export interface WorkerCompletedEvent {
 	channel_id: string | null;
 	worker_id: string;
 	result: string;
+	success?: boolean;
 }
 
 export interface BranchStartedEvent {
@@ -94,6 +96,7 @@ export interface ToolStartedEvent {
 	process_type: ProcessType;
 	process_id: string;
 	tool_name: string;
+	args: string;
 }
 
 export interface ToolCompletedEvent {
@@ -103,6 +106,7 @@ export interface ToolCompletedEvent {
 	process_type: ProcessType;
 	process_id: string;
 	tool_name: string;
+	result: string;
 }
 
 export type ApiEvent =
@@ -193,6 +197,49 @@ export interface StatusBlockSnapshot {
 /** channel_id -> StatusBlockSnapshot */
 export type ChannelStatusResponse = Record<string, StatusBlockSnapshot>;
 
+// --- Workers API types ---
+
+export type ActionContent =
+	| { type: "text"; text: string }
+	| { type: "tool_call"; id: string; name: string; args: string };
+
+export type TranscriptStep =
+	| { type: "action"; content: ActionContent[] }
+	| { type: "tool_result"; call_id: string; name: string; text: string };
+
+export interface WorkerRunInfo {
+	id: string;
+	task: string;
+	status: string;
+	worker_type: string;
+	channel_id: string | null;
+	channel_name: string | null;
+	started_at: string;
+	completed_at: string | null;
+	has_transcript: boolean;
+	live_status: string | null;
+	tool_calls: number;
+}
+
+export interface WorkerDetailResponse {
+	id: string;
+	task: string;
+	result: string | null;
+	status: string;
+	worker_type: string;
+	channel_id: string | null;
+	channel_name: string | null;
+	started_at: string;
+	completed_at: string | null;
+	transcript: TranscriptStep[] | null;
+	tool_calls: number;
+}
+
+export interface WorkerListResponse {
+	workers: WorkerRunInfo[];
+	total: number;
+}
+
 export interface AgentInfo {
 	id: string;
 	display_name?: string;
@@ -273,6 +320,8 @@ export interface UpdateStatus {
 	release_notes: string | null;
 	deployment: Deployment;
 	can_apply: boolean;
+	cannot_apply_reason: string | null;
+	docker_image: string | null;
 	checked_at: string | null;
 	error: string | null;
 }
@@ -531,6 +580,11 @@ export interface BrowserSection {
 	evaluate_enabled: boolean;
 }
 
+export interface SandboxSection {
+	mode: "enabled" | "disabled";
+	writable_paths: string[];
+}
+
 export interface DiscordSection {
 	enabled: boolean;
 	allow_bot_messages: boolean;
@@ -547,6 +601,7 @@ export interface AgentConfigResponse {
 	memory_injection_overridden: boolean;
 	browser: BrowserSection;
 	discord: DiscordSection;
+	sandbox: SandboxSection;
 }
 
 // Partial update types - all fields are optional
@@ -623,6 +678,11 @@ export interface BrowserUpdate {
 	evaluate_enabled?: boolean;
 }
 
+export interface SandboxUpdate {
+	mode?: "enabled" | "disabled";
+	writable_paths?: string[];
+}
+
 export interface DiscordUpdate {
 	allow_bot_messages?: boolean;
 }
@@ -639,6 +699,7 @@ export interface AgentConfigUpdateRequest {
 	reset_memory_injection_override?: boolean;
 	browser?: BrowserUpdate;
 	discord?: DiscordUpdate;
+	sandbox?: SandboxUpdate;
 }
 
 // -- Cron Types --
@@ -697,6 +758,7 @@ export interface ProviderStatus {
 	openai: boolean;
 	openai_chatgpt: boolean;
 	openrouter: boolean;
+	kilo: boolean;
 	zhipu: boolean;
 	groq: boolean;
 	together: boolean;
@@ -707,6 +769,7 @@ export interface ProviderStatus {
 	gemini: boolean;
 	ollama: boolean;
 	opencode_zen: boolean;
+	opencode_go: boolean;
 	nvidia: boolean;
 	minimax: boolean;
 	minimax_cn: boolean;
@@ -796,6 +859,7 @@ export interface SkillInfo {
 	file_path: string;
 	base_dir: string;
 	source: "instance" | "workspace";
+	source_repo?: string;
 }
 
 export interface SkillsListResponse {
@@ -831,18 +895,86 @@ export interface RegistrySkill {
 	skillId: string;
 	name: string;
 	installs: number;
+	description?: string;
 	id?: string;
 }
 
 export interface RegistryBrowseResponse {
 	skills: RegistrySkill[];
 	has_more: boolean;
+	total?: number;
 }
 
 export interface RegistrySearchResponse {
 	skills: RegistrySkill[];
 	query: string;
 	count: number;
+}
+
+// -- Task Types --
+
+export type TaskStatus = "pending_approval" | "backlog" | "ready" | "in_progress" | "done";
+export type TaskPriority = "critical" | "high" | "medium" | "low";
+
+export interface TaskSubtask {
+	title: string;
+	completed: boolean;
+}
+
+export interface TaskItem {
+	id: string;
+	agent_id: string;
+	task_number: number;
+	title: string;
+	description?: string;
+	status: TaskStatus;
+	priority: TaskPriority;
+	subtasks: TaskSubtask[];
+	metadata: Record<string, unknown>;
+	source_memory_id?: string;
+	worker_id?: string;
+	created_by: string;
+	approved_at?: string;
+	approved_by?: string;
+	created_at: string;
+	updated_at: string;
+	completed_at?: string;
+}
+
+export interface TaskListResponse {
+	tasks: TaskItem[];
+}
+
+export interface TaskResponse {
+	task: TaskItem;
+}
+
+export interface TaskActionResponse {
+	success: boolean;
+	message: string;
+}
+
+export interface CreateTaskRequest {
+	title: string;
+	description?: string;
+	status?: TaskStatus;
+	priority?: TaskPriority;
+	subtasks?: TaskSubtask[];
+	metadata?: Record<string, unknown>;
+	source_memory_id?: string;
+	created_by?: string;
+}
+
+export interface UpdateTaskRequest {
+	title?: string;
+	description?: string;
+	status?: TaskStatus;
+	priority?: TaskPriority;
+	subtasks?: TaskSubtask[];
+	metadata?: Record<string, unknown>;
+	complete_subtask?: number;
+	worker_id?: string;
+	approved_by?: string;
 }
 
 // -- Messaging / Bindings Types --
@@ -852,17 +984,68 @@ export interface PlatformStatus {
 	enabled: boolean;
 }
 
+export interface AdapterInstanceStatus {
+	platform: string;
+	name: string | null;
+	runtime_key: string;
+	configured: boolean;
+	enabled: boolean;
+	binding_count: number;
+}
+
 export interface MessagingStatusResponse {
 	discord: PlatformStatus;
 	slack: PlatformStatus;
 	telegram: PlatformStatus;
 	webhook: PlatformStatus;
 	twitch: PlatformStatus;
+	email: PlatformStatus;
+	instances: AdapterInstanceStatus[];
+}
+
+export interface CreateMessagingInstanceRequest {
+	platform: string;
+	name?: string;
+	enabled?: boolean;
+	credentials: {
+		discord_token?: string;
+		slack_bot_token?: string;
+		slack_app_token?: string;
+		telegram_token?: string;
+		twitch_username?: string;
+		twitch_oauth_token?: string;
+		twitch_client_id?: string;
+		twitch_client_secret?: string;
+		twitch_refresh_token?: string;
+		email_imap_host?: string;
+		email_imap_port?: number;
+		email_imap_username?: string;
+		email_imap_password?: string;
+		email_smtp_host?: string;
+		email_smtp_port?: number;
+		email_smtp_username?: string;
+		email_smtp_password?: string;
+		email_from_address?: string;
+		webhook_port?: number;
+		webhook_bind?: string;
+		webhook_auth_token?: string;
+	};
+}
+
+export interface DeleteMessagingInstanceRequest {
+	platform: string;
+	name?: string;
+}
+
+export interface MessagingInstanceActionResponse {
+	success: boolean;
+	message: string;
 }
 
 export interface BindingInfo {
 	agent_id: string;
 	channel: string;
+	adapter: string | null;
 	guild_id: string | null;
 	workspace_id: string | null;
 	chat_id: string | null;
@@ -878,6 +1061,7 @@ export interface BindingsListResponse {
 export interface CreateBindingRequest {
 	agent_id: string;
 	channel: string;
+	adapter?: string;
 	guild_id?: string;
 	workspace_id?: string;
 	chat_id?: string;
@@ -888,6 +1072,17 @@ export interface CreateBindingRequest {
 		discord_token?: string;
 		slack_bot_token?: string;
 		slack_app_token?: string;
+		telegram_token?: string;
+		email_imap_host?: string;
+		email_imap_port?: number;
+		email_imap_username?: string;
+		email_imap_password?: string;
+		email_smtp_host?: string;
+		email_smtp_port?: number;
+		email_smtp_username?: string;
+		email_smtp_password?: string;
+		email_from_address?: string;
+		email_from_name?: string;
 		twitch_username?: string;
 		twitch_oauth_token?: string;
 		twitch_client_id?: string;
@@ -905,11 +1100,13 @@ export interface CreateBindingResponse {
 export interface UpdateBindingRequest {
 	original_agent_id: string;
 	original_channel: string;
+	original_adapter?: string;
 	original_guild_id?: string;
 	original_workspace_id?: string;
 	original_chat_id?: string;
 	agent_id: string;
 	channel: string;
+	adapter?: string;
 	guild_id?: string;
 	workspace_id?: string;
 	chat_id?: string;
@@ -926,6 +1123,7 @@ export interface UpdateBindingResponse {
 export interface DeleteBindingRequest {
 	agent_id: string;
 	channel: string;
+	adapter?: string;
 	guild_id?: string;
 	workspace_id?: string;
 	chat_id?: string;
@@ -1140,6 +1338,15 @@ export const api = {
 		return fetchJson<MessagesResponse>(`/channels/messages?${params}`);
 	},
 	channelStatus: () => fetchJson<ChannelStatusResponse>("/channels/status"),
+	workersList: (agentId: string, params: { limit?: number; offset?: number; status?: string } = {}) => {
+		const search = new URLSearchParams({ agent_id: agentId });
+		if (params.limit) search.set("limit", String(params.limit));
+		if (params.offset) search.set("offset", String(params.offset));
+		if (params.status) search.set("status", params.status);
+		return fetchJson<WorkerListResponse>(`/agents/workers?${search}`);
+	},
+	workerDetail: (agentId: string, workerId: string) =>
+		fetchJson<WorkerDetailResponse>(`/agents/workers/detail?agent_id=${encodeURIComponent(agentId)}&worker_id=${encodeURIComponent(workerId)}`),
 	agentMemories: (agentId: string, params: MemoriesListParams = {}) => {
 		const search = new URLSearchParams({ agent_id: agentId });
 		if (params.limit) search.set("limit", String(params.limit));
@@ -1475,11 +1682,13 @@ export const api = {
 		return response.json() as Promise<DeleteBindingResponse>;
 	},
 
-	togglePlatform: async (platform: string, enabled: boolean) => {
+	togglePlatform: async (platform: string, enabled: boolean, adapter?: string) => {
+		const body: Record<string, unknown> = { platform, enabled };
+		if (adapter) body.adapter = adapter;
 		const response = await fetch(`${API_BASE}/messaging/toggle`, {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({ platform, enabled }),
+			body: JSON.stringify(body),
 		});
 		if (!response.ok) {
 			throw new Error(`API error: ${response.status}`);
@@ -1487,16 +1696,42 @@ export const api = {
 		return response.json() as Promise<{ success: boolean; message: string }>;
 	},
 
-	disconnectPlatform: async (platform: string) => {
+	disconnectPlatform: async (platform: string, adapter?: string) => {
+		const body: Record<string, unknown> = { platform };
+		if (adapter) body.adapter = adapter;
 		const response = await fetch(`${API_BASE}/messaging/disconnect`, {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({ platform }),
+			body: JSON.stringify(body),
 		});
 		if (!response.ok) {
 			throw new Error(`API error: ${response.status}`);
 		}
 		return response.json() as Promise<{ success: boolean; message: string }>;
+	},
+
+	createMessagingInstance: async (request: CreateMessagingInstanceRequest) => {
+		const response = await fetch(`${API_BASE}/messaging/instances`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify(request),
+		});
+		if (!response.ok) {
+			throw new Error(`API error: ${response.status}`);
+		}
+		return response.json() as Promise<MessagingInstanceActionResponse>;
+	},
+
+	deleteMessagingInstance: async (request: DeleteMessagingInstanceRequest) => {
+		const response = await fetch(`${API_BASE}/messaging/instances`, {
+			method: "DELETE",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify(request),
+		});
+		if (!response.ok) {
+			throw new Error(`API error: ${response.status}`);
+		}
+		return response.json() as Promise<MessagingInstanceActionResponse>;
 	},
 
 	// Global Settings API
@@ -1713,6 +1948,60 @@ export const api = {
 
 	webChatHistory: (agentId: string, sessionId: string, limit = 100) =>
 		fetch(`${API_BASE}/webchat/history?agent_id=${encodeURIComponent(agentId)}&session_id=${encodeURIComponent(sessionId)}&limit=${limit}`),
+
+	// Tasks API
+	listTasks: (agentId: string, params?: { status?: TaskStatus; priority?: TaskPriority; limit?: number }) => {
+		const search = new URLSearchParams({ agent_id: agentId });
+		if (params?.status) search.set("status", params.status);
+		if (params?.priority) search.set("priority", params.priority);
+		if (params?.limit) search.set("limit", String(params.limit));
+		return fetchJson<TaskListResponse>(`/agents/tasks?${search}`);
+	},
+	getTask: (agentId: string, taskNumber: number) =>
+		fetchJson<TaskResponse>(`/agents/tasks/${taskNumber}?agent_id=${encodeURIComponent(agentId)}`),
+	createTask: async (agentId: string, request: CreateTaskRequest): Promise<TaskResponse> => {
+		const response = await fetch(`${API_BASE}/agents/tasks`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ ...request, agent_id: agentId }),
+		});
+		if (!response.ok) throw new Error(`API error: ${response.status}`);
+		return response.json() as Promise<TaskResponse>;
+	},
+	updateTask: async (agentId: string, taskNumber: number, request: UpdateTaskRequest): Promise<TaskResponse> => {
+		const response = await fetch(`${API_BASE}/agents/tasks/${taskNumber}`, {
+			method: "PUT",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ ...request, agent_id: agentId }),
+		});
+		if (!response.ok) throw new Error(`API error: ${response.status}`);
+		return response.json() as Promise<TaskResponse>;
+	},
+	deleteTask: async (agentId: string, taskNumber: number): Promise<TaskActionResponse> => {
+		const response = await fetch(`${API_BASE}/agents/tasks/${taskNumber}?agent_id=${encodeURIComponent(agentId)}`, {
+			method: "DELETE",
+		});
+		if (!response.ok) throw new Error(`API error: ${response.status}`);
+		return response.json() as Promise<TaskActionResponse>;
+	},
+	approveTask: async (agentId: string, taskNumber: number, approvedBy?: string): Promise<TaskResponse> => {
+		const response = await fetch(`${API_BASE}/agents/tasks/${taskNumber}/approve`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ agent_id: agentId, approved_by: approvedBy }),
+		});
+		if (!response.ok) throw new Error(`API error: ${response.status}`);
+		return response.json() as Promise<TaskResponse>;
+	},
+	executeTask: async (agentId: string, taskNumber: number): Promise<TaskResponse> => {
+		const response = await fetch(`${API_BASE}/agents/tasks/${taskNumber}/execute`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ agent_id: agentId }),
+		});
+		if (!response.ok) throw new Error(`API error: ${response.status}`);
+		return response.json() as Promise<TaskResponse>;
+	},
 
 	eventsUrl: `${API_BASE}/events`,
 };
