@@ -400,6 +400,8 @@ pub(super) async fn trigger_warmup(
         let llm_manager = llm_manager.clone();
         let force = request.force;
         let agent_id = agent_id.clone();
+        let task_store_registry = state.task_store_registry.clone();
+        let injection_tx = state.injection_tx.clone();
         tokio::spawn(async move {
             let (event_tx, _event_rx) = tokio::sync::broadcast::channel(16);
             let deps = crate::AgentDeps {
@@ -416,6 +418,8 @@ pub(super) async fn trigger_warmup(
                 task_store,
                 links: Arc::new(arc_swap::ArcSwap::from_pointee(Vec::new())),
                 agent_names: Arc::new(std::collections::HashMap::new()),
+                task_store_registry,
+                injection_tx,
             };
             let logger = CortexLogger::new(sqlite_pool);
             crate::agent::cortex::run_warmup_once(&deps, &logger, "api_trigger", force).await;
@@ -508,11 +512,36 @@ pub(super) async fn create_agent(
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
-    let defaults = state.defaults_config.read().await;
-    let defaults = defaults.as_ref().ok_or_else(|| {
-        tracing::error!("defaults config not available");
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+    // Read defaults directly from the config we just wrote to disk rather than
+    // relying on the cached `defaults_config` which may be stale (e.g. if a
+    // provider was configured but the in-memory cache wasn't refreshed yet).
+    let disk_defaults = match crate::config::Config::load_from_path(&config_path) {
+        Ok(fresh_config) => {
+            // Also update the in-memory cache so subsequent operations
+            // (e.g. creating another agent) don't hit stale defaults.
+            state
+                .set_defaults_config(fresh_config.defaults.clone())
+                .await;
+            Some(fresh_config.defaults)
+        }
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                "failed to reload config.toml for defaults; falling back to cached defaults"
+            );
+            None
+        }
+    };
+    let cached_defaults;
+    let defaults = if let Some(ref d) = disk_defaults {
+        d
+    } else {
+        cached_defaults = state.defaults_config.read().await;
+        cached_defaults.as_ref().ok_or_else(|| {
+            tracing::error!("defaults config not available");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+    };
 
     let raw_config = crate::config::AgentConfig {
         id: agent_id.clone(),
@@ -542,7 +571,6 @@ pub(super) async fn create_agent(
         cron: Vec::new(),
     };
     let agent_config = raw_config.resolve(&instance_dir, defaults);
-    let _ = defaults;
 
     for dir in [
         &agent_config.workspace,
@@ -628,7 +656,9 @@ pub(super) async fn create_agent(
             .clone()
     };
 
-    let defaults_for_runtime = {
+    let defaults_for_runtime = if let Some(d) = disk_defaults {
+        d
+    } else {
         let guard = state.defaults_config.read().await;
         guard
             .as_ref()
@@ -665,7 +695,7 @@ pub(super) async fn create_agent(
 
     let sandbox = std::sync::Arc::new(
         crate::sandbox::Sandbox::new(
-            &agent_config.sandbox,
+            runtime_config.sandbox.clone(),
             agent_config.workspace.clone(),
             &instance_dir,
             agent_config.data_dir.clone(),
@@ -691,6 +721,8 @@ pub(super) async fn create_agent(
         links: Arc::new(arc_swap::ArcSwap::from_pointee(
             (**state.agent_links.load()).clone(),
         )),
+        task_store_registry: state.task_store_registry.clone(),
+        injection_tx: state.injection_tx.clone(),
         agent_names: {
             let configs = state.agent_configs.load();
             let mut names: std::collections::HashMap<String, String> = configs
@@ -800,8 +832,14 @@ pub(super) async fn create_agent(
         state.memory_searches.store(std::sync::Arc::new(searches));
 
         let mut task_stores = (**state.task_stores.load()).clone();
-        task_stores.insert(agent_id.clone(), task_store);
+        task_stores.insert(agent_id.clone(), task_store.clone());
         state.task_stores.store(std::sync::Arc::new(task_stores));
+
+        let mut registry = (**state.task_store_registry.load()).clone();
+        registry.insert(agent_id.clone(), task_store);
+        state
+            .task_store_registry
+            .store(std::sync::Arc::new(registry));
 
         let mut workspaces = (**state.agent_workspaces.load()).clone();
         workspaces.insert(agent_id.clone(), agent_config.workspace.clone());
@@ -1453,10 +1491,16 @@ mod tests {
         let (agent_tx, _agent_rx) = tokio::sync::mpsc::channel(1);
         let (agent_remove_tx, _agent_remove_rx) = tokio::sync::mpsc::channel(1);
 
+        let (injection_tx, _injection_rx) = tokio::sync::mpsc::channel(1);
+        let task_store_registry = Arc::new(arc_swap::ArcSwap::from_pointee(
+            std::collections::HashMap::new(),
+        ));
         Arc::new(ApiState::new_with_provider_sender(
             provider_setup_tx,
             agent_tx,
             agent_remove_tx,
+            injection_tx,
+            task_store_registry,
         ))
     }
 

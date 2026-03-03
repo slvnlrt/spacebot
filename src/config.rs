@@ -2,6 +2,7 @@
 
 use crate::error::{ConfigError, Result};
 use crate::llm::routing::RoutingConfig;
+use crate::secrets::store::{InstancePattern, SecretField, SystemSecrets};
 use anyhow::Context as _;
 use arc_swap::ArcSwap;
 use chrono_tz::Tz;
@@ -183,6 +184,9 @@ pub struct ProviderConfig {
     /// Anthropic requests. Set automatically when the key originates from
     /// `ANTHROPIC_AUTH_TOKEN` (proxy-compatible auth).
     pub use_bearer_auth: bool,
+    /// Additional HTTP headers included in requests to this provider.
+    /// Currently applied in `call_openai()` (the `OpenAiCompletions` path).
+    pub extra_headers: Vec<(String, String)>,
 }
 
 impl std::fmt::Debug for ProviderConfig {
@@ -193,6 +197,14 @@ impl std::fmt::Debug for ProviderConfig {
             .field("api_key", &"[REDACTED]")
             .field("name", &self.name)
             .field("use_bearer_auth", &self.use_bearer_auth)
+            .field(
+                "extra_headers",
+                &self
+                    .extra_headers
+                    .iter()
+                    .map(|(key, _)| key.as_str())
+                    .collect::<Vec<_>>(),
+            )
             .finish()
     }
 }
@@ -325,6 +337,137 @@ impl LlmConfig {
     }
 }
 
+impl SystemSecrets for LlmConfig {
+    fn section() -> &'static str {
+        "llm"
+    }
+
+    fn secret_fields() -> &'static [SecretField] {
+        &[
+            SecretField {
+                toml_key: "anthropic_key",
+                secret_name: "ANTHROPIC_API_KEY",
+                instance_pattern: None,
+            },
+            SecretField {
+                toml_key: "anthropic_key",
+                secret_name: "ANTHROPIC_AUTH_TOKEN",
+                instance_pattern: None,
+            },
+            SecretField {
+                toml_key: "openai_key",
+                secret_name: "OPENAI_API_KEY",
+                instance_pattern: None,
+            },
+            SecretField {
+                toml_key: "openrouter_key",
+                secret_name: "OPENROUTER_API_KEY",
+                instance_pattern: None,
+            },
+            SecretField {
+                toml_key: "kilo_key",
+                secret_name: "KILO_API_KEY",
+                instance_pattern: None,
+            },
+            SecretField {
+                toml_key: "zhipu_key",
+                secret_name: "ZHIPU_API_KEY",
+                instance_pattern: None,
+            },
+            SecretField {
+                toml_key: "groq_key",
+                secret_name: "GROQ_API_KEY",
+                instance_pattern: None,
+            },
+            SecretField {
+                toml_key: "together_key",
+                secret_name: "TOGETHER_API_KEY",
+                instance_pattern: None,
+            },
+            SecretField {
+                toml_key: "fireworks_key",
+                secret_name: "FIREWORKS_API_KEY",
+                instance_pattern: None,
+            },
+            SecretField {
+                toml_key: "deepseek_key",
+                secret_name: "DEEPSEEK_API_KEY",
+                instance_pattern: None,
+            },
+            SecretField {
+                toml_key: "xai_key",
+                secret_name: "XAI_API_KEY",
+                instance_pattern: None,
+            },
+            SecretField {
+                toml_key: "mistral_key",
+                secret_name: "MISTRAL_API_KEY",
+                instance_pattern: None,
+            },
+            SecretField {
+                toml_key: "gemini_key",
+                secret_name: "GEMINI_API_KEY",
+                instance_pattern: None,
+            },
+            SecretField {
+                toml_key: "gemini_key",
+                secret_name: "GOOGLE_API_KEY",
+                instance_pattern: None,
+            },
+            SecretField {
+                toml_key: "ollama_key",
+                secret_name: "OLLAMA_API_KEY",
+                instance_pattern: None,
+            },
+            SecretField {
+                toml_key: "opencode_zen_key",
+                secret_name: "OPENCODE_ZEN_API_KEY",
+                instance_pattern: None,
+            },
+            SecretField {
+                toml_key: "opencode_go_key",
+                secret_name: "OPENCODE_GO_API_KEY",
+                instance_pattern: None,
+            },
+            SecretField {
+                toml_key: "nvidia_key",
+                secret_name: "NVIDIA_API_KEY",
+                instance_pattern: None,
+            },
+            SecretField {
+                toml_key: "minimax_key",
+                secret_name: "MINIMAX_API_KEY",
+                instance_pattern: None,
+            },
+            SecretField {
+                toml_key: "minimax_cn_key",
+                secret_name: "MINIMAX_CN_API_KEY",
+                instance_pattern: None,
+            },
+            SecretField {
+                toml_key: "moonshot_key",
+                secret_name: "MOONSHOT_API_KEY",
+                instance_pattern: None,
+            },
+            SecretField {
+                toml_key: "zai_coding_plan_key",
+                secret_name: "ZAI_CODING_PLAN_API_KEY",
+                instance_pattern: None,
+            },
+            SecretField {
+                toml_key: "cerebras_key",
+                secret_name: "CEREBRAS_API_KEY",
+                instance_pattern: None,
+            },
+            SecretField {
+                toml_key: "sambanova_key",
+                secret_name: "SAMBANOVA_API_KEY",
+                instance_pattern: None,
+            },
+        ]
+    }
+}
+
 const ANTHROPIC_PROVIDER_BASE_URL: &str = "https://api.anthropic.com";
 const OPENAI_PROVIDER_BASE_URL: &str = "https://api.openai.com";
 const OPENROUTER_PROVIDER_BASE_URL: &str = "https://openrouter.ai/api";
@@ -348,6 +491,19 @@ const FIREWORKS_PROVIDER_BASE_URL: &str = "https://api.fireworks.ai/inference";
 pub(crate) const GEMINI_PROVIDER_BASE_URL: &str =
     "https://generativelanguage.googleapis.com/v1beta/openai";
 
+/// App attribution headers sent with every OpenRouter API request.
+/// See <https://openrouter.ai/docs/app-attribution>.
+fn openrouter_extra_headers() -> Vec<(String, String)> {
+    vec![
+        ("HTTP-Referer".into(), "https://spacebot.sh/".into()),
+        ("X-OpenRouter-Title".into(), "Spacebot".into()),
+        (
+            "X-OpenRouter-Categories".into(),
+            "cloud-agent,cli-agent".into(),
+        ),
+    ]
+}
+
 /// Returns the default ProviderConfig for a provider ID and API key.
 /// Used by API tests and other code that needs provider configs without duplicating metadata.
 pub(crate) fn default_provider_config(
@@ -362,6 +518,7 @@ pub(crate) fn default_provider_config(
             api_key,
             name: None,
             use_bearer_auth: false,
+            extra_headers: vec![],
         },
         "openai" => ProviderConfig {
             api_type: ApiType::OpenAiCompletions,
@@ -369,6 +526,7 @@ pub(crate) fn default_provider_config(
             api_key,
             name: None,
             use_bearer_auth: false,
+            extra_headers: vec![],
         },
         "openrouter" => ProviderConfig {
             api_type: ApiType::OpenAiCompletions,
@@ -376,6 +534,7 @@ pub(crate) fn default_provider_config(
             api_key,
             name: None,
             use_bearer_auth: false,
+            extra_headers: openrouter_extra_headers(),
         },
         "kilo" => ProviderConfig {
             api_type: ApiType::KiloGateway,
@@ -383,6 +542,7 @@ pub(crate) fn default_provider_config(
             api_key,
             name: Some("Kilo Gateway".to_string()),
             use_bearer_auth: false,
+            extra_headers: vec![],
         },
         "zhipu" => ProviderConfig {
             api_type: ApiType::OpenAiChatCompletions,
@@ -390,6 +550,7 @@ pub(crate) fn default_provider_config(
             api_key,
             name: Some("Z.AI (GLM)".to_string()),
             use_bearer_auth: false,
+            extra_headers: vec![],
         },
         "groq" => ProviderConfig {
             api_type: ApiType::OpenAiCompletions,
@@ -397,6 +558,7 @@ pub(crate) fn default_provider_config(
             api_key,
             name: None,
             use_bearer_auth: false,
+            extra_headers: vec![],
         },
         "together" => ProviderConfig {
             api_type: ApiType::OpenAiCompletions,
@@ -404,6 +566,7 @@ pub(crate) fn default_provider_config(
             api_key,
             name: None,
             use_bearer_auth: false,
+            extra_headers: vec![],
         },
         "fireworks" => ProviderConfig {
             api_type: ApiType::OpenAiCompletions,
@@ -411,6 +574,7 @@ pub(crate) fn default_provider_config(
             api_key,
             name: None,
             use_bearer_auth: false,
+            extra_headers: vec![],
         },
         "deepseek" => ProviderConfig {
             api_type: ApiType::OpenAiCompletions,
@@ -418,6 +582,7 @@ pub(crate) fn default_provider_config(
             api_key,
             name: None,
             use_bearer_auth: false,
+            extra_headers: vec![],
         },
         "xai" => ProviderConfig {
             api_type: ApiType::OpenAiCompletions,
@@ -425,6 +590,7 @@ pub(crate) fn default_provider_config(
             api_key,
             name: None,
             use_bearer_auth: false,
+            extra_headers: vec![],
         },
         "mistral" => ProviderConfig {
             api_type: ApiType::OpenAiCompletions,
@@ -432,6 +598,7 @@ pub(crate) fn default_provider_config(
             api_key,
             name: None,
             use_bearer_auth: false,
+            extra_headers: vec![],
         },
         "gemini" => ProviderConfig {
             api_type: ApiType::Gemini,
@@ -439,6 +606,7 @@ pub(crate) fn default_provider_config(
             api_key,
             name: None,
             use_bearer_auth: false,
+            extra_headers: vec![],
         },
         "ollama" => ProviderConfig {
             api_type: ApiType::OpenAiCompletions,
@@ -446,6 +614,7 @@ pub(crate) fn default_provider_config(
             api_key: String::new(),
             name: None,
             use_bearer_auth: false,
+            extra_headers: vec![],
         },
         "opencode-zen" => ProviderConfig {
             api_type: ApiType::OpenAiCompletions,
@@ -453,6 +622,7 @@ pub(crate) fn default_provider_config(
             api_key,
             name: None,
             use_bearer_auth: false,
+            extra_headers: vec![],
         },
         "opencode-go" => ProviderConfig {
             api_type: ApiType::OpenAiCompletions,
@@ -460,6 +630,7 @@ pub(crate) fn default_provider_config(
             api_key,
             name: None,
             use_bearer_auth: false,
+            extra_headers: vec![],
         },
         "nvidia" => ProviderConfig {
             api_type: ApiType::OpenAiCompletions,
@@ -467,6 +638,7 @@ pub(crate) fn default_provider_config(
             api_key,
             name: None,
             use_bearer_auth: false,
+            extra_headers: vec![],
         },
         "minimax" => ProviderConfig {
             api_type: ApiType::Anthropic,
@@ -474,6 +646,7 @@ pub(crate) fn default_provider_config(
             api_key,
             name: None,
             use_bearer_auth: false,
+            extra_headers: vec![],
         },
         "minimax-cn" => ProviderConfig {
             api_type: ApiType::Anthropic,
@@ -481,6 +654,7 @@ pub(crate) fn default_provider_config(
             api_key,
             name: None,
             use_bearer_auth: false,
+            extra_headers: vec![],
         },
         "moonshot" => ProviderConfig {
             api_type: ApiType::OpenAiCompletions,
@@ -488,6 +662,7 @@ pub(crate) fn default_provider_config(
             api_key,
             name: None,
             use_bearer_auth: false,
+            extra_headers: vec![],
         },
         "zai-coding-plan" => ProviderConfig {
             api_type: ApiType::OpenAiChatCompletions,
@@ -495,6 +670,7 @@ pub(crate) fn default_provider_config(
             api_key,
             name: Some("Z.AI Coding Plan".to_string()),
             use_bearer_auth: false,
+            extra_headers: vec![],
         },
         _ => return None,
     })
@@ -518,6 +694,7 @@ fn add_shorthand_provider(
                 api_key,
                 name: name.map(str::to_string),
                 use_bearer_auth,
+                extra_headers: vec![],
             });
     }
 }
@@ -582,6 +759,20 @@ impl std::fmt::Debug for DefaultsConfig {
             .field("opencode", &self.opencode)
             .field("worker_log_mode", &self.worker_log_mode)
             .finish()
+    }
+}
+
+impl SystemSecrets for DefaultsConfig {
+    fn section() -> &'static str {
+        "defaults"
+    }
+
+    fn secret_fields() -> &'static [SecretField] {
+        &[SecretField {
+            toml_key: "brave_search_key",
+            secret_name: "BRAVE_SEARCH_API_KEY",
+            instance_pattern: None,
+        }]
     }
 }
 
@@ -726,6 +917,9 @@ pub struct BrowserConfig {
     pub executable_path: Option<String>,
     /// Directory for storing screenshots and other browser artifacts.
     pub screenshot_dir: Option<PathBuf>,
+    /// Directory for caching a fetcher-downloaded Chromium binary.
+    /// Populated from `{instance_dir}/chrome_cache` during config resolution.
+    pub chrome_cache_dir: PathBuf,
 }
 
 impl Default for BrowserConfig {
@@ -736,6 +930,7 @@ impl Default for BrowserConfig {
             evaluate_enabled: false,
             executable_path: None,
             screenshot_dir: None,
+            chrome_cache_dir: PathBuf::from("chrome_cache"),
         }
     }
 }
@@ -1768,6 +1963,27 @@ impl std::fmt::Debug for DiscordConfig {
     }
 }
 
+impl SystemSecrets for DiscordConfig {
+    fn section() -> &'static str {
+        "discord"
+    }
+
+    fn is_messaging_adapter() -> bool {
+        true
+    }
+
+    fn secret_fields() -> &'static [SecretField] {
+        &[SecretField {
+            toml_key: "token",
+            secret_name: "DISCORD_BOT_TOKEN",
+            instance_pattern: Some(InstancePattern {
+                platform_prefix: "DISCORD",
+                field_suffix: "BOT_TOKEN",
+            }),
+        }]
+    }
+}
+
 /// A single slash command definition for the Slack adapter.
 ///
 /// Maps a Slack slash command (e.g. `/ask`) to a target agent.
@@ -1830,6 +2046,37 @@ impl std::fmt::Debug for SlackConfig {
             .field("dm_allowed_users", &self.dm_allowed_users)
             .field("commands", &self.commands)
             .finish()
+    }
+}
+
+impl SystemSecrets for SlackConfig {
+    fn section() -> &'static str {
+        "slack"
+    }
+
+    fn is_messaging_adapter() -> bool {
+        true
+    }
+
+    fn secret_fields() -> &'static [SecretField] {
+        &[
+            SecretField {
+                toml_key: "bot_token",
+                secret_name: "SLACK_BOT_TOKEN",
+                instance_pattern: Some(InstancePattern {
+                    platform_prefix: "SLACK",
+                    field_suffix: "BOT_TOKEN",
+                }),
+            },
+            SecretField {
+                toml_key: "app_token",
+                secret_name: "SLACK_APP_TOKEN",
+                instance_pattern: Some(InstancePattern {
+                    platform_prefix: "SLACK",
+                    field_suffix: "APP_TOKEN",
+                }),
+            },
+        ]
     }
 }
 
@@ -2064,6 +2311,27 @@ impl std::fmt::Debug for TelegramConfig {
     }
 }
 
+impl SystemSecrets for TelegramConfig {
+    fn section() -> &'static str {
+        "telegram"
+    }
+
+    fn is_messaging_adapter() -> bool {
+        true
+    }
+
+    fn secret_fields() -> &'static [SecretField] {
+        &[SecretField {
+            toml_key: "token",
+            secret_name: "TELEGRAM_BOT_TOKEN",
+            instance_pattern: Some(InstancePattern {
+                platform_prefix: "TELEGRAM",
+                field_suffix: "BOT_TOKEN",
+            }),
+        }]
+    }
+}
+
 #[derive(Clone)]
 pub struct EmailConfig {
     pub enabled: bool,
@@ -2159,6 +2427,53 @@ impl std::fmt::Debug for EmailConfig {
             .field("max_body_bytes", &self.max_body_bytes)
             .field("max_attachment_bytes", &self.max_attachment_bytes)
             .finish()
+    }
+}
+
+impl SystemSecrets for EmailConfig {
+    fn section() -> &'static str {
+        "email"
+    }
+
+    fn is_messaging_adapter() -> bool {
+        true
+    }
+
+    fn secret_fields() -> &'static [SecretField] {
+        &[
+            SecretField {
+                toml_key: "imap_username",
+                secret_name: "EMAIL_IMAP_USERNAME",
+                instance_pattern: Some(InstancePattern {
+                    platform_prefix: "EMAIL",
+                    field_suffix: "IMAP_USERNAME",
+                }),
+            },
+            SecretField {
+                toml_key: "imap_password",
+                secret_name: "EMAIL_IMAP_PASSWORD",
+                instance_pattern: Some(InstancePattern {
+                    platform_prefix: "EMAIL",
+                    field_suffix: "IMAP_PASSWORD",
+                }),
+            },
+            SecretField {
+                toml_key: "smtp_username",
+                secret_name: "EMAIL_SMTP_USERNAME",
+                instance_pattern: Some(InstancePattern {
+                    platform_prefix: "EMAIL",
+                    field_suffix: "SMTP_USERNAME",
+                }),
+            },
+            SecretField {
+                toml_key: "smtp_password",
+                secret_name: "EMAIL_SMTP_PASSWORD",
+                instance_pattern: Some(InstancePattern {
+                    platform_prefix: "EMAIL",
+                    field_suffix: "SMTP_PASSWORD",
+                }),
+            },
+        ]
     }
 }
 
@@ -2298,6 +2613,53 @@ impl std::fmt::Debug for TwitchConfig {
             .field("channels", &self.channels)
             .field("trigger_prefix", &self.trigger_prefix)
             .finish()
+    }
+}
+
+impl SystemSecrets for TwitchConfig {
+    fn section() -> &'static str {
+        "twitch"
+    }
+
+    fn is_messaging_adapter() -> bool {
+        true
+    }
+
+    fn secret_fields() -> &'static [SecretField] {
+        &[
+            SecretField {
+                toml_key: "oauth_token",
+                secret_name: "TWITCH_OAUTH_TOKEN",
+                instance_pattern: Some(InstancePattern {
+                    platform_prefix: "TWITCH",
+                    field_suffix: "OAUTH_TOKEN",
+                }),
+            },
+            SecretField {
+                toml_key: "client_id",
+                secret_name: "TWITCH_CLIENT_ID",
+                instance_pattern: Some(InstancePattern {
+                    platform_prefix: "TWITCH",
+                    field_suffix: "CLIENT_ID",
+                }),
+            },
+            SecretField {
+                toml_key: "client_secret",
+                secret_name: "TWITCH_CLIENT_SECRET",
+                instance_pattern: Some(InstancePattern {
+                    platform_prefix: "TWITCH",
+                    field_suffix: "CLIENT_SECRET",
+                }),
+            },
+            SecretField {
+                toml_key: "refresh_token",
+                secret_name: "TWITCH_REFRESH_TOKEN",
+                instance_pattern: Some(InstancePattern {
+                    platform_prefix: "TWITCH",
+                    field_suffix: "REFRESH_TOKEN",
+                }),
+            },
+        ]
     }
 }
 
@@ -3098,13 +3460,43 @@ struct TomlBinding {
     dm_allowed_users: Vec<String>,
 }
 
-/// Resolve a value that might be an "env:VAR_NAME" reference.
+/// Resolve a value that might be an "env:VAR_NAME" or "secret:NAME" reference.
+///
+/// Three resolution modes:
+/// - `secret:NAME` — look up from the secrets store (if available).
+/// - `env:VAR_NAME` — read from system environment variable.
+/// - Anything else — literal value.
 fn resolve_env_value(value: &str) -> Option<String> {
-    if let Some(var_name) = value.strip_prefix("env:") {
+    if let Some(alias) = value.strip_prefix("secret:") {
+        let guard = RESOLVE_SECRETS_STORE.load();
+        match (*guard).as_ref() {
+            Some(store) => match store.get(alias) {
+                Ok(secret) => Some(secret.expose().to_string()),
+                Err(error) => {
+                    tracing::warn!(%error, alias, "failed to resolve secret: reference");
+                    None
+                }
+            },
+            None => None,
+        }
+    } else if let Some(var_name) = value.strip_prefix("env:") {
         std::env::var(var_name).ok()
     } else {
         Some(value.to_string())
     }
+}
+
+/// Process-wide reference to the secrets store for use during config resolution.
+///
+/// Uses `ArcSwap` so it is accessible from any thread (file watcher, API
+/// handlers, tokio workers) without the thread-affinity issues of a thread-local.
+static RESOLVE_SECRETS_STORE: std::sync::LazyLock<
+    arc_swap::ArcSwap<Option<std::sync::Arc<crate::secrets::store::SecretsStore>>>,
+> = std::sync::LazyLock::new(|| arc_swap::ArcSwap::from_pointee(None));
+
+/// Set the secrets store for config resolution (process-wide, any thread).
+pub fn set_resolve_secrets_store(store: std::sync::Arc<crate::secrets::store::SecretsStore>) {
+    RESOLVE_SECRETS_STORE.store(std::sync::Arc::new(Some(store)));
 }
 
 fn normalize_timezone(value: &str) -> Option<String> {
@@ -3262,6 +3654,55 @@ fn parse_mcp_server_config(raw: TomlMcpServerConfig) -> Result<McpServerConfig> 
         transport,
         enabled: raw.enabled,
     })
+}
+
+/// When `[defaults.routing]` is absent from the config file, pick routing
+/// defaults based on which provider the user actually has configured.  This
+/// avoids the common pitfall where a user sets up OpenRouter (or another
+/// non-Anthropic provider) but new agents still default to
+/// `anthropic/claude-sonnet-4` and every LLM call fails.
+///
+/// Provider priority: first-party Anthropic first, then major gateways,
+/// then smaller providers. If the user only has one provider configured
+/// this always picks the right one.
+fn infer_routing_from_providers(
+    providers: &std::collections::HashMap<String, ProviderConfig>,
+) -> Option<crate::llm::routing::RoutingConfig> {
+    const PRIORITY: &[&str] = &[
+        "anthropic",
+        "openrouter",
+        "kilo",
+        "openai",
+        "openai-chatgpt",
+        "deepseek",
+        "gemini",
+        "xai",
+        "groq",
+        "together",
+        "fireworks",
+        "mistral",
+        "zhipu",
+        "ollama",
+        "opencode-zen",
+        "opencode-go",
+        "nvidia",
+        "minimax",
+        "minimax-cn",
+        "moonshot",
+        "zai-coding-plan",
+    ];
+
+    for &name in PRIORITY {
+        if providers.contains_key(name) {
+            return Some(crate::llm::routing::defaults_for_provider(name));
+        }
+    }
+
+    // Fall back to the first provider in the map (covers custom providers).
+    providers
+        .keys()
+        .next()
+        .map(|name| crate::llm::routing::defaults_for_provider(name))
 }
 
 /// Resolve a TomlRoutingConfig against a base RoutingConfig.
@@ -3479,6 +3920,7 @@ impl Config {
                     api_key: anthropic_key,
                     name: None,
                     use_bearer_auth: anthropic_from_auth_token,
+                    extra_headers: vec![],
                 });
         }
 
@@ -3491,6 +3933,7 @@ impl Config {
                     api_key: openrouter_key,
                     name: None,
                     use_bearer_auth: false,
+                    extra_headers: openrouter_extra_headers(),
                 });
         }
 
@@ -3551,6 +3994,7 @@ impl Config {
                     api_key: minimax_key,
                     name: None,
                     use_bearer_auth: false,
+                    extra_headers: vec![],
                 });
         }
 
@@ -3563,6 +4007,7 @@ impl Config {
                     api_key: minimax_cn_key,
                     name: None,
                     use_bearer_auth: false,
+                    extra_headers: vec![],
                 });
         }
 
@@ -3575,6 +4020,7 @@ impl Config {
                     api_key: openai_key,
                     name: None,
                     use_bearer_auth: false,
+                    extra_headers: vec![],
                 });
         }
 
@@ -3587,6 +4033,7 @@ impl Config {
                     api_key: openrouter_key,
                     name: None,
                     use_bearer_auth: false,
+                    extra_headers: openrouter_extra_headers(),
                 });
         }
 
@@ -3627,6 +4074,7 @@ impl Config {
                     api_key: opencode_zen_key,
                     name: None,
                     use_bearer_auth: false,
+                    extra_headers: vec![],
                 });
         }
 
@@ -3639,6 +4087,7 @@ impl Config {
                     api_key: opencode_go_key,
                     name: None,
                     use_bearer_auth: false,
+                    extra_headers: vec![],
                 });
         }
 
@@ -3651,6 +4100,7 @@ impl Config {
                     api_key: minimax_key,
                     name: None,
                     use_bearer_auth: false,
+                    extra_headers: vec![],
                 });
         }
 
@@ -3663,6 +4113,7 @@ impl Config {
                     api_key: minimax_cn_key,
                     name: None,
                     use_bearer_auth: false,
+                    extra_headers: vec![],
                 });
         }
 
@@ -3675,6 +4126,7 @@ impl Config {
                     api_key: moonshot_key,
                     name: None,
                     use_bearer_auth: false,
+                    extra_headers: vec![],
                 });
         }
 
@@ -3687,6 +4139,7 @@ impl Config {
                     api_key: nvidia_key,
                     name: None,
                     use_bearer_auth: false,
+                    extra_headers: vec![],
                 });
         }
 
@@ -3699,6 +4152,7 @@ impl Config {
                     api_key: fireworks_key,
                     name: None,
                     use_bearer_auth: false,
+                    extra_headers: vec![],
                 });
         }
 
@@ -3711,6 +4165,7 @@ impl Config {
                     api_key: deepseek_key,
                     name: None,
                     use_bearer_auth: false,
+                    extra_headers: vec![],
                 });
         }
 
@@ -3723,6 +4178,7 @@ impl Config {
                     api_key: gemini_key,
                     name: None,
                     use_bearer_auth: false,
+                    extra_headers: vec![],
                 });
         }
 
@@ -3735,6 +4191,7 @@ impl Config {
                     api_key: groq_key,
                     name: None,
                     use_bearer_auth: false,
+                    extra_headers: vec![],
                 });
         }
 
@@ -3747,6 +4204,7 @@ impl Config {
                     api_key: together_key,
                     name: None,
                     use_bearer_auth: false,
+                    extra_headers: vec![],
                 });
         }
 
@@ -3759,6 +4217,7 @@ impl Config {
                     api_key: xai_key,
                     name: None,
                     use_bearer_auth: false,
+                    extra_headers: vec![],
                 });
         }
 
@@ -3771,6 +4230,7 @@ impl Config {
                     api_key: mistral_key,
                     name: None,
                     use_bearer_auth: false,
+                    extra_headers: vec![],
                 });
         }
 
@@ -3786,16 +4246,17 @@ impl Config {
                     api_key: llm.ollama_key.clone().unwrap_or_default(),
                     name: None,
                     use_bearer_auth: false,
+                    extra_headers: vec![],
                 });
         }
 
         // Note: We allow boot without provider keys now. System starts in setup mode.
         // Agents are initialized later when keys are added via API.
 
-        // Env-only routing: check for env overrides on channel/worker models.
-        // SPACEBOT_MODEL overrides all process types at once; specific vars take precedence.
-        // ANTHROPIC_MODEL sets all anthropic/* models to the specified value.
-        let mut routing = RoutingConfig::default();
+        // Env-only routing: infer from configured providers, then apply env
+        // overrides.  This way users who only set OPENROUTER_API_KEY get
+        // openrouter/* routing instead of the hardcoded anthropic/* default.
+        let mut routing = infer_routing_from_providers(&llm.providers).unwrap_or_default();
         if let Ok(model) = std::env::var("SPACEBOT_MODEL") {
             routing.channel = model.clone();
             routing.branch = model.clone();
@@ -3857,10 +4318,13 @@ impl Config {
         let mut api = ApiConfig::default();
         api.bind = hosted_api_bind(api.bind);
 
+        let mut defaults = DefaultsConfig::default();
+        defaults.browser.chrome_cache_dir = instance_dir.join("chrome_cache");
+
         Ok(Self {
             instance_dir: instance_dir.to_path_buf(),
             llm,
-            defaults: DefaultsConfig::default(),
+            defaults,
             agents,
             links: Vec::new(),
             groups: Vec::new(),
@@ -4064,14 +4528,21 @@ impl Config {
                     let api_key = resolve_env_value(&config.api_key).ok_or_else(|| {
                         anyhow::anyhow!("failed to resolve API key for provider '{}'", provider_id)
                     })?;
+                    let normalized_id = provider_id.to_lowercase();
+                    let extra_headers = if normalized_id == "openrouter" {
+                        openrouter_extra_headers()
+                    } else {
+                        vec![]
+                    };
                     Ok((
-                        provider_id.to_lowercase(),
+                        normalized_id,
                         ProviderConfig {
                             api_type: config.api_type,
                             base_url: config.base_url,
                             api_key,
                             name: config.name,
                             use_bearer_auth: false,
+                            extra_headers,
                         },
                     ))
                 })
@@ -4097,6 +4568,7 @@ impl Config {
                     api_key: anthropic_key,
                     name: None,
                     use_bearer_auth: anthropic_from_auth_token,
+                    extra_headers: vec![],
                 });
         }
 
@@ -4109,6 +4581,7 @@ impl Config {
                     api_key: openai_key,
                     name: None,
                     use_bearer_auth: false,
+                    extra_headers: vec![],
                 });
         }
 
@@ -4121,6 +4594,7 @@ impl Config {
                     api_key: openrouter_key,
                     name: None,
                     use_bearer_auth: false,
+                    extra_headers: openrouter_extra_headers(),
                 });
         }
 
@@ -4181,6 +4655,7 @@ impl Config {
                     api_key: minimax_key,
                     name: None,
                     use_bearer_auth: false,
+                    extra_headers: vec![],
                 });
         }
 
@@ -4193,6 +4668,7 @@ impl Config {
                     api_key: minimax_cn_key,
                     name: None,
                     use_bearer_auth: false,
+                    extra_headers: vec![],
                 });
         }
 
@@ -4205,6 +4681,7 @@ impl Config {
                     api_key: moonshot_key,
                     name: None,
                     use_bearer_auth: false,
+                    extra_headers: vec![],
                 });
         }
 
@@ -4217,6 +4694,7 @@ impl Config {
                     api_key: nvidia_key,
                     name: None,
                     use_bearer_auth: false,
+                    extra_headers: vec![],
                 });
         }
 
@@ -4229,6 +4707,7 @@ impl Config {
                     api_key: fireworks_key,
                     name: None,
                     use_bearer_auth: false,
+                    extra_headers: vec![],
                 });
         }
 
@@ -4241,6 +4720,7 @@ impl Config {
                     api_key: deepseek_key,
                     name: None,
                     use_bearer_auth: false,
+                    extra_headers: vec![],
                 });
         }
 
@@ -4253,6 +4733,7 @@ impl Config {
                     api_key: gemini_key,
                     name: None,
                     use_bearer_auth: false,
+                    extra_headers: vec![],
                 });
         }
 
@@ -4265,6 +4746,7 @@ impl Config {
                     api_key: groq_key,
                     name: None,
                     use_bearer_auth: false,
+                    extra_headers: vec![],
                 });
         }
 
@@ -4277,6 +4759,7 @@ impl Config {
                     api_key: together_key,
                     name: None,
                     use_bearer_auth: false,
+                    extra_headers: vec![],
                 });
         }
 
@@ -4289,6 +4772,7 @@ impl Config {
                     api_key: xai_key,
                     name: None,
                     use_bearer_auth: false,
+                    extra_headers: vec![],
                 });
         }
 
@@ -4301,6 +4785,7 @@ impl Config {
                     api_key: mistral_key,
                     name: None,
                     use_bearer_auth: false,
+                    extra_headers: vec![],
                 });
         }
 
@@ -4316,6 +4801,7 @@ impl Config {
                     api_key: llm.ollama_key.clone().unwrap_or_default(),
                     name: None,
                     use_bearer_auth: false,
+                    extra_headers: vec![],
                 });
         }
 
@@ -4330,8 +4816,18 @@ impl Config {
             .collect::<Result<Vec<_>>>()?;
 
         let base_defaults = DefaultsConfig::default();
+        // When `[defaults.routing]` is absent, infer sane routing from the
+        // first configured provider so new agents don't fall back to the
+        // hardcoded `anthropic/claude-sonnet-4` default (which fails if the
+        // user only has e.g. OpenRouter configured).
+        let base_routing = if toml.defaults.routing.is_none() {
+            infer_routing_from_providers(&llm.providers)
+                .unwrap_or_else(|| base_defaults.routing.clone())
+        } else {
+            base_defaults.routing.clone()
+        };
         let defaults = DefaultsConfig {
-            routing: resolve_routing(toml.defaults.routing, &base_defaults.routing),
+            routing: resolve_routing(toml.defaults.routing, &base_routing),
             max_concurrent_branches: toml
                 .defaults
                 .max_concurrent_branches
@@ -4455,23 +4951,31 @@ impl Config {
                         .unwrap_or(base_defaults.warmup.startup_delay_secs),
                 })
                 .unwrap_or(base_defaults.warmup),
-            browser: toml
-                .defaults
-                .browser
-                .map(|b| {
-                    let base = &base_defaults.browser;
-                    BrowserConfig {
-                        enabled: b.enabled.unwrap_or(base.enabled),
-                        headless: b.headless.unwrap_or(base.headless),
-                        evaluate_enabled: b.evaluate_enabled.unwrap_or(base.evaluate_enabled),
-                        executable_path: b.executable_path.or_else(|| base.executable_path.clone()),
-                        screenshot_dir: b
-                            .screenshot_dir
-                            .map(PathBuf::from)
-                            .or_else(|| base.screenshot_dir.clone()),
-                    }
-                })
-                .unwrap_or_else(|| base_defaults.browser.clone()),
+            browser: {
+                let chrome_cache_dir = instance_dir.join("chrome_cache");
+                toml.defaults
+                    .browser
+                    .map(|b| {
+                        let base = &base_defaults.browser;
+                        BrowserConfig {
+                            enabled: b.enabled.unwrap_or(base.enabled),
+                            headless: b.headless.unwrap_or(base.headless),
+                            evaluate_enabled: b.evaluate_enabled.unwrap_or(base.evaluate_enabled),
+                            executable_path: b
+                                .executable_path
+                                .or_else(|| base.executable_path.clone()),
+                            screenshot_dir: b
+                                .screenshot_dir
+                                .map(PathBuf::from)
+                                .or_else(|| base.screenshot_dir.clone()),
+                            chrome_cache_dir: chrome_cache_dir.clone(),
+                        }
+                    })
+                    .unwrap_or_else(|| BrowserConfig {
+                        chrome_cache_dir,
+                        ..base_defaults.browser.clone()
+                    })
+            },
             mcp: default_mcp,
             brave_search_key: toml
                 .defaults
@@ -4714,6 +5218,7 @@ impl Config {
                             .screenshot_dir
                             .map(PathBuf::from)
                             .or_else(|| defaults.browser.screenshot_dir.clone()),
+                        chrome_cache_dir: defaults.browser.chrome_cache_dir.clone(),
                     }),
                     memory_injection: a.memory_injection.map(|mi| {
                         let base = &defaults.memory_injection;
@@ -5377,8 +5882,13 @@ pub struct RuntimeConfig {
     pub cron_scheduler: ArcSwap<Option<Arc<crate::cron::Scheduler>>>,
     /// Settings store for agent-specific configuration.
     pub settings: ArcSwap<Option<Arc<crate::settings::SettingsStore>>>,
+    /// Secrets store for encrypted credential storage.
+    pub secrets: ArcSwap<Option<Arc<crate::secrets::store::SecretsStore>>>,
     /// Sandbox configuration for process containment.
-    pub sandbox: ArcSwap<crate::sandbox::SandboxConfig>,
+    ///
+    /// Wrapped in `Arc` so it can be shared with the `Sandbox` struct, which
+    /// reads the current mode dynamically on every `wrap()` call.
+    pub sandbox: Arc<ArcSwap<crate::sandbox::SandboxConfig>>,
 }
 
 impl RuntimeConfig {
@@ -5431,7 +5941,8 @@ impl RuntimeConfig {
             cron_store: ArcSwap::from_pointee(None),
             cron_scheduler: ArcSwap::from_pointee(None),
             settings: ArcSwap::from_pointee(None),
-            sandbox: ArcSwap::from_pointee(agent_config.sandbox.clone()),
+            secrets: ArcSwap::from_pointee(None),
+            sandbox: Arc::new(ArcSwap::from_pointee(agent_config.sandbox.clone())),
         }
     }
 
@@ -5448,6 +5959,11 @@ impl RuntimeConfig {
     /// Set the settings store after initialization.
     pub fn set_settings(&self, settings: Arc<crate::settings::SettingsStore>) {
         self.settings.store(Arc::new(Some(settings)));
+    }
+
+    /// Set the secrets store after initialization.
+    pub fn set_secrets(&self, secrets: Arc<crate::secrets::store::SecretsStore>) {
+        self.secrets.store(Arc::new(Some(secrets)));
     }
 
     /// Compute the current dispatch-readiness signal.
@@ -5510,9 +6026,7 @@ impl RuntimeConfig {
         self.memory_injection
             .store(Arc::new(resolved.memory_injection));
         self.warmup.store(Arc::new(resolved.warmup));
-        // sandbox config is not hot-reloaded here because the Sandbox instance
-        // is constructed once at startup and shared via Arc. Changing sandbox
-        // settings requires an agent restart.
+        self.sandbox.store(Arc::new(resolved.sandbox.clone()));
 
         mcp_manager.reconcile(&old_mcp, &new_mcp).await;
 
@@ -6399,11 +6913,10 @@ pub fn run_onboarding() -> anyhow::Result<Option<PathBuf>> {
 mod tests {
     use super::*;
     use std::result::Result as StdResult;
-    use std::sync::{Mutex, OnceLock};
 
-    fn env_test_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
+    fn env_test_lock() -> &'static parking_lot::Mutex<()> {
+        static LOCK: std::sync::OnceLock<parking_lot::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| parking_lot::Mutex::new(()))
     }
 
     struct EnvGuard {
@@ -6413,12 +6926,14 @@ mod tests {
 
     impl EnvGuard {
         fn new() -> Self {
-            const KEYS: [&str; 26] = [
+            // NOTE: Keep in sync with provider env vars that affect test behavior
+            const KEYS: [&str; 27] = [
                 "SPACEBOT_DIR",
                 "SPACEBOT_DEPLOYMENT",
                 "SPACEBOT_CRON_TIMEZONE",
                 "SPACEBOT_USER_TIMEZONE",
                 "ANTHROPIC_API_KEY",
+                "ANTHROPIC_BASE_URL",
                 "ANTHROPIC_OAUTH_TOKEN",
                 "OPENAI_API_KEY",
                 "OPENROUTER_API_KEY",
@@ -6581,7 +7096,7 @@ api_key = "sk-proj-xyz789"
 
     #[test]
     fn test_llm_provider_tables_parse_with_env_and_lowercase_keys() {
-        let _lock = env_test_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = env_test_lock().lock();
         let _env = EnvGuard::new();
 
         let toml = r#"
@@ -6627,6 +7142,9 @@ api_key = "static-provider-key"
 
     #[test]
     fn test_legacy_llm_keys_auto_migrate_to_providers() {
+        let _lock = env_test_lock().lock();
+        let _env = EnvGuard::new();
+
         let toml = r#"
 [llm]
 anthropic_key = "legacy-anthropic-key"
@@ -6645,6 +7163,10 @@ openrouter_key = "legacy-openrouter-key"
         assert_eq!(anthropic_provider.api_type, ApiType::Anthropic);
         assert_eq!(anthropic_provider.base_url, ANTHROPIC_PROVIDER_BASE_URL);
         assert_eq!(anthropic_provider.api_key, "legacy-anthropic-key");
+        assert!(
+            anthropic_provider.extra_headers.is_empty(),
+            "anthropic provider should have no extra_headers"
+        );
 
         let openai_provider = config
             .llm
@@ -6654,6 +7176,10 @@ openrouter_key = "legacy-openrouter-key"
         assert_eq!(openai_provider.api_type, ApiType::OpenAiCompletions);
         assert_eq!(openai_provider.base_url, OPENAI_PROVIDER_BASE_URL);
         assert_eq!(openai_provider.api_key, "legacy-openai-key");
+        assert!(
+            openai_provider.extra_headers.is_empty(),
+            "openai provider should have no extra_headers"
+        );
 
         let openrouter_provider = config
             .llm
@@ -6663,6 +7189,20 @@ openrouter_key = "legacy-openrouter-key"
         assert_eq!(openrouter_provider.api_type, ApiType::OpenAiCompletions);
         assert_eq!(openrouter_provider.base_url, OPENROUTER_PROVIDER_BASE_URL);
         assert_eq!(openrouter_provider.api_key, "legacy-openrouter-key");
+        assert_eq!(openrouter_provider.extra_headers.len(), 3);
+        let find_header = |name: &str| -> Option<&str> {
+            openrouter_provider
+                .extra_headers
+                .iter()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.as_str())
+        };
+        assert_eq!(find_header("HTTP-Referer"), Some("https://spacebot.sh/"));
+        assert_eq!(find_header("X-OpenRouter-Title"), Some("Spacebot"));
+        assert_eq!(
+            find_header("X-OpenRouter-Categories"),
+            Some("cloud-agent,cli-agent")
+        );
     }
 
     #[test]
@@ -6694,10 +7234,48 @@ name = "Custom OpenAI"
     }
 
     #[test]
+    fn test_explicit_openrouter_provider_toml_injects_extra_headers() {
+        let toml = r#"
+[llm.provider.openrouter]
+api_type = "openai_completions"
+base_url = "https://openrouter.ai/api/v1"
+api_key = "explicit-openrouter-key"
+name = "My OpenRouter"
+"#;
+
+        let parsed: TomlConfig = toml::from_str(toml).expect("failed to parse test TOML");
+        let config = Config::from_toml(parsed, PathBuf::from(".")).expect("failed to build Config");
+
+        let openrouter_provider = config
+            .llm
+            .providers
+            .get("openrouter")
+            .expect("openrouter provider missing");
+        assert_eq!(openrouter_provider.api_type, ApiType::OpenAiCompletions);
+        assert_eq!(openrouter_provider.base_url, "https://openrouter.ai/api/v1");
+        assert_eq!(openrouter_provider.api_key, "explicit-openrouter-key");
+        assert_eq!(openrouter_provider.name.as_deref(), Some("My OpenRouter"));
+
+        // Verify attribution headers are injected even for explicit TOML config
+        assert_eq!(openrouter_provider.extra_headers.len(), 3);
+        let find_header = |name: &str| -> Option<&str> {
+            openrouter_provider
+                .extra_headers
+                .iter()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.as_str())
+        };
+        assert_eq!(find_header("HTTP-Referer"), Some("https://spacebot.sh/"));
+        assert_eq!(find_header("X-OpenRouter-Title"), Some("Spacebot"));
+        assert_eq!(
+            find_header("X-OpenRouter-Categories"),
+            Some("cloud-agent,cli-agent")
+        );
+    }
+
+    #[test]
     fn test_needs_onboarding_without_config_or_env() {
-        let _lock = env_test_lock()
-            .lock()
-            .expect("failed to lock env test mutex");
+        let _lock = env_test_lock().lock();
         let _env = EnvGuard::new();
 
         assert!(Config::needs_onboarding());
@@ -6705,9 +7283,7 @@ name = "Custom OpenAI"
 
     #[test]
     fn test_needs_onboarding_with_anthropic_env_key() {
-        let _lock = env_test_lock()
-            .lock()
-            .expect("failed to lock env test mutex");
+        let _lock = env_test_lock().lock();
         let _env = EnvGuard::new();
 
         unsafe {
@@ -6719,9 +7295,7 @@ name = "Custom OpenAI"
 
     #[test]
     fn test_needs_onboarding_false_with_oauth_credentials() {
-        let _lock = env_test_lock()
-            .lock()
-            .expect("failed to lock env test mutex");
+        let _lock = env_test_lock().lock();
         let _env = EnvGuard::new();
 
         // Create an OAuth credentials file in the EnvGuard's temp dir
@@ -6738,9 +7312,7 @@ name = "Custom OpenAI"
 
     #[test]
     fn test_needs_onboarding_false_with_openai_oauth_credentials() {
-        let _lock = env_test_lock()
-            .lock()
-            .expect("failed to lock env test mutex");
+        let _lock = env_test_lock().lock();
         let _env = EnvGuard::new();
 
         let instance_dir = Config::default_instance_dir();
@@ -6758,9 +7330,7 @@ name = "Custom OpenAI"
 
     #[test]
     fn test_load_from_env_populates_legacy_key_and_provider() {
-        let _lock = env_test_lock()
-            .lock()
-            .expect("failed to lock env test mutex");
+        let _lock = env_test_lock().lock();
         let _env = EnvGuard::new();
 
         unsafe {
@@ -6782,9 +7352,7 @@ name = "Custom OpenAI"
 
     #[test]
     fn test_hosted_deployment_forces_api_bind_from_toml() {
-        let _lock = env_test_lock()
-            .lock()
-            .expect("failed to lock env test mutex");
+        let _lock = env_test_lock().lock();
         let _env = EnvGuard::new();
 
         unsafe {
@@ -6804,9 +7372,7 @@ bind = "127.0.0.1"
 
     #[test]
     fn test_hosted_deployment_forces_api_bind_from_env_defaults() {
-        let _lock = env_test_lock()
-            .lock()
-            .expect("failed to lock env test mutex");
+        let _lock = env_test_lock().lock();
         let _env = EnvGuard::new();
 
         unsafe {
@@ -6922,9 +7488,7 @@ bind = "127.0.0.1"
 
     #[test]
     fn test_cron_timezone_resolution_precedence() {
-        let _lock = env_test_lock()
-            .lock()
-            .expect("failed to lock env test mutex");
+        let _lock = env_test_lock().lock();
         let _env = EnvGuard::new();
 
         unsafe {
@@ -6981,9 +7545,7 @@ id = "main"
 
     #[test]
     fn test_cron_timezone_invalid_falls_back_to_system() {
-        let _lock = env_test_lock()
-            .lock()
-            .expect("failed to lock env test mutex");
+        let _lock = env_test_lock().lock();
         let _env = EnvGuard::new();
 
         unsafe {
@@ -7003,9 +7565,7 @@ id = "main"
 
     #[test]
     fn test_cron_timezone_invalid_default_uses_env_fallback() {
-        let _lock = env_test_lock()
-            .lock()
-            .expect("failed to lock env test mutex");
+        let _lock = env_test_lock().lock();
         let _env = EnvGuard::new();
 
         unsafe {
@@ -7028,9 +7588,7 @@ id = "main"
 
     #[test]
     fn test_user_timezone_resolution_precedence() {
-        let _lock = env_test_lock()
-            .lock()
-            .expect("failed to lock env test mutex");
+        let _lock = env_test_lock().lock();
         let _env = EnvGuard::new();
 
         unsafe {
@@ -7077,9 +7635,7 @@ id = "main"
 
     #[test]
     fn test_user_timezone_falls_back_to_cron_timezone() {
-        let _lock = env_test_lock()
-            .lock()
-            .expect("failed to lock env test mutex");
+        let _lock = env_test_lock().lock();
         let _env = EnvGuard::new();
 
         let toml = r#"
@@ -7105,9 +7661,7 @@ id = "main"
 
     #[test]
     fn test_user_timezone_invalid_falls_back_to_cron_timezone() {
-        let _lock = env_test_lock()
-            .lock()
-            .expect("failed to lock env test mutex");
+        let _lock = env_test_lock().lock();
         let _env = EnvGuard::new();
 
         let toml = r#"
@@ -7130,9 +7684,7 @@ id = "main"
 
     #[test]
     fn test_user_timezone_invalid_config_uses_env_fallback() {
-        let _lock = env_test_lock()
-            .lock()
-            .expect("failed to lock env test mutex");
+        let _lock = env_test_lock().lock();
         let _env = EnvGuard::new();
 
         unsafe {
@@ -7420,6 +7972,9 @@ startup_delay_secs = 2
     /// `LlmConfig` without wiring it up in `load_from_env` / `from_toml`, this test fails.
     #[test]
     fn all_shorthand_keys_register_providers_via_toml() {
+        let _lock = env_test_lock().lock();
+        let _env = EnvGuard::new();
+
         // (toml_key, toml_value, provider_name, expected_base_url_substring)
         let cases: &[(&str, &str, &str, &str)] = &[
             ("anthropic_key", "test-key", "anthropic", "anthropic.com"),
@@ -7484,7 +8039,7 @@ startup_delay_secs = 2
 
     #[test]
     fn all_shorthand_keys_register_providers_via_env() {
-        let _lock = env_test_lock().lock().unwrap();
+        let _lock = env_test_lock().lock();
 
         // (env_var, env_value, provider_name, expected_base_url_substring)
         let cases: &[(&str, &str, &str, &str)] = &[
@@ -7908,7 +8463,7 @@ startup_delay_secs = 2
 
     #[test]
     fn toml_round_trip_with_named_instances() {
-        let _guard = env_test_lock().lock().unwrap();
+        let _guard = env_test_lock().lock();
         let guard = EnvGuard::new();
 
         let toml_content = r#"
@@ -7949,7 +8504,7 @@ chat_id = "-100111"
 
     #[test]
     fn toml_backward_compat_no_adapter_field() {
-        let _guard = env_test_lock().lock().unwrap();
+        let _guard = env_test_lock().lock();
         let guard = EnvGuard::new();
 
         let toml_content = r#"

@@ -74,6 +74,33 @@ impl ConversationLogger {
         self.log_bot_message_with_name(channel_id, content, None);
     }
 
+    /// Log a system message (e.g. task delegation audit record). Fire-and-forget.
+    ///
+    /// System messages are persisted with role `"system"` and are not fed to any
+    /// LLM context window. They exist purely for UI display in link channel
+    /// timelines and audit logs.
+    pub fn log_system_message(&self, channel_id: &str, content: &str) {
+        let pool = self.pool.clone();
+        let id = uuid::Uuid::new_v4().to_string();
+        let channel_id = channel_id.to_string();
+        let content = content.to_string();
+
+        tokio::spawn(async move {
+            if let Err(error) = sqlx::query(
+                "INSERT INTO conversation_messages (id, channel_id, role, sender_name, content) \
+                 VALUES (?, ?, 'system', 'system', ?)",
+            )
+            .bind(&id)
+            .bind(&channel_id)
+            .bind(&content)
+            .execute(&pool)
+            .await
+            {
+                tracing::warn!(%error, %channel_id, "failed to persist system message");
+            }
+        });
+    }
+
     /// Log a bot (assistant) message with an agent display name. Fire-and-forget.
     pub fn log_bot_message_with_name(
         &self,
@@ -339,6 +366,62 @@ impl ProcessRunLogger {
                 tracing::warn!(%error, worker_id = %id, "failed to persist worker completion");
             }
         });
+    }
+
+    /// Mark all orphaned running workers as failed for an agent.
+    ///
+    /// Called at startup to reconcile rows that were left in `running` when the
+    /// process exited before a `WorkerComplete` event was persisted.
+    pub async fn reconcile_running_workers_for_agent(
+        &self,
+        agent_id: &str,
+        failure_message: &str,
+    ) -> crate::error::Result<u64> {
+        let result = sqlx::query(
+            "UPDATE worker_runs \
+             SET status = 'failed', \
+                 completed_at = COALESCE(completed_at, CURRENT_TIMESTAMP), \
+                 result = CASE \
+                     WHEN result IS NULL OR result = '' THEN ? \
+                     ELSE result \
+                 END \
+             WHERE status = 'running' AND (agent_id = ? OR agent_id IS NULL)",
+        )
+        .bind(failure_message)
+        .bind(agent_id)
+        .execute(&self.pool)
+        .await
+        .map_err(|error| anyhow::anyhow!(error))?;
+
+        Ok(result.rows_affected())
+    }
+
+    /// Mark a detached running worker as cancelled.
+    ///
+    /// Used by API cancellation when the in-memory channel state no longer has
+    /// a live handle for this worker (for example after restart).
+    pub async fn cancel_running_worker(
+        &self,
+        channel_id: &str,
+        worker_id: WorkerId,
+    ) -> crate::error::Result<bool> {
+        let result = sqlx::query(
+            "UPDATE worker_runs \
+             SET result = CASE \
+                     WHEN result IS NULL OR result = '' THEN 'Worker cancelled' \
+                     ELSE result \
+                 END, \
+                 status = 'failed', \
+                 completed_at = COALESCE(completed_at, CURRENT_TIMESTAMP) \
+             WHERE id = ? AND channel_id = ? AND status = 'running'",
+        )
+        .bind(worker_id.to_string())
+        .bind(channel_id)
+        .execute(&self.pool)
+        .await
+        .map_err(|error| anyhow::anyhow!(error))?;
+
+        Ok(result.rows_affected() > 0)
     }
 
     /// Load a unified timeline for a channel: messages, branch runs, and worker runs

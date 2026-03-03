@@ -74,6 +74,8 @@ pub struct ApiState {
     pub mcp_managers: ArcSwap<HashMap<String, Arc<McpManager>>>,
     /// Per-agent sandbox instances for process containment.
     pub sandboxes: ArcSwap<HashMap<String, Arc<crate::sandbox::Sandbox>>>,
+    /// Instance-level secrets store (shared across all agents).
+    pub secrets_store: ArcSwap<Option<Arc<crate::secrets::store::SecretsStore>>>,
     /// Shared reference to the Discord permissions ArcSwap (same instance used by the adapter and file watcher).
     pub discord_permissions: RwLock<Option<Arc<ArcSwap<DiscordPermissions>>>>,
     /// Shared reference to the Slack permissions ArcSwap (same instance used by the adapter and file watcher).
@@ -102,6 +104,11 @@ pub struct ApiState {
     pub agent_remove_tx: mpsc::Sender<String>,
     /// Shared webchat adapter for session management from API handlers.
     pub webchat_adapter: ArcSwap<Option<Arc<WebChatAdapter>>>,
+    /// Cross-agent task store registry for delegation.
+    pub task_store_registry:
+        Arc<ArcSwap<std::collections::HashMap<String, Arc<crate::tasks::TaskStore>>>>,
+    /// Sender for cross-agent message injection.
+    pub injection_tx: mpsc::Sender<crate::ChannelInjection>,
     /// Instance-level agent links for the communication graph.
     pub agent_links: ArcSwap<Vec<crate::links::AgentLink>>,
     /// Visual agent groups for the topology UI.
@@ -220,6 +227,10 @@ impl ApiState {
         provider_setup_tx: mpsc::Sender<crate::ProviderSetupEvent>,
         agent_tx: mpsc::Sender<crate::Agent>,
         agent_remove_tx: mpsc::Sender<String>,
+        injection_tx: mpsc::Sender<crate::ChannelInjection>,
+        task_store_registry: Arc<
+            ArcSwap<std::collections::HashMap<String, Arc<crate::tasks::TaskStore>>>,
+        >,
     ) -> Self {
         let (event_tx, _) = broadcast::channel(512);
         Self {
@@ -240,6 +251,7 @@ impl ApiState {
             runtime_configs: ArcSwap::from_pointee(HashMap::new()),
             mcp_managers: ArcSwap::from_pointee(HashMap::new()),
             sandboxes: ArcSwap::from_pointee(HashMap::new()),
+            secrets_store: ArcSwap::from_pointee(None),
             discord_permissions: RwLock::new(None),
             slack_permissions: RwLock::new(None),
             bindings: RwLock::new(None),
@@ -253,6 +265,8 @@ impl ApiState {
             defaults_config: RwLock::new(None),
             agent_tx,
             agent_remove_tx,
+            task_store_registry,
+            injection_tx,
             webchat_adapter: ArcSwap::from_pointee(None),
             agent_links: ArcSwap::from_pointee(Vec::new()),
             agent_groups: ArcSwap::from_pointee(Vec::new()),
@@ -536,6 +550,11 @@ impl ApiState {
     /// Set the sandbox instances for all agents.
     pub fn set_sandboxes(&self, sandboxes: HashMap<String, Arc<crate::sandbox::Sandbox>>) {
         self.sandboxes.store(Arc::new(sandboxes));
+    }
+
+    /// Set the instance-level secrets store.
+    pub fn set_secrets_store(&self, store: Arc<crate::secrets::store::SecretsStore>) {
+        self.secrets_store.store(Arc::new(Some(store)));
     }
 
     /// Share the Discord permissions ArcSwap with the API so reads get hot-reloaded values.

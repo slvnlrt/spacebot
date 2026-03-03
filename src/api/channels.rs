@@ -186,27 +186,67 @@ pub(super) async fn cancel_process(
     State(state): State<Arc<ApiState>>,
     Json(request): Json<CancelProcessRequest>,
 ) -> Result<Json<CancelProcessResponse>, StatusCode> {
-    let states = state.channel_states.read().await;
-    let channel_state = states
-        .get(&request.channel_id)
-        .ok_or(StatusCode::NOT_FOUND)?;
-
     match request.process_type.as_str() {
         "worker" => {
             let worker_id: crate::WorkerId = request
                 .process_id
                 .parse()
                 .map_err(|_| StatusCode::BAD_REQUEST)?;
-            channel_state
-                .cancel_worker(worker_id)
-                .await
-                .map_err(|_| StatusCode::NOT_FOUND)?;
-            Ok(Json(CancelProcessResponse {
-                success: true,
-                message: format!("Worker {} cancelled", request.process_id),
-            }))
+
+            let channel_state = {
+                let states = state.channel_states.read().await;
+                states.get(&request.channel_id).cloned()
+            };
+
+            if let Some(channel_state) = channel_state
+                && channel_state.cancel_worker(worker_id).await.is_ok()
+            {
+                return Ok(Json(CancelProcessResponse {
+                    success: true,
+                    message: format!("Worker {} cancelled", request.process_id),
+                }));
+            }
+
+            // Fallback for detached workers (for example after restart): no live
+            // channel state exists, but the DB row is still marked running.
+            let pools = state.agent_pools.load();
+            for (_agent_id, pool) in pools.iter() {
+                let logger = ProcessRunLogger::new(pool.clone());
+                match logger
+                    .cancel_running_worker(&request.channel_id, worker_id)
+                    .await
+                {
+                    Ok(true) => {
+                        return Ok(Json(CancelProcessResponse {
+                            success: true,
+                            message: format!(
+                                "Worker {} cancelled (detached run reconciled)",
+                                request.process_id
+                            ),
+                        }));
+                    }
+                    Ok(false) => {}
+                    Err(error) => {
+                        tracing::warn!(
+                            %error,
+                            channel_id = %request.channel_id,
+                            process_id = %request.process_id,
+                            "failed to cancel detached worker run"
+                        );
+                        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+                    }
+                }
+            }
+
+            Err(StatusCode::NOT_FOUND)
         }
         "branch" => {
+            let channel_state = {
+                let states = state.channel_states.read().await;
+                states.get(&request.channel_id).cloned()
+            }
+            .ok_or(StatusCode::NOT_FOUND)?;
+
             let branch_id: crate::BranchId = request
                 .process_id
                 .parse()

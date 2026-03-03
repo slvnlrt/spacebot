@@ -24,10 +24,6 @@ pub(super) struct MemoryInjectionResponse {
     contextual_min_score: f32,
     context_window_depth: usize,
     semantic_threshold: f32,
-    pinned_types: Vec<String>,
-    ambient_enabled: bool,
-    pinned_limit: i64,
-    pinned_sort: String,
     max_total: usize,
     max_injected_blocks_in_history: usize,
 }
@@ -67,10 +63,6 @@ pub(super) struct MemoryInjectionUpdate {
     contextual_min_score: Option<f32>,
     context_window_depth: Option<usize>,
     semantic_threshold: Option<f32>,
-    pinned_types: Option<Vec<String>>,
-    ambient_enabled: Option<bool>,
-    pinned_limit: Option<i64>,
-    pinned_sort: Option<String>,
     max_total: Option<usize>,
     max_injected_blocks_in_history: Option<usize>,
 }
@@ -238,29 +230,6 @@ pub(super) async fn get_global_settings(
                     .and_then(|m| m.get("semantic_threshold"))
                     .and_then(|v| v.as_float())
                     .unwrap_or(0.85) as f32,
-                pinned_types: memory_injection_table
-                    .and_then(|m| m.get("pinned_types"))
-                    .and_then(|v| v.as_array())
-                    .map(|array| {
-                        array
-                            .iter()
-                            .filter_map(|value| value.as_str().map(ToString::to_string))
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_default(),
-                ambient_enabled: memory_injection_table
-                    .and_then(|m| m.get("ambient_enabled"))
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false),
-                pinned_limit: memory_injection_table
-                    .and_then(|m| m.get("pinned_limit"))
-                    .and_then(|v| v.as_integer())
-                    .unwrap_or(3),
-                pinned_sort: memory_injection_table
-                    .and_then(|m| m.get("pinned_sort"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("recent")
-                    .to_string(),
                 max_total: memory_injection_table
                     .and_then(|m| m.get("max_total"))
                     .and_then(|v| v.as_integer())
@@ -307,10 +276,6 @@ pub(super) async fn get_global_settings(
                     contextual_min_score: 0.70,
                     context_window_depth: 10,
                     semantic_threshold: 0.85,
-                    pinned_types: Vec::new(),
-                    ambient_enabled: false,
-                    pinned_limit: 3,
-                    pinned_sort: "recent".to_string(),
                     max_total: 25,
                     max_injected_blocks_in_history: 3,
                 },
@@ -461,23 +426,6 @@ pub(super) async fn update_global_settings(
         if let Some(semantic_threshold) = memory_injection.semantic_threshold {
             doc["defaults"]["memory_injection"]["semantic_threshold"] =
                 toml_edit::value(semantic_threshold as f64);
-        }
-        if let Some(pinned_types) = memory_injection.pinned_types {
-            let mut array = toml_edit::Array::default();
-            for memory_type in pinned_types {
-                array.push(memory_type);
-            }
-            doc["defaults"]["memory_injection"]["pinned_types"] = toml_edit::Item::Value(array.into());
-        }
-        if let Some(ambient_enabled) = memory_injection.ambient_enabled {
-            doc["defaults"]["memory_injection"]["ambient_enabled"] =
-                toml_edit::value(ambient_enabled);
-        }
-        if let Some(pinned_limit) = memory_injection.pinned_limit {
-            doc["defaults"]["memory_injection"]["pinned_limit"] = toml_edit::value(pinned_limit);
-        }
-        if let Some(pinned_sort) = memory_injection.pinned_sort {
-            doc["defaults"]["memory_injection"]["pinned_sort"] = toml_edit::value(pinned_sort);
         }
         if let Some(max_total) = memory_injection.max_total {
             doc["defaults"]["memory_injection"]["max_total"] = toml_edit::value(max_total as i64);

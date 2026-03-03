@@ -10,8 +10,29 @@
 use anyhow::Context as _;
 use std::sync::Arc;
 
+/// Set up the secrets store thread-local so `secret:` references in config.toml
+/// resolve correctly. Mirrors the bootstrap logic in main.rs.
+fn bootstrap_secrets_for_config() {
+    let instance_dir = spacebot::config::Config::default_instance_dir();
+    let secrets_path = instance_dir.join("data").join("secrets.redb");
+    if !secrets_path.exists() {
+        return;
+    }
+    if let Ok(store) = spacebot::secrets::store::SecretsStore::new(&secrets_path) {
+        let store = Arc::new(store);
+        if store.is_encrypted() {
+            let keystore = spacebot::secrets::keystore::platform_keystore();
+            if let Some(key) = keystore.load_key("instance").ok().flatten() {
+                let _ = store.unlock(&key);
+            }
+        }
+        spacebot::config::set_resolve_secrets_store(store);
+    }
+}
+
 /// Bootstrap AgentDeps from the real ~/.spacebot config (same as bulletin test).
 async fn bootstrap_deps() -> anyhow::Result<(spacebot::AgentDeps, spacebot::config::Config)> {
+    bootstrap_secrets_for_config();
     let config =
         spacebot::config::Config::load().context("failed to load ~/.spacebot/config.toml")?;
 
@@ -71,9 +92,12 @@ async fn bootstrap_deps() -> anyhow::Result<(spacebot::AgentDeps, spacebot::conf
     let agent_id: spacebot::AgentId = Arc::from(agent_config.id.as_str());
     let mcp_manager = Arc::new(spacebot::mcp::McpManager::new(agent_config.mcp.clone()));
 
+    let sandbox_config = Arc::new(arc_swap::ArcSwap::from_pointee(
+        agent_config.sandbox.clone(),
+    ));
     let sandbox = Arc::new(
         spacebot::sandbox::Sandbox::new(
-            &agent_config.sandbox,
+            sandbox_config,
             agent_config.workspace.clone(),
             &config.instance_dir,
             agent_config.data_dir.clone(),
@@ -95,6 +119,10 @@ async fn bootstrap_deps() -> anyhow::Result<(spacebot::AgentDeps, spacebot::conf
         sandbox,
         links: Arc::new(arc_swap::ArcSwap::from_pointee(Vec::new())),
         agent_names: Arc::new(std::collections::HashMap::new()),
+        task_store_registry: Arc::new(arc_swap::ArcSwap::from_pointee(
+            std::collections::HashMap::new(),
+        )),
+        injection_tx: tokio::sync::mpsc::channel(1).0,
     };
 
     Ok((deps, config))
@@ -167,6 +195,7 @@ fn build_channel_system_prompt(rc: &spacebot::config::RuntimeConfig) -> String {
             None,
             None,
             None,
+            false,
         )
         .expect("failed to render channel prompt")
 }
@@ -323,7 +352,15 @@ async fn dump_worker_context() {
     let instance_dir = rc.instance_dir.to_string_lossy();
     let workspace_dir = rc.workspace_dir.to_string_lossy();
     let worker_prompt = prompt_engine
-        .render_worker_prompt(&instance_dir, &workspace_dir)
+        .render_worker_prompt(
+            &instance_dir,
+            &workspace_dir,
+            false,
+            false,
+            Vec::new(),
+            Vec::new(),
+            &[],
+        )
         .expect("failed to render worker prompt");
     print_section("WORKER SYSTEM PROMPT", &worker_prompt);
     print_stats("System prompt", &worker_prompt);
@@ -488,7 +525,15 @@ async fn dump_all_contexts() {
 
     // ── Worker ──
     let worker_prompt = prompt_engine
-        .render_worker_prompt(&instance_dir, &workspace_dir)
+        .render_worker_prompt(
+            &instance_dir,
+            &workspace_dir,
+            false,
+            false,
+            Vec::new(),
+            Vec::new(),
+            &[],
+        )
         .expect("failed to render worker prompt");
     let browser_config = (**rc.browser_config.load()).clone();
     let brave_search_key = (**rc.brave_search_key.load()).clone();

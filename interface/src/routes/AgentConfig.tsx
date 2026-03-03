@@ -35,7 +35,7 @@ const SECTIONS: {
 	{ id: "memory", label: "Memory Persistence", group: "config", description: "Auto-save interval", detail: "Spawns a silent background branch at regular intervals to recall existing memories and save new ones from the recent conversation. Runs without blocking the channel." },
 	{ id: "memory_injection", label: "Memory Injection", group: "config", description: "Per-agent retrieval and dedup", detail: "Overrides global Memory Injection defaults for this agent only. Leave untouched to keep using global defaults." },
 	{ id: "browser", label: "Browser", group: "config", description: "Chrome automation", detail: "Controls browser automation tools available to workers. When enabled, workers can navigate web pages, take screenshots, and interact with sites. JavaScript evaluation is a separate permission." },
-	{ id: "sandbox", label: "Sandbox", group: "config", description: "Process containment", detail: "OS-level filesystem containment for shell and exec tool subprocesses. When enabled, worker processes run inside a kernel-enforced sandbox (bubblewrap on Linux, sandbox-exec on macOS) that makes the entire filesystem read-only except for the workspace and any configured writable paths." },
+	{ id: "sandbox", label: "Sandbox", group: "config", description: "Process containment", detail: "OS-level filesystem containment for shell and exec tool subprocesses. When enabled, worker processes run inside a kernel-enforced sandbox (bubblewrap on Linux, sandbox-exec on macOS) with an allowlist-only filesystem — only system paths, the workspace, and explicitly configured extra paths are accessible." },
 ];
 
 interface AgentConfigProps {
@@ -842,25 +842,6 @@ function ConfigSectionEditor({ sectionId, label, description, detail, config, on
 					</div>
 				);
 			case "memory_injection": {
-				const pinnedTypes = ((localValues.pinned_types as string[]) ?? []) as string[];
-				const togglePinnedType = (memoryType: string) => {
-					const next = pinnedTypes.includes(memoryType)
-						? pinnedTypes.filter((value) => value !== memoryType)
-						: [...pinnedTypes, memoryType];
-					handleChange("pinned_types", next);
-				};
-
-				const memoryTypeOptions = [
-					"identity",
-					"goal",
-					"decision",
-					"todo",
-					"preference",
-					"fact",
-					"event",
-					"observation",
-				];
-
 				return (
 					<div className="flex flex-col gap-4">
 						<div className="rounded-lg border border-app-line bg-app-box p-4">
@@ -881,7 +862,7 @@ function ConfigSectionEditor({ sectionId, label, description, detail, config, on
 									<div className="mt-4 grid grid-cols-2 gap-x-6 gap-y-4">
 										<NumberStepper label="Search Limit" description="Maximum contextual memories retrieved by hybrid search" value={localValues.search_limit as number} onChange={(v) => handleChange("search_limit", v)} min={1} max={100} />
 										<NumberStepper label="Context Min Score" description="Relative cosine threshold ratio (0–1). Candidates must score at least best_match × ratio." value={localValues.contextual_min_score as number} onChange={(v) => handleChange("contextual_min_score", v)} min={0} max={1} step={0.01} type="float" />
-										<NumberStepper label="Max Total" description="Hard cap across pinned and contextual memories" value={localValues.max_total as number} onChange={(v) => handleChange("max_total", v)} min={1} max={200} />
+										<NumberStepper label="Max Total" description="Hard cap across contextual memories" value={localValues.max_total as number} onChange={(v) => handleChange("max_total", v)} min={1} max={200} />
 										<NumberStepper label="History Block Limit" description="Maximum injected context blocks kept in history (0 = ephemeral)" value={localValues.max_injected_blocks_in_history as number} onChange={(v) => handleChange("max_injected_blocks_in_history", v)} min={0} max={10} />
 									</div>
 								</div>
@@ -895,45 +876,6 @@ function ConfigSectionEditor({ sectionId, label, description, detail, config, on
 									</div>
 								</div>
 
-								<div className="rounded-lg border border-app-line bg-app-box p-4">
-									<div className="flex items-center justify-between">
-										<span className="text-sm font-medium text-ink">Ambient Awareness (Advanced)</span>
-										<div className="flex items-center gap-3">
-											<div className="text-xs text-ink-dull">Enabled</div>
-											<Toggle size="sm" checked={localValues.ambient_enabled as boolean} onCheckedChange={(v) => handleChange("ambient_enabled", v)} />
-										</div>
-									</div>
-									<p className="mt-0.5 text-sm text-ink-dull">Agent-level override of global ambient behavior. Keep disabled for community bots.</p>
-									{(localValues.ambient_enabled as boolean) && (
-										<div className="mt-4 flex flex-col gap-4">
-											<div className="rounded-md border border-app-line bg-app px-3 py-2 text-xs text-ink-dull">Recommended for personal assistants: <span className="text-ink">todo</span> and <span className="text-ink">goal</span> (optionally <span className="text-ink">decision</span>).</div>
-											<div className="text-xs text-ink-faint">Selected: {pinnedTypes.length === 0 ? "none" : pinnedTypes.join(", ")}</div>
-											<div className="grid grid-cols-2 gap-2">
-												{memoryTypeOptions.map((memoryType) => (
-													<Button key={memoryType} onClick={() => togglePinnedType(memoryType)} variant={pinnedTypes.includes(memoryType) ? "default" : "secondary"}>
-														{memoryType}
-													</Button>
-												))}
-											</div>
-											<div className="grid grid-cols-2 gap-x-6 gap-y-4">
-												<NumberStepper label="Pinned Limit" description="Maximum memories per pinned type" value={localValues.pinned_limit as number} onChange={(v) => handleChange("pinned_limit", v)} min={1} max={20} />
-												<div>
-													<span className="text-sm font-medium text-ink">Pinned Sort</span>
-													<p className="mt-0.5 text-sm text-ink-dull">Ordering strategy for pinned memories</p>
-													<Select value={(localValues.pinned_sort as string) || "recent"} onValueChange={(value) => handleChange("pinned_sort", value)}>
-														<SelectTrigger className="mt-2">
-															<SelectValue />
-														</SelectTrigger>
-														<SelectContent>
-															<SelectItem value="recent">recent</SelectItem>
-															<SelectItem value="importance">importance</SelectItem>
-														</SelectContent>
-													</Select>
-												</div>
-											</div>
-										</div>
-									)}
-								</div>
 							</>
 						)}
 					</div>
@@ -959,8 +901,8 @@ function ConfigSectionEditor({ sectionId, label, description, detail, config, on
 							</Select>
 						</div>
 						<div className="flex flex-col gap-1.5">
-							<label className="text-sm font-medium text-ink">Writable Paths</label>
-							<p className="text-tiny text-ink-faint">Additional directories workers can write to beyond the workspace. The workspace is always writable. Press Enter to add a path.</p>
+						<label className="text-sm font-medium text-ink">Extra Allowed Paths</label>
+						<p className="text-tiny text-ink-faint">Additional directories workers can read and write beyond the workspace. The workspace is always accessible. Press Enter to add a path.</p>
 							<TagInput
 								value={(localValues.writable_paths as string[]) ?? []}
 								onChange={(paths) => handleChange("writable_paths", paths)}

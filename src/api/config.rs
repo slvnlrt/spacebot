@@ -75,10 +75,6 @@ pub(super) struct MemoryInjectionSection {
     contextual_min_score: f32,
     context_window_depth: usize,
     semantic_threshold: f32,
-    pinned_types: Vec<String>,
-    ambient_enabled: bool,
-    pinned_limit: i64,
-    pinned_sort: String,
     max_total: usize,
     max_injected_blocks_in_history: usize,
 }
@@ -94,6 +90,7 @@ pub(super) struct BrowserSection {
 pub(super) struct SandboxSection {
     mode: String,
     writable_paths: Vec<String>,
+    passthrough_env: Vec<String>,
 }
 
 #[derive(Serialize, Debug)]
@@ -221,10 +218,6 @@ pub(super) struct MemoryInjectionUpdate {
     contextual_min_score: Option<f32>,
     context_window_depth: Option<usize>,
     semantic_threshold: Option<f32>,
-    pinned_types: Option<Vec<String>>,
-    ambient_enabled: Option<bool>,
-    pinned_limit: Option<i64>,
-    pinned_sort: Option<String>,
     max_total: Option<usize>,
     max_injected_blocks_in_history: Option<usize>,
 }
@@ -240,6 +233,7 @@ pub(super) struct BrowserUpdate {
 pub(super) struct SandboxUpdate {
     mode: Option<String>,
     writable_paths: Option<Vec<String>>,
+    passthrough_env: Option<Vec<String>>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -324,10 +318,6 @@ pub(super) async fn get_agent_config(
             contextual_min_score: memory_injection.contextual_min_score,
             context_window_depth: memory_injection.context_window_depth,
             semantic_threshold: memory_injection.semantic_threshold,
-            pinned_types: memory_injection.pinned_types.clone(),
-            ambient_enabled: memory_injection.ambient_enabled,
-            pinned_limit: memory_injection.pinned_limit,
-            pinned_sort: memory_injection.pinned_sort.clone(),
             max_total: memory_injection.max_total,
             max_injected_blocks_in_history: memory_injection.max_injected_blocks_in_history,
         },
@@ -347,6 +337,7 @@ pub(super) async fn get_agent_config(
                 .iter()
                 .map(|p| p.display().to_string())
                 .collect(),
+            passthrough_env: sandbox.passthrough_env.clone(),
         },
         discord: {
             let perms = state.discord_permissions.read().await;
@@ -444,6 +435,10 @@ pub(super) async fn update_agent_config(
 
     match crate::config::Config::load_from_path(&config_path) {
         Ok(new_config) => {
+            // Keep in-memory defaults fresh so newly created agents inherit
+            // the latest routing values.
+            state.set_defaults_config(new_config.defaults.clone()).await;
+
             let runtime_configs = state.runtime_configs.load();
             let mcp_managers = state.mcp_managers.load();
             if let (Some(rc), Some(mcp_manager)) = (
@@ -728,22 +723,6 @@ fn update_memory_injection_table(
     if let Some(v) = memory_injection.semantic_threshold {
         table["semantic_threshold"] = toml_edit::value(v as f64);
     }
-    if let Some(v) = &memory_injection.pinned_types {
-        let mut array = toml_edit::Array::default();
-        for memory_type in v {
-            array.push(memory_type);
-        }
-        table["pinned_types"] = toml_edit::Item::Value(array.into());
-    }
-    if let Some(v) = memory_injection.ambient_enabled {
-        table["ambient_enabled"] = toml_edit::value(v);
-    }
-    if let Some(v) = memory_injection.pinned_limit {
-        table["pinned_limit"] = toml_edit::value(v);
-    }
-    if let Some(v) = &memory_injection.pinned_sort {
-        table["pinned_sort"] = toml_edit::value(v.as_str());
-    }
     if let Some(v) = memory_injection.max_total {
         table["max_total"] = toml_edit::value(v as i64);
     }
@@ -797,6 +776,13 @@ fn update_sandbox_table(
             array.push(path.as_str());
         }
         table["writable_paths"] = toml_edit::value(array);
+    }
+    if let Some(ref env_vars) = sandbox.passthrough_env {
+        let mut array = toml_edit::Array::new();
+        for var_name in env_vars {
+            array.push(var_name.as_str());
+        }
+        table["passthrough_env"] = toml_edit::value(array);
     }
     Ok(())
 }
