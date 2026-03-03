@@ -1033,24 +1033,7 @@ pub struct MemoryInjectionConfig {
     #[serde(default = "default_semantic_threshold")]
     pub semantic_threshold: f32,
 
-    /// Memory types to always inject as ambient context.
-    /// Empty by default for community-bot safe behavior.
-    #[serde(default = "default_pinned_types")]
-    pub pinned_types: Vec<String>,
-
-    /// Whether ambient awareness is enabled.
-    #[serde(default = "default_ambient_enabled")]
-    pub ambient_enabled: bool,
-
-    /// Maximum memories to inject per pinned type.
-    #[serde(default = "default_pinned_limit")]
-    pub pinned_limit: i64,
-
-    /// Sort mode for pinned memories. Allowed values: "recent", "importance".
-    #[serde(default = "default_pinned_sort")]
-    pub pinned_sort: String,
-
-    /// Hard cap on total injected memories across pinned and contextual pools.
+    /// Hard cap on total injected contextual memories.
     #[serde(default = "default_max_total")]
     pub max_total: usize,
 
@@ -1075,18 +1058,6 @@ fn default_context_window_depth() -> usize {
 fn default_semantic_threshold() -> f32 {
     0.85
 }
-fn default_pinned_types() -> Vec<String> {
-    Vec::new()
-}
-fn default_ambient_enabled() -> bool {
-    false
-}
-fn default_pinned_limit() -> i64 {
-    3
-}
-fn default_pinned_sort() -> String {
-    "recent".to_string()
-}
 fn default_max_total() -> usize {
     25
 }
@@ -1102,10 +1073,6 @@ impl Default for MemoryInjectionConfig {
             contextual_min_score: default_contextual_min_score(),
             context_window_depth: default_context_window_depth(),
             semantic_threshold: default_semantic_threshold(),
-            pinned_types: default_pinned_types(),
-            ambient_enabled: default_ambient_enabled(),
-            pinned_limit: default_pinned_limit(),
-            pinned_sort: default_pinned_sort(),
             max_total: default_max_total(),
             max_injected_blocks_in_history: default_max_injected_blocks_in_history(),
         }
@@ -3033,10 +3000,6 @@ struct TomlMemoryInjectionConfig {
     contextual_min_score: Option<f32>,
     context_window_depth: Option<usize>,
     semantic_threshold: Option<f32>,
-    pinned_types: Option<Vec<String>>,
-    ambient_enabled: Option<bool>,
-    pinned_limit: Option<i64>,
-    pinned_sort: Option<String>,
     max_total: Option<usize>,
     max_injected_blocks_in_history: Option<usize>,
 }
@@ -5037,33 +5000,6 @@ impl Config {
                 .memory_injection
                 .map(|mi| {
                     let base = &base_defaults.memory_injection;
-                    let pinned_types = mi
-                        .pinned_types
-                        .unwrap_or_else(|| base.pinned_types.clone())
-                        .into_iter()
-                        .filter(|memory_type| {
-                            let is_valid = crate::memory::MemoryType::ALL
-                                .iter()
-                                .any(|candidate| candidate.to_string() == *memory_type);
-                            if !is_valid {
-                                tracing::warn!(
-                                    memory_type = %memory_type,
-                                    "invalid memory_injection.pinned_types entry, dropping"
-                                );
-                            }
-                            is_valid
-                        })
-                        .collect::<Vec<_>>();
-
-                    let pinned_sort = match mi.pinned_sort {
-                        Some(sort) if sort == "recent" || sort == "importance" => sort,
-                        Some(sort) => {
-                            tracing::warn!(sort = %sort, "invalid memory_injection.pinned_sort, using default");
-                            base.pinned_sort.clone()
-                        }
-                        None => base.pinned_sort.clone(),
-                    };
-
                     MemoryInjectionConfig {
                         enabled: mi.enabled.unwrap_or(base.enabled),
                         search_limit: mi.search_limit.unwrap_or(base.search_limit),
@@ -5074,10 +5010,6 @@ impl Config {
                             .context_window_depth
                             .unwrap_or(base.context_window_depth),
                         semantic_threshold: mi.semantic_threshold.unwrap_or(base.semantic_threshold),
-                        pinned_types,
-                        ambient_enabled: mi.ambient_enabled.unwrap_or(base.ambient_enabled),
-                        pinned_limit: mi.pinned_limit.unwrap_or(base.pinned_limit),
-                        pinned_sort,
                         max_total: mi.max_total.unwrap_or(base.max_total),
                         max_injected_blocks_in_history: mi
                             .max_injected_blocks_in_history
@@ -5222,33 +5154,6 @@ impl Config {
                     }),
                     memory_injection: a.memory_injection.map(|mi| {
                         let base = &defaults.memory_injection;
-                        let pinned_types = mi
-                            .pinned_types
-                            .unwrap_or_else(|| base.pinned_types.clone())
-                            .into_iter()
-                            .filter(|memory_type| {
-                                let is_valid = crate::memory::MemoryType::ALL
-                                    .iter()
-                                    .any(|candidate| candidate.to_string() == *memory_type);
-                                if !is_valid {
-                                    tracing::warn!(
-                                        memory_type = %memory_type,
-                                        "invalid agents[].memory_injection.pinned_types entry, dropping"
-                                    );
-                                }
-                                is_valid
-                            })
-                            .collect::<Vec<_>>();
-
-                        let pinned_sort = match mi.pinned_sort {
-                            Some(sort) if sort == "recent" || sort == "importance" => sort,
-                            Some(sort) => {
-                                tracing::warn!(sort = %sort, "invalid agents[].memory_injection.pinned_sort, using default");
-                                base.pinned_sort.clone()
-                            }
-                            None => base.pinned_sort.clone(),
-                        };
-
                         MemoryInjectionConfig {
                             enabled: mi.enabled.unwrap_or(base.enabled),
                             search_limit: mi.search_limit.unwrap_or(base.search_limit),
@@ -5259,10 +5164,6 @@ impl Config {
                                 .context_window_depth
                                 .unwrap_or(base.context_window_depth),
                             semantic_threshold: mi.semantic_threshold.unwrap_or(base.semantic_threshold),
-                            pinned_types,
-                            ambient_enabled: mi.ambient_enabled.unwrap_or(base.ambient_enabled),
-                            pinned_limit: mi.pinned_limit.unwrap_or(base.pinned_limit),
-                            pinned_sort,
                             max_total: mi.max_total.unwrap_or(base.max_total),
                             max_injected_blocks_in_history: mi
                                 .max_injected_blocks_in_history
