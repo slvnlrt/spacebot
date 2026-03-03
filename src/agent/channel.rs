@@ -1215,6 +1215,19 @@ impl Channel {
         let contextual_min_score = config.contextual_min_score;
         let max_total = config.max_total;
 
+        tracing::info!(
+            channel_id = %self.id,
+            turn = self.current_turn,
+            search_limit,
+            contextual_min_score,
+            semantic_threshold,
+            context_window_depth,
+            max_total,
+            query_len = user_text.len(),
+            query_preview = %user_text.chars().take(140).collect::<String>(),
+            "memory injection started"
+        );
+
         let search_config = SearchConfig {
             mode: SearchMode::Hybrid,
             max_results: search_limit,
@@ -1251,6 +1264,11 @@ impl Channel {
         let mut deduped_count = 0usize;
         let mut unique_candidates = Vec::new();
         let mut seen_ids = HashSet::new();
+        let mut skipped_reinject_window = 0usize;
+        let mut skipped_duplicate_id = 0usize;
+        let mut skipped_cosine_threshold = 0usize;
+        let mut skipped_semantic_duplicate = 0usize;
+        let mut embedding_fallback_empty = 0usize;
 
         self.injection_state
             .prune_semantic_buffer(self.current_turn, context_window_depth);
@@ -1274,11 +1292,24 @@ impl Channel {
                 context_window_depth,
             ) {
                 deduped_count += 1;
+                skipped_reinject_window += 1;
+                tracing::debug!(
+                    channel_id = %self.id,
+                    memory_id = %memory.id,
+                    memory_type = %memory.memory_type,
+                    "memory rejected: within re-injection window"
+                );
                 continue;
             }
 
             if seen_ids.contains(&memory.id) {
                 deduped_count += 1;
+                skipped_duplicate_id += 1;
+                tracing::debug!(
+                    channel_id = %self.id,
+                    memory_id = %memory.id,
+                    "memory rejected: duplicate memory id in candidate set"
+                );
                 continue;
             }
             seen_ids.insert(memory.id.clone());
@@ -1291,6 +1322,7 @@ impl Channel {
                         Ok(embedding) => embedding,
                         Err(error) => {
                             tracing::warn!(%error, memory_id = %memory.id, "failed to compute embedding");
+                            embedding_fallback_empty += 1;
                             scored_candidates.push(ScoredCandidate {
                                 source_signal: candidate.source_signal,
                                 memory,
@@ -1307,6 +1339,7 @@ impl Channel {
                         Ok(embedding) => embedding,
                         Err(error) => {
                             tracing::warn!(%error, memory_id = %memory.id, "failed to compute embedding");
+                            embedding_fallback_empty += 1;
                             scored_candidates.push(ScoredCandidate {
                                 source_signal: candidate.source_signal,
                                 memory,
@@ -1333,6 +1366,17 @@ impl Channel {
         const ABSOLUTE_MIN_COSINE: f32 = 0.60;
         let dynamic_threshold = (max_cosine * contextual_min_score).max(ABSOLUTE_MIN_COSINE);
 
+        tracing::info!(
+            channel_id = %self.id,
+            max_cosine,
+            contextual_min_score,
+            dynamic_threshold,
+            absolute_min = ABSOLUTE_MIN_COSINE,
+            semantic_buffer_size = self.injection_state.semantic_buffer.len(),
+            scored_candidates = scored_candidates.len(),
+            "memory injection thresholds computed"
+        );
+
         seen_ids.clear();
 
         for scored in scored_candidates {
@@ -1344,6 +1388,17 @@ impl Channel {
 
             if scored.cosine < effective_threshold {
                 deduped_count += 1;
+                skipped_cosine_threshold += 1;
+                tracing::debug!(
+                    channel_id = %self.id,
+                    memory_id = %scored.memory.id,
+                    memory_type = %scored.memory.memory_type,
+                    cosine = scored.cosine,
+                    threshold = effective_threshold,
+                    source_signal = ?scored.source_signal,
+                    preview = %scored.memory.content.chars().take(100).collect::<String>(),
+                    "memory rejected: below cosine threshold"
+                );
                 continue;
             }
 
@@ -1357,6 +1412,15 @@ impl Channel {
                     semantic_threshold,
                 ) {
                     deduped_count += 1;
+                    skipped_semantic_duplicate += 1;
+                    tracing::debug!(
+                        channel_id = %self.id,
+                        memory_id = %scored.memory.id,
+                        memory_type = %scored.memory.memory_type,
+                        cosine = scored.cosine,
+                        source_signal = ?scored.source_signal,
+                        "memory rejected: semantic duplicate against channel buffer"
+                    );
                     continue;
                 }
 
@@ -1366,6 +1430,17 @@ impl Channel {
 
             self.injection_state
                 .record_injection(scored.memory.id.clone(), self.current_turn);
+
+            tracing::debug!(
+                channel_id = %self.id,
+                memory_id = %scored.memory.id,
+                memory_type = %scored.memory.memory_type,
+                cosine = scored.cosine,
+                threshold = effective_threshold,
+                source_signal = ?scored.source_signal,
+                preview = %scored.memory.content.chars().take(100).collect::<String>(),
+                "memory accepted for injection"
+            );
 
             unique_candidates.push(InjectionCandidate {
                 source_signal: scored.source_signal,
@@ -1379,6 +1454,11 @@ impl Channel {
                 channel_id = %self.id,
                 candidates = candidate_count,
                 deduped = deduped_count,
+                skipped_reinject_window,
+                skipped_duplicate_id,
+                skipped_cosine_threshold,
+                skipped_semantic_duplicate,
+                embedding_fallback_empty,
                 elapsed_ms = elapsed.as_millis() as u64,
                 "memory injection skipped (no candidates after dedup)"
             );
@@ -1442,6 +1522,11 @@ impl Channel {
             contextual = contextual_count,
             total = final_memories.len(),
             deduped = deduped_count,
+            skipped_reinject_window,
+            skipped_duplicate_id,
+            skipped_cosine_threshold,
+            skipped_semantic_duplicate,
+            embedding_fallback_empty,
             elapsed_ms = elapsed.as_millis() as u64,
             "memory injection complete"
         );
