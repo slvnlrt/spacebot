@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link } from "@tanstack/react-router";
 import { AnimatePresence, motion } from "framer-motion";
-import { api, type ChannelInfo, type TimelineItem, type TimelineBranchRun, type TimelineWorkerRun } from "@/api/client";
+import { api, type ChannelInfo, type TimelineItem, type TimelineBranchRun, type TimelineWorkerRun, type TimelineMemoryInjection } from "@/api/client";
 import type { ChannelLiveState, ActiveWorker, ActiveBranch } from "@/hooks/useChannelLiveState";
 import { CortexChatPanel } from "@/components/CortexChatPanel";
 import { LiveDuration } from "@/components/LiveDuration";
@@ -222,6 +222,45 @@ function WorkerRunItem({ item, agentId }: { item: TimelineWorkerRun; agentId: st
 	);
 }
 
+function MemoryInjectionItem({ item }: { item: TimelineMemoryInjection }) {
+	const [expanded, setExpanded] = useState(false);
+
+	return (
+		<div className="flex gap-3 px-3 py-2">
+			<span className="flex-shrink-0 pt-0.5 text-tiny text-ink-faint">
+				{formatTimestamp(new Date(item.injected_at).getTime())}
+			</span>
+			<div className="min-w-0 flex-1">
+				<div className="w-full rounded-md border border-cyan-500/20 bg-cyan-500/10 px-3 py-2">
+					<button
+						type="button"
+						onClick={() => setExpanded(!expanded)}
+						className="flex w-full items-center gap-2 text-left"
+					>
+						<div className="h-2 w-2 rounded-full bg-cyan-400/70" />
+						<span className="text-sm font-medium text-cyan-300">Memory Injection</span>
+						<span className="min-w-0 flex-1 truncate text-sm text-ink-dull">
+							{item.contextual_count} contextual memor{item.contextual_count === 1 ? "y" : "ies"}
+						</span>
+						<span className="flex-shrink-0 text-tiny text-ink-faint">{expanded ? "▾" : "▸"}</span>
+					</button>
+				</div>
+				{expanded && item.contextual.length > 0 && (
+					<div className="mt-1 rounded-md border border-cyan-500/10 bg-cyan-500/5 px-3 py-2">
+						<div className="flex flex-col gap-1 text-sm text-ink-dull">
+							{item.contextual.map((memory) => (
+								<div key={memory.memory_id} className="whitespace-pre-wrap break-words">
+									<span className="text-cyan-300">[{memory.memory_type}]</span> {memory.content}
+								</div>
+							))}
+						</div>
+					</div>
+				)}
+			</div>
+		</div>
+	);
+}
+
 function TimelineEntry({ item, liveWorkers, liveBranches, channelId, agentId }: {
 	item: TimelineItem;
 	liveWorkers: Record<string, ActiveWorker>;
@@ -262,6 +301,8 @@ function TimelineEntry({ item, liveWorkers, liveBranches, channelId, agentId }: 
 			if (live) return <LiveWorkerRunItem item={item} live={live} channelId={channelId} agentId={agentId} />;
 			return <WorkerRunItem item={item} agentId={agentId} />;
 		}
+		case "memory_injection":
+			return <MemoryInjectionItem item={item} />;
 	}
 }
 

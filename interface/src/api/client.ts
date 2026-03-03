@@ -109,6 +109,19 @@ export interface ToolCompletedEvent {
 	result: string;
 }
 
+export interface InjectedMemoryInfo {
+	memory_id: string;
+	memory_type: string;
+	content: string;
+}
+
+export interface MemoryInjectedEvent {
+	type: "memory_injected";
+	agent_id: string;
+	channel_id: string;
+	contextual: InjectedMemoryInfo[];
+}
+
 export type ApiEvent =
 	| InboundMessageEvent
 	| OutboundMessageEvent
@@ -119,7 +132,8 @@ export type ApiEvent =
 	| BranchStartedEvent
 	| BranchCompletedEvent
 	| ToolStartedEvent
-	| ToolCompletedEvent;
+	| ToolCompletedEvent
+	| MemoryInjectedEvent;
 
 async function fetchJson<T>(path: string): Promise<T> {
 	const response = await fetch(`${API_BASE}${path}`);
@@ -158,7 +172,19 @@ export interface TimelineWorkerRun {
 	completed_at: string | null;
 }
 
-export type TimelineItem = TimelineMessage | TimelineBranchRun | TimelineWorkerRun;
+export interface TimelineMemoryInjection {
+	type: "memory_injection";
+	id: string;
+	contextual_count: number;
+	contextual: InjectedMemoryInfo[];
+	injected_at: string;
+}
+
+export type TimelineItem =
+	| TimelineMessage
+	| TimelineBranchRun
+	| TimelineWorkerRun
+	| TimelineMemoryInjection;
 
 export interface MessagesResponse {
 	items: TimelineItem[];

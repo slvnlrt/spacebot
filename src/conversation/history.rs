@@ -239,6 +239,12 @@ pub enum TimelineItem {
         started_at: String,
         completed_at: Option<String>,
     },
+    MemoryInjection {
+        id: String,
+        contextual_count: i64,
+        contextual: Vec<crate::InjectedMemoryInfo>,
+        injected_at: String,
+    },
 }
 
 /// Persists branch and worker run records for channel timeline history.
@@ -368,6 +374,37 @@ impl ProcessRunLogger {
         });
     }
 
+    /// Record a memory injection event for timeline visualization. Fire-and-forget.
+    pub fn log_memory_injection(
+        &self,
+        channel_id: &ChannelId,
+        injection_id: &str,
+        contextual: &[crate::InjectedMemoryInfo],
+    ) {
+        let pool = self.pool.clone();
+        let id = injection_id.to_string();
+        let channel_id = channel_id.to_string();
+        let contextual_json = serde_json::to_string(contextual).unwrap_or_else(|_| "[]".to_string());
+        let contextual_count = contextual.len() as i64;
+
+        tokio::spawn(async move {
+            if let Err(error) = sqlx::query(
+                "INSERT OR IGNORE INTO memory_injection_events \
+                 (id, channel_id, pinned_json, contextual_json, pinned_count, contextual_count) \
+                 VALUES (?, ?, '[]', ?, 0, ?)",
+            )
+            .bind(&id)
+            .bind(&channel_id)
+            .bind(&contextual_json)
+            .bind(contextual_count)
+            .execute(&pool)
+            .await
+            {
+                tracing::warn!(%error, channel_id = %channel_id, injection_id = %id, "failed to persist memory injection event");
+            }
+        });
+    }
+
     /// Mark all orphaned running workers as failed for an agent.
     ///
     /// Called at startup to reconcile rows that were left in `running` when the
@@ -441,22 +478,27 @@ impl ProcessRunLogger {
             ""
         };
 
-        let query_str = format!(
+         let query_str = format!(
             "SELECT * FROM ( \
                 SELECT 'message' AS item_type, id, role, sender_name, sender_id, content, \
-                       NULL AS description, NULL AS conclusion, NULL AS task, NULL AS result, NULL AS status, \
+                  NULL AS description, NULL AS conclusion, NULL AS task, NULL AS result, NULL AS status, NULL AS contextual_json, NULL AS contextual_count, \
                        created_at AS timestamp, NULL AS completed_at \
                 FROM conversation_messages WHERE channel_id = ?1 \
                 UNION ALL \
                 SELECT 'branch_run' AS item_type, id, NULL, NULL, NULL, NULL, \
-                       description, conclusion, NULL, NULL, NULL, \
+                  description, conclusion, NULL, NULL, NULL, NULL, NULL, \
                        started_at AS timestamp, completed_at \
                 FROM branch_runs WHERE channel_id = ?1 \
                 UNION ALL \
                 SELECT 'worker_run' AS item_type, id, NULL, NULL, NULL, NULL, \
-                       NULL, NULL, task, result, status, \
+                  NULL, NULL, task, result, status, NULL, NULL, \
                        started_at AS timestamp, completed_at \
                 FROM worker_runs WHERE channel_id = ?1 \
+              UNION ALL \
+              SELECT 'memory_injection' AS item_type, id, NULL, NULL, NULL, NULL, \
+                  NULL, NULL, NULL, NULL, NULL, contextual_json, contextual_count, \
+                  injected_at AS timestamp, NULL AS completed_at \
+              FROM memory_injection_events WHERE channel_id = ?1 \
             ) WHERE 1=1 {before_clause} ORDER BY timestamp DESC LIMIT ?2"
         );
 
@@ -514,6 +556,27 @@ impl ProcessRunLogger {
                             .ok()
                             .map(|t| t.to_rfc3339()),
                     }),
+                    "memory_injection" => {
+                        let contextual_json = row
+                            .try_get::<Option<String>, _>("contextual_json")
+                            .ok()
+                            .flatten()
+                            .unwrap_or_else(|| "[]".to_string());
+                        let contextual = serde_json::from_str::<Vec<crate::InjectedMemoryInfo>>(
+                            &contextual_json,
+                        )
+                        .unwrap_or_default();
+
+                        Some(TimelineItem::MemoryInjection {
+                            id: row.try_get("id").unwrap_or_default(),
+                            contextual_count: row.try_get::<i64, _>("contextual_count").unwrap_or(0),
+                            contextual,
+                            injected_at: row
+                                .try_get::<chrono::DateTime<chrono::Utc>, _>("timestamp")
+                                .map(|t| t.to_rfc3339())
+                                .unwrap_or_default(),
+                        })
+                    }
                     _ => None,
                 }
             })

@@ -1408,6 +1408,26 @@ impl Channel {
 
         let contextual_count = final_memories.len();
 
+        let contextual_infos = final_memories
+            .iter()
+            .map(|memory| crate::InjectedMemoryInfo {
+                memory_id: memory.id.clone(),
+                memory_type: memory.memory_type.to_string(),
+                content: memory.content.clone(),
+            })
+            .collect::<Vec<_>>();
+
+        let injection_id = uuid::Uuid::new_v4().to_string();
+        self.state
+            .process_run_logger
+            .log_memory_injection(&self.id, &injection_id, &contextual_infos);
+
+        let _ = self.deps.event_tx.send(ProcessEvent::MemoryInjected {
+            agent_id: self.deps.agent_id.clone(),
+            channel_id: self.id.clone(),
+            contextual: contextual_infos,
+        });
+
         let contextual_lines = final_memories
             .iter()
             .map(|memory| format!("[{}] {}", memory.memory_type, memory.content))

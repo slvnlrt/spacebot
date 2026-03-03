@@ -196,6 +196,19 @@ pub enum ProcessEvent {
         /// "created", "updated", or "deleted".
         action: String,
     },
+    MemoryInjected {
+        agent_id: AgentId,
+        channel_id: ChannelId,
+        contextual: Vec<InjectedMemoryInfo>,
+    },
+}
+
+/// Lightweight memory snapshot used for timeline visualization events.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InjectedMemoryInfo {
+    pub memory_id: String,
+    pub memory_type: String,
+    pub content: String,
 }
 
 /// A message to be injected into a specific channel from outside the normal

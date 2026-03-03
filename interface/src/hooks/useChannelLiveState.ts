@@ -5,6 +5,7 @@ import {
 	type BranchStartedEvent,
 	type InboundMessageEvent,
 	type OutboundMessageEvent,
+	type MemoryInjectedEvent,
 	type TimelineItem,
 	type ToolCompletedEvent,
 	type ToolStartedEvent,
@@ -55,6 +56,7 @@ function itemTimestamp(item: TimelineItem): string {
 		case "message": return item.created_at;
 		case "branch_run": return item.started_at;
 		case "worker_run": return item.started_at;
+		case "memory_injection": return item.injected_at;
 	}
 }
 
@@ -568,6 +570,17 @@ export function useChannelLiveState(channels: ChannelInfo[]) {
 		}
 	}, []);
 
+	const handleMemoryInjected = useCallback((data: unknown) => {
+		const event = data as MemoryInjectedEvent;
+		pushItem(event.channel_id, {
+			type: "memory_injection",
+			id: `inj-${Date.now()}-${crypto.randomUUID()}`,
+			contextual_count: event.contextual.length,
+			contextual: event.contextual,
+			injected_at: new Date().toISOString(),
+		});
+	}, [pushItem]);
+
 	const loadOlderMessages = useCallback((channelId: string) => {
 		setLiveStates((prev) => {
 			const state = prev[channelId];
@@ -621,6 +634,7 @@ export function useChannelLiveState(channels: ChannelInfo[]) {
 		branch_completed: handleBranchCompleted,
 		tool_started: handleToolStarted,
 		tool_completed: handleToolCompleted,
+		memory_injected: handleMemoryInjected,
 	};
 
 	return { liveStates, handlers, syncStatusSnapshot, loadOlderMessages };

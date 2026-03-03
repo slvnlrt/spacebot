@@ -220,6 +220,12 @@ pub enum ApiEvent {
         /// "created", "updated", or "deleted".
         action: String,
     },
+    /// Memory injection event for channel timeline updates.
+    MemoryInjected {
+        agent_id: String,
+        channel_id: String,
+        contextual: Vec<crate::InjectedMemoryInfo>,
+    },
 }
 
 impl ApiState {
@@ -476,6 +482,19 @@ impl ApiState {
                                         task_number: *task_number,
                                         status: status.clone(),
                                         action: action.clone(),
+                                    })
+                                    .ok();
+                            }
+                            ProcessEvent::MemoryInjected {
+                                channel_id,
+                                contextual,
+                                ..
+                            } => {
+                                api_tx
+                                    .send(ApiEvent::MemoryInjected {
+                                        agent_id: agent_id.clone(),
+                                        channel_id: channel_id.to_string(),
+                                        contextual: contextual.clone(),
                                     })
                                     .ok();
                             }
