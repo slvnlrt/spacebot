@@ -394,6 +394,15 @@ impl CortexChatSession {
                                 transcript.push_str(&format!("*[Worker: {task}]*: {result}\n\n"));
                             }
                         }
+                        crate::conversation::history::TimelineItem::MemoryInjection {
+                            contextual_count,
+                            ..
+                        } => {
+                            // Keep transcript concise while still exposing that memory context was injected.
+                            transcript.push_str(&format!(
+                                "*[Memory Injection]*: {contextual_count} contextual memories injected\n\n"
+                            ));
+                        }
                     }
                 }
                 Some(transcript)

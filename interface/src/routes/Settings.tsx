@@ -2054,7 +2054,7 @@ function MemoryInjectionSection({settings, isLoading}: GlobalSettingsSectionProp
 									</div>
 									<div>
 										<NumberStepper
-											<label="Max Total"
+											label="Max Total"
 											description="Hard cap across contextual memories"
 											value={maxTotal}
 											onChange={setMaxTotal}
