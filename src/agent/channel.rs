@@ -1492,6 +1492,8 @@ impl Channel {
             unique_candidates.push(InjectionCandidate {
                 source_signal: scored.source_signal,
                 memory: scored.memory,
+                retrieval_score: scored.retrieval_score,
+                retrieval_rank: scored.retrieval_rank,
             });
         }
 
