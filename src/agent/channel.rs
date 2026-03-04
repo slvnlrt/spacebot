@@ -1197,6 +1197,8 @@ impl Channel {
         struct InjectionCandidate {
             memory: crate::memory::Memory,
             source_signal: Option<SourceSignal>,
+            retrieval_score: Option<f32>,
+            retrieval_rank: Option<usize>,
         }
 
         let memory_search = self.deps.memory_search();
@@ -1241,9 +1243,27 @@ impl Channel {
 
         match memory_search.search(user_text, &search_config).await {
             Ok(results) => {
+                tracing::debug!(
+                    channel_id = %self.id,
+                    result_count = results.len(),
+                    top = ?results
+                        .iter()
+                        .take(10)
+                        .map(|result| (
+                            result.memory.id.get(..8).unwrap_or(&result.memory.id).to_string(),
+                            result.rank,
+                            result.score,
+                            format!("{:?}", result.source_signal),
+                        ))
+                        .collect::<Vec<_>>(),
+                    "memory injection raw hybrid candidates"
+                );
+
                 all_candidates.extend(results.into_iter().map(|result| InjectionCandidate {
                     source_signal: result.source_signal,
                     memory: result.memory,
+                    retrieval_score: Some(result.score),
+                    retrieval_rank: Some(result.rank),
                 }));
             }
             Err(error) => {
@@ -1278,6 +1298,8 @@ impl Channel {
             embedding: Vec<f32>,
             cosine: f32,
             source_signal: Option<SourceSignal>,
+            retrieval_score: Option<f32>,
+            retrieval_rank: Option<usize>,
         }
 
         let mut scored_candidates = Vec::new();
@@ -1328,6 +1350,8 @@ impl Channel {
                                 memory,
                                 embedding: Vec::new(),
                                 cosine: 0.0,
+                                retrieval_score: candidate.retrieval_score,
+                                retrieval_rank: candidate.retrieval_rank,
                             });
                             continue;
                         }
@@ -1345,6 +1369,8 @@ impl Channel {
                                 memory,
                                 embedding: Vec::new(),
                                 cosine: 0.0,
+                                retrieval_score: candidate.retrieval_score,
+                                retrieval_rank: candidate.retrieval_rank,
                             });
                             continue;
                         }
@@ -1360,6 +1386,8 @@ impl Channel {
                 memory,
                 embedding,
                 cosine,
+                retrieval_score: candidate.retrieval_score,
+                retrieval_rank: candidate.retrieval_rank,
             });
         }
 
@@ -1386,6 +1414,12 @@ impl Channel {
                 _ => dynamic_threshold,
             };
 
+            let threshold_reason = match scored.source_signal {
+                Some(SourceSignal::FtsOnly) => "fts_floor",
+                Some(SourceSignal::Both) => "both_floor",
+                _ => "dynamic",
+            };
+
             if scored.cosine < effective_threshold {
                 deduped_count += 1;
                 skipped_cosine_threshold += 1;
@@ -1395,7 +1429,11 @@ impl Channel {
                     memory_type = %scored.memory.memory_type,
                     cosine = scored.cosine,
                     threshold = effective_threshold,
+                    dynamic_threshold,
+                    threshold_reason,
                     source_signal = ?scored.source_signal,
+                    retrieval_rank = ?scored.retrieval_rank,
+                    retrieval_score = ?scored.retrieval_score,
                     preview = %scored.memory.content.chars().take(100).collect::<String>(),
                     "memory rejected: below cosine threshold"
                 );
@@ -1418,7 +1456,12 @@ impl Channel {
                         memory_id = %scored.memory.id,
                         memory_type = %scored.memory.memory_type,
                         cosine = scored.cosine,
+                        threshold = effective_threshold,
+                        dynamic_threshold,
+                        threshold_reason,
                         source_signal = ?scored.source_signal,
+                        retrieval_rank = ?scored.retrieval_rank,
+                        retrieval_score = ?scored.retrieval_score,
                         "memory rejected: semantic duplicate against channel buffer"
                     );
                     continue;
@@ -1437,7 +1480,11 @@ impl Channel {
                 memory_type = %scored.memory.memory_type,
                 cosine = scored.cosine,
                 threshold = effective_threshold,
+                dynamic_threshold,
+                threshold_reason,
                 source_signal = ?scored.source_signal,
+                retrieval_rank = ?scored.retrieval_rank,
+                retrieval_score = ?scored.retrieval_score,
                 preview = %scored.memory.content.chars().take(100).collect::<String>(),
                 "memory accepted for injection"
             );
