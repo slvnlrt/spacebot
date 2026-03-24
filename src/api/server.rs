@@ -195,6 +195,10 @@ pub async fn start_http_server(
             get(settings::get_global_settings).put(settings::update_global_settings),
         )
         .route(
+            "/settings/embedding/reindex",
+            post(settings::reindex_embeddings),
+        )
+        .route(
             "/config/raw",
             get(settings::get_raw_config).put(settings::update_raw_config),
         )

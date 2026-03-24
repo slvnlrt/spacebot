@@ -729,6 +729,8 @@ pub struct DefaultsConfig {
     pub worker_log_mode: crate::settings::WorkerLogMode,
     /// Memory injection configuration for pre-hook context enrichment.
     pub memory_injection: MemoryInjectionConfig,
+    /// Embedding model identifier used for memory vectorization.
+    pub embedding_model: String,
 }
 
 impl std::fmt::Debug for DefaultsConfig {
@@ -758,6 +760,7 @@ impl std::fmt::Debug for DefaultsConfig {
             .field("cron", &self.cron)
             .field("opencode", &self.opencode)
             .field("worker_log_mode", &self.worker_log_mode)
+            .field("embedding_model", &self.embedding_model)
             .finish()
     }
 }
@@ -1021,10 +1024,6 @@ pub struct MemoryInjectionConfig {
     #[serde(default = "default_search_limit")]
     pub search_limit: usize,
 
-    /// Minimum hybrid score for contextual candidates.
-    #[serde(default = "default_contextual_min_score")]
-    pub contextual_min_score: f32,
-
     /// Number of turns before a memory can be re-injected.
     #[serde(default = "default_context_window_depth")]
     pub context_window_depth: usize,
@@ -1049,9 +1048,6 @@ fn default_enabled() -> bool {
 fn default_search_limit() -> usize {
     20
 }
-fn default_contextual_min_score() -> f32 {
-    0.70
-}
 fn default_context_window_depth() -> usize {
     10
 }
@@ -1070,7 +1066,6 @@ impl Default for MemoryInjectionConfig {
         Self {
             enabled: default_enabled(),
             search_limit: default_search_limit(),
-            contextual_min_score: default_contextual_min_score(),
             context_window_depth: default_context_window_depth(),
             semantic_threshold: default_semantic_threshold(),
             max_total: default_max_total(),
@@ -1323,6 +1318,7 @@ impl Default for DefaultsConfig {
             opencode: OpenCodeConfig::default(),
             worker_log_mode: crate::settings::WorkerLogMode::default(),
             memory_injection: MemoryInjectionConfig::default(),
+            embedding_model: "paraphrase-multilingual-MiniLM-L12-v2".to_string(),
         }
     }
 }
@@ -2991,13 +2987,13 @@ struct TomlDefaultsConfig {
     opencode: Option<TomlOpenCodeConfig>,
     worker_log_mode: Option<String>,
     memory_injection: Option<TomlMemoryInjectionConfig>,
+    embedding_model: Option<String>,
 }
 
 #[derive(Deserialize)]
 struct TomlMemoryInjectionConfig {
     enabled: Option<bool>,
     search_limit: Option<usize>,
-    contextual_min_score: Option<f32>,
     context_window_depth: Option<usize>,
     semantic_threshold: Option<f32>,
     max_total: Option<usize>,
@@ -5003,13 +4999,12 @@ impl Config {
                     MemoryInjectionConfig {
                         enabled: mi.enabled.unwrap_or(base.enabled),
                         search_limit: mi.search_limit.unwrap_or(base.search_limit),
-                        contextual_min_score: mi
-                            .contextual_min_score
-                            .unwrap_or(base.contextual_min_score),
                         context_window_depth: mi
                             .context_window_depth
                             .unwrap_or(base.context_window_depth),
-                        semantic_threshold: mi.semantic_threshold.unwrap_or(base.semantic_threshold),
+                        semantic_threshold: mi
+                            .semantic_threshold
+                            .unwrap_or(base.semantic_threshold),
                         max_total: mi.max_total.unwrap_or(base.max_total),
                         max_injected_blocks_in_history: mi
                             .max_injected_blocks_in_history
@@ -5017,6 +5012,10 @@ impl Config {
                     }
                 })
                 .unwrap_or(base_defaults.memory_injection),
+            embedding_model: toml
+                .defaults
+                .embedding_model
+                .unwrap_or_else(|| base_defaults.embedding_model.clone()),
         };
 
         let mut agents: Vec<AgentConfig> = toml
@@ -5157,13 +5156,12 @@ impl Config {
                         MemoryInjectionConfig {
                             enabled: mi.enabled.unwrap_or(base.enabled),
                             search_limit: mi.search_limit.unwrap_or(base.search_limit),
-                            contextual_min_score: mi
-                                .contextual_min_score
-                                .unwrap_or(base.contextual_min_score),
                             context_window_depth: mi
                                 .context_window_depth
                                 .unwrap_or(base.context_window_depth),
-                            semantic_threshold: mi.semantic_threshold.unwrap_or(base.semantic_threshold),
+                            semantic_threshold: mi
+                                .semantic_threshold
+                                .unwrap_or(base.semantic_threshold),
                             max_total: mi.max_total.unwrap_or(base.max_total),
                             max_injected_blocks_in_history: mi
                                 .max_injected_blocks_in_history

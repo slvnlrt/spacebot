@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 /// Schema constants for the embeddings table.
 const TABLE_NAME: &str = "memory_embeddings";
-const EMBEDDING_DIM: i32 = 384; // all-MiniLM-L6-v2 dimension
+const EMBEDDING_DIM: i32 = 384; // paraphrase-multilingual-MiniLM-L12-v2 dimension
 
 /// LanceDB table for memory embeddings with HNSW index and FTS.
 pub struct EmbeddingTable {
@@ -425,16 +425,16 @@ mod tests {
     async fn create_test_table() -> EmbeddingTable {
         let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
         let db_path = temp_dir.path().to_string_lossy().to_string();
-        
+
         // Keep temp_dir alive for the test duration by leaking it
         // (tests are short-lived, so this is acceptable)
         std::mem::forget(temp_dir);
-        
+
         let connection = lancedb::connect(&db_path)
             .execute()
             .await
             .expect("failed to connect to LanceDB");
-        
+
         EmbeddingTable::open_or_create(&connection)
             .await
             .expect("failed to create embedding table")
@@ -444,28 +444,28 @@ mod tests {
     #[tokio::test]
     async fn test_get_embedding_from_lancedb() {
         let table = create_test_table().await;
-        
-        // Create a test embedding (384 dimensions for all-MiniLM-L6-v2)
+
+        // Create a test embedding (384 dimensions — paraphrase-multilingual-MiniLM-L12-v2)
         let memory_id = "test-memory-001";
         let content = "This is a test memory content";
         let embedding: Vec<f32> = (0..EMBEDDING_DIM).map(|i| i as f32 * 0.01).collect();
-        
+
         // Store the embedding
         table
             .store(memory_id, content, &embedding)
             .await
             .expect("failed to store embedding");
-        
+
         // Retrieve the embedding
         let result = table
             .get_embedding(memory_id)
             .await
             .expect("failed to get embedding");
-        
+
         // Verify the embedding was retrieved
         assert!(result.is_some(), "Expected embedding to be found");
         let retrieved = result.unwrap();
-        
+
         // Verify the embedding values match
         assert_eq!(
             retrieved.len(),
@@ -487,45 +487,51 @@ mod tests {
     #[tokio::test]
     async fn test_get_embedding_not_found() {
         let table = create_test_table().await;
-        
+
         // Try to retrieve a non-existent embedding
         let result = table
             .get_embedding("non-existent-memory-id")
             .await
             .expect("failed to query embedding");
-        
-        assert!(
-            result.is_none(),
-            "Expected None for non-existent embedding"
-        );
+
+        assert!(result.is_none(), "Expected None for non-existent embedding");
     }
 
     /// Test that storing and retrieving multiple embeddings works correctly.
     #[tokio::test]
     async fn test_store_and_retrieve_multiple_embeddings() {
         let table = create_test_table().await;
-        
+
         // Store multiple embeddings
         let embeddings: Vec<(String, String, Vec<f32>)> = (0..3)
             .map(|i| {
                 let id = format!("memory-{}", i);
                 let content = format!("Content for memory {}", i);
-                let embedding: Vec<f32> = (0..EMBEDDING_DIM).map(|j| (i * 100 + j) as f32 * 0.001).collect();
+                let embedding: Vec<f32> = (0..EMBEDDING_DIM)
+                    .map(|j| (i * 100 + j) as f32 * 0.001)
+                    .collect();
                 (id, content, embedding)
             })
             .collect();
-        
+
         for (id, content, emb) in &embeddings {
-            table.store(id, content, emb).await.expect("failed to store");
+            table
+                .store(id, content, emb)
+                .await
+                .expect("failed to store");
         }
-        
+
         // Retrieve each embedding and verify
         for (id, _, expected_emb) in &embeddings {
             let result = table
                 .get_embedding(id)
                 .await
                 .expect("failed to get embedding");
-            assert!(result.is_some(), "Expected embedding for {} to be found", id);
+            assert!(
+                result.is_some(),
+                "Expected embedding for {} to be found",
+                id
+            );
             let retrieved = result.unwrap();
             assert_eq!(retrieved.len(), expected_emb.len());
         }

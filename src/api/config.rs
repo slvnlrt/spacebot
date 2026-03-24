@@ -72,7 +72,6 @@ pub(super) struct MemoryPersistenceSection {
 pub(super) struct MemoryInjectionSection {
     enabled: bool,
     search_limit: usize,
-    contextual_min_score: f32,
     context_window_depth: usize,
     semantic_threshold: f32,
     max_total: usize,
@@ -215,7 +214,6 @@ pub(super) struct MemoryPersistenceUpdate {
 pub(super) struct MemoryInjectionUpdate {
     enabled: Option<bool>,
     search_limit: Option<usize>,
-    contextual_min_score: Option<f32>,
     context_window_depth: Option<usize>,
     semantic_threshold: Option<f32>,
     max_total: Option<usize>,
@@ -315,7 +313,6 @@ pub(super) async fn get_agent_config(
         memory_injection: MemoryInjectionSection {
             enabled: memory_injection.enabled,
             search_limit: memory_injection.search_limit,
-            contextual_min_score: memory_injection.contextual_min_score,
             context_window_depth: memory_injection.context_window_depth,
             semantic_threshold: memory_injection.semantic_threshold,
             max_total: memory_injection.max_total,
@@ -708,14 +705,12 @@ fn update_memory_injection_table(
 ) -> Result<(), StatusCode> {
     let agent = get_agent_table_mut(doc, agent_idx)?;
     let table = get_or_create_subtable(agent, "memory_injection")?;
+    table.remove("contextual_min_score");
     if let Some(v) = memory_injection.enabled {
         table["enabled"] = toml_edit::value(v);
     }
     if let Some(v) = memory_injection.search_limit {
         table["search_limit"] = toml_edit::value(v as i64);
-    }
-    if let Some(v) = memory_injection.contextual_min_score {
-        table["contextual_min_score"] = toml_edit::value(v as f64);
     }
     if let Some(v) = memory_injection.context_window_depth {
         table["context_window_depth"] = toml_edit::value(v as i64);
@@ -823,7 +818,10 @@ async fn has_memory_injection_override(state: &Arc<ApiState>, agent_id: &str) ->
         return false;
     };
 
-    let Some(agents) = doc.get("agents").and_then(|value| value.as_array_of_tables()) else {
+    let Some(agents) = doc
+        .get("agents")
+        .and_then(|value| value.as_array_of_tables())
+    else {
         return false;
     };
 

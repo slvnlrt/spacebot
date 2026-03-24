@@ -4,9 +4,9 @@
 //! spawns compaction workers when thresholds are crossed. The LLM work (summarization
 //! + memory extraction) happens in the spawned worker, not here.
 
+use crate::agent::channel::is_injection_block;
 use crate::error::Result;
 use crate::llm::SpacebotModel;
-use crate::agent::channel::is_injection_block;
 use crate::{AgentDeps, ChannelId, ProcessType};
 use rig::agent::AgentBuilder;
 use rig::completion::{CompletionModel as _, Prompt as _};

@@ -15,17 +15,22 @@ pub(super) struct GlobalSettingsResponse {
     worker_log_mode: String,
     opencode: OpenCodeSettingsResponse,
     memory_injection: MemoryInjectionResponse,
+    embedding: EmbeddingSettingsResponse,
 }
 
 #[derive(Serialize)]
 pub(super) struct MemoryInjectionResponse {
     enabled: bool,
     search_limit: usize,
-    contextual_min_score: f32,
     context_window_depth: usize,
     semantic_threshold: f32,
     max_total: usize,
     max_injected_blocks_in_history: usize,
+}
+
+#[derive(Serialize)]
+pub(super) struct EmbeddingSettingsResponse {
+    model: String,
 }
 
 #[derive(Serialize)]
@@ -54,17 +59,22 @@ pub(super) struct GlobalSettingsUpdate {
     worker_log_mode: Option<String>,
     opencode: Option<OpenCodeSettingsUpdate>,
     memory_injection: Option<MemoryInjectionUpdate>,
+    embedding: Option<EmbeddingSettingsUpdate>,
 }
 
 #[derive(Deserialize)]
 pub(super) struct MemoryInjectionUpdate {
     enabled: Option<bool>,
     search_limit: Option<usize>,
-    contextual_min_score: Option<f32>,
     context_window_depth: Option<usize>,
     semantic_threshold: Option<f32>,
     max_total: Option<usize>,
     max_injected_blocks_in_history: Option<usize>,
+}
+
+#[derive(Deserialize)]
+pub(super) struct EmbeddingSettingsUpdate {
+    model: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -107,180 +117,207 @@ pub(super) struct RawConfigUpdateResponse {
     message: String,
 }
 
+#[derive(Deserialize)]
+pub(super) struct ReindexEmbeddingsRequest {
+    pub agent_id: Option<String>,
+}
+
+#[derive(Serialize)]
+pub(super) struct ReindexEmbeddingsResponse {
+    success: bool,
+    message: String,
+}
+
 pub(super) async fn get_global_settings(
     State(state): State<Arc<ApiState>>,
 ) -> Result<Json<GlobalSettingsResponse>, StatusCode> {
     let config_path = state.config_path.read().await.clone();
 
-    let (brave_search_key, api_enabled, api_port, api_bind, worker_log_mode, opencode, memory_injection) =
-        if config_path.exists() {
-            let content = tokio::fs::read_to_string(&config_path)
-                .await
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-            let doc: toml_edit::DocumentMut = content
-                .parse()
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let (
+        brave_search_key,
+        api_enabled,
+        api_port,
+        api_bind,
+        worker_log_mode,
+        opencode,
+        memory_injection,
+        embedding,
+    ) = if config_path.exists() {
+        let content = tokio::fs::read_to_string(&config_path)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let doc: toml_edit::DocumentMut = content
+            .parse()
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-            let brave_search = doc
-                .get("defaults")
-                .and_then(|d| d.get("brave_search_key"))
-                .and_then(|v| v.as_str())
-                .and_then(|s| {
-                    if let Some(var) = s.strip_prefix("env:") {
-                        std::env::var(var).ok()
-                    } else {
-                        Some(s.to_string())
-                    }
-                });
+        let brave_search = doc
+            .get("defaults")
+            .and_then(|d| d.get("brave_search_key"))
+            .and_then(|v| v.as_str())
+            .and_then(|s| {
+                if let Some(var) = s.strip_prefix("env:") {
+                    std::env::var(var).ok()
+                } else {
+                    Some(s.to_string())
+                }
+            });
 
-            let api_enabled = doc
-                .get("api")
-                .and_then(|a| a.get("enabled"))
+        let api_enabled = doc
+            .get("api")
+            .and_then(|a| a.get("enabled"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+
+        let api_port = doc
+            .get("api")
+            .and_then(|a| a.get("port"))
+            .and_then(|v| v.as_integer())
+            .and_then(|i| u16::try_from(i).ok())
+            .unwrap_or(19898);
+
+        let api_bind = doc
+            .get("api")
+            .and_then(|a| a.get("bind"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("127.0.0.1")
+            .to_string();
+
+        let worker_log_mode = doc
+            .get("defaults")
+            .and_then(|d| d.get("worker_log_mode"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("errors_only")
+            .to_string();
+
+        let opencode_table = doc.get("defaults").and_then(|d| d.get("opencode"));
+        let opencode_perms = opencode_table.and_then(|o| o.get("permissions"));
+        let opencode = OpenCodeSettingsResponse {
+            enabled: opencode_table
+                .and_then(|o| o.get("enabled"))
                 .and_then(|v| v.as_bool())
-                .unwrap_or(true);
-
-            let api_port = doc
-                .get("api")
-                .and_then(|a| a.get("port"))
+                .unwrap_or(false),
+            path: opencode_table
+                .and_then(|o| o.get("path"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("opencode")
+                .to_string(),
+            max_servers: opencode_table
+                .and_then(|o| o.get("max_servers"))
                 .and_then(|v| v.as_integer())
-                .and_then(|i| u16::try_from(i).ok())
-                .unwrap_or(19898);
-
-            let api_bind = doc
-                .get("api")
-                .and_then(|a| a.get("bind"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("127.0.0.1")
-                .to_string();
-
-            let worker_log_mode = doc
-                .get("defaults")
-                .and_then(|d| d.get("worker_log_mode"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("errors_only")
-                .to_string();
-
-            let opencode_table = doc.get("defaults").and_then(|d| d.get("opencode"));
-            let opencode_perms = opencode_table.and_then(|o| o.get("permissions"));
-            let opencode = OpenCodeSettingsResponse {
-                enabled: opencode_table
-                    .and_then(|o| o.get("enabled"))
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false),
-                path: opencode_table
-                    .and_then(|o| o.get("path"))
+                .and_then(|i| usize::try_from(i).ok())
+                .unwrap_or(5),
+            server_startup_timeout_secs: opencode_table
+                .and_then(|o| o.get("server_startup_timeout_secs"))
+                .and_then(|v| v.as_integer())
+                .and_then(|i| u64::try_from(i).ok())
+                .unwrap_or(30),
+            max_restart_retries: opencode_table
+                .and_then(|o| o.get("max_restart_retries"))
+                .and_then(|v| v.as_integer())
+                .and_then(|i| u32::try_from(i).ok())
+                .unwrap_or(5),
+            permissions: OpenCodePermissionsResponse {
+                edit: opencode_perms
+                    .and_then(|p| p.get("edit"))
                     .and_then(|v| v.as_str())
-                    .unwrap_or("opencode")
+                    .unwrap_or("allow")
                     .to_string(),
-                max_servers: opencode_table
-                    .and_then(|o| o.get("max_servers"))
-                    .and_then(|v| v.as_integer())
-                    .and_then(|i| usize::try_from(i).ok())
-                    .unwrap_or(5),
-                server_startup_timeout_secs: opencode_table
-                    .and_then(|o| o.get("server_startup_timeout_secs"))
-                    .and_then(|v| v.as_integer())
-                    .and_then(|i| u64::try_from(i).ok())
-                    .unwrap_or(30),
-                max_restart_retries: opencode_table
-                    .and_then(|o| o.get("max_restart_retries"))
-                    .and_then(|v| v.as_integer())
-                    .and_then(|i| u32::try_from(i).ok())
-                    .unwrap_or(5),
-                permissions: OpenCodePermissionsResponse {
-                    edit: opencode_perms
-                        .and_then(|p| p.get("edit"))
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("allow")
-                        .to_string(),
-                    bash: opencode_perms
-                        .and_then(|p| p.get("bash"))
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("allow")
-                        .to_string(),
-                    webfetch: opencode_perms
-                        .and_then(|p| p.get("webfetch"))
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("allow")
-                        .to_string(),
-                },
-            };
-
-            let memory_injection_table = doc.get("defaults").and_then(|d| d.get("memory_injection"));
-            let memory_injection = MemoryInjectionResponse {
-                enabled: memory_injection_table
-                    .and_then(|m| m.get("enabled"))
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(true),
-                search_limit: memory_injection_table
-                    .and_then(|m| m.get("search_limit"))
-                    .and_then(|v| v.as_integer())
-                    .and_then(|i| usize::try_from(i).ok())
-                    .unwrap_or(20),
-                contextual_min_score: memory_injection_table
-                    .and_then(|m| m.get("contextual_min_score"))
-                    .and_then(|v| v.as_float())
-                    .unwrap_or(0.01) as f32,
-                context_window_depth: memory_injection_table
-                    .and_then(|m| m.get("context_window_depth"))
-                    .and_then(|v| v.as_integer())
-                    .and_then(|i| usize::try_from(i).ok())
-                    .unwrap_or(10),
-                semantic_threshold: memory_injection_table
-                    .and_then(|m| m.get("semantic_threshold"))
-                    .and_then(|v| v.as_float())
-                    .unwrap_or(0.85) as f32,
-                max_total: memory_injection_table
-                    .and_then(|m| m.get("max_total"))
-                    .and_then(|v| v.as_integer())
-                    .and_then(|i| usize::try_from(i).ok())
-                    .unwrap_or(25),
-                max_injected_blocks_in_history: memory_injection_table
-                    .and_then(|m| m.get("max_injected_blocks_in_history"))
-                    .and_then(|v| v.as_integer())
-                    .and_then(|i| usize::try_from(i).ok())
-                    .unwrap_or(3),
-            };
-
-            (
-                brave_search,
-                api_enabled,
-                api_port,
-                api_bind,
-                worker_log_mode,
-                opencode,
-                memory_injection,
-            )
-        } else {
-            (
-                None,
-                true,
-                19898,
-                "127.0.0.1".to_string(),
-                "errors_only".to_string(),
-                OpenCodeSettingsResponse {
-                    enabled: false,
-                    path: "opencode".to_string(),
-                    max_servers: 5,
-                    server_startup_timeout_secs: 30,
-                    max_restart_retries: 5,
-                    permissions: OpenCodePermissionsResponse {
-                        edit: "allow".to_string(),
-                        bash: "allow".to_string(),
-                        webfetch: "allow".to_string(),
-                    },
-                },
-                MemoryInjectionResponse {
-                    enabled: true,
-                    search_limit: 20,
-                    contextual_min_score: 0.70,
-                    context_window_depth: 10,
-                    semantic_threshold: 0.85,
-                    max_total: 25,
-                    max_injected_blocks_in_history: 3,
-                },
-            )
+                bash: opencode_perms
+                    .and_then(|p| p.get("bash"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("allow")
+                    .to_string(),
+                webfetch: opencode_perms
+                    .and_then(|p| p.get("webfetch"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("allow")
+                    .to_string(),
+            },
         };
+
+        let memory_injection_table = doc.get("defaults").and_then(|d| d.get("memory_injection"));
+        let memory_injection = MemoryInjectionResponse {
+            enabled: memory_injection_table
+                .and_then(|m| m.get("enabled"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true),
+            search_limit: memory_injection_table
+                .and_then(|m| m.get("search_limit"))
+                .and_then(|v| v.as_integer())
+                .and_then(|i| usize::try_from(i).ok())
+                .unwrap_or(20),
+            context_window_depth: memory_injection_table
+                .and_then(|m| m.get("context_window_depth"))
+                .and_then(|v| v.as_integer())
+                .and_then(|i| usize::try_from(i).ok())
+                .unwrap_or(10),
+            semantic_threshold: memory_injection_table
+                .and_then(|m| m.get("semantic_threshold"))
+                .and_then(|v| v.as_float())
+                .unwrap_or(0.85) as f32,
+            max_total: memory_injection_table
+                .and_then(|m| m.get("max_total"))
+                .and_then(|v| v.as_integer())
+                .and_then(|i| usize::try_from(i).ok())
+                .unwrap_or(25),
+            max_injected_blocks_in_history: memory_injection_table
+                .and_then(|m| m.get("max_injected_blocks_in_history"))
+                .and_then(|v| v.as_integer())
+                .and_then(|i| usize::try_from(i).ok())
+                .unwrap_or(3),
+        };
+
+        let embedding = EmbeddingSettingsResponse {
+            model: doc
+                .get("defaults")
+                .and_then(|d| d.get("embedding_model"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("paraphrase-multilingual-MiniLM-L12-v2")
+                .to_string(),
+        };
+
+        (
+            brave_search,
+            api_enabled,
+            api_port,
+            api_bind,
+            worker_log_mode,
+            opencode,
+            memory_injection,
+            embedding,
+        )
+    } else {
+        (
+            None,
+            true,
+            19898,
+            "127.0.0.1".to_string(),
+            "errors_only".to_string(),
+            OpenCodeSettingsResponse {
+                enabled: false,
+                path: "opencode".to_string(),
+                max_servers: 5,
+                server_startup_timeout_secs: 30,
+                max_restart_retries: 5,
+                permissions: OpenCodePermissionsResponse {
+                    edit: "allow".to_string(),
+                    bash: "allow".to_string(),
+                    webfetch: "allow".to_string(),
+                },
+            },
+            MemoryInjectionResponse {
+                enabled: true,
+                search_limit: 20,
+                context_window_depth: 10,
+                semantic_threshold: 0.85,
+                max_total: 25,
+                max_injected_blocks_in_history: 3,
+            },
+            EmbeddingSettingsResponse {
+                model: "paraphrase-multilingual-MiniLM-L12-v2".to_string(),
+            },
+        )
+    };
 
     Ok(Json(GlobalSettingsResponse {
         brave_search_key,
@@ -290,6 +327,7 @@ pub(super) async fn get_global_settings(
         worker_log_mode,
         opencode,
         memory_injection,
+        embedding,
     }))
 }
 
@@ -408,16 +446,16 @@ pub(super) async fn update_global_settings(
             doc["defaults"]["memory_injection"] = toml_edit::Item::Table(toml_edit::Table::new());
         }
 
+        if let Some(table) = doc["defaults"]["memory_injection"].as_table_mut() {
+            table.remove("contextual_min_score");
+        }
+
         if let Some(enabled) = memory_injection.enabled {
             doc["defaults"]["memory_injection"]["enabled"] = toml_edit::value(enabled);
         }
         if let Some(search_limit) = memory_injection.search_limit {
             doc["defaults"]["memory_injection"]["search_limit"] =
                 toml_edit::value(search_limit as i64);
-        }
-        if let Some(contextual_min_score) = memory_injection.contextual_min_score {
-            doc["defaults"]["memory_injection"]["contextual_min_score"] =
-                toml_edit::value(contextual_min_score as f64);
         }
         if let Some(context_window_depth) = memory_injection.context_window_depth {
             doc["defaults"]["memory_injection"]["context_window_depth"] =
@@ -435,6 +473,28 @@ pub(super) async fn update_global_settings(
         {
             doc["defaults"]["memory_injection"]["max_injected_blocks_in_history"] =
                 toml_edit::value(max_injected_blocks_in_history as i64);
+        }
+    }
+
+    if let Some(embedding) = request.embedding {
+        if doc.get("defaults").is_none() {
+            doc["defaults"] = toml_edit::Item::Table(toml_edit::Table::new());
+        }
+
+        if let Some(model) = embedding.model {
+            let supported = [
+                "paraphrase-multilingual-MiniLM-L12-v2",
+                "multilingual-e5-small",
+            ];
+            if !supported.contains(&model.as_str()) {
+                return Ok(Json(GlobalSettingsUpdateResponse {
+                    success: false,
+                    message: format!("Invalid embedding model: {model}"),
+                    requires_restart: false,
+                }));
+            }
+            doc["defaults"]["embedding_model"] = toml_edit::value(model);
+            requires_restart = true;
         }
     }
 
@@ -486,6 +546,68 @@ pub(super) async fn update_apply(
             })))
         }
     }
+}
+
+/// Start background embedding reindex jobs using the current config.
+pub(super) async fn reindex_embeddings(
+    State(state): State<Arc<ApiState>>,
+    Json(request): Json<ReindexEmbeddingsRequest>,
+) -> Result<Json<ReindexEmbeddingsResponse>, StatusCode> {
+    let config_path = state.config_path.read().await.clone();
+    if config_path.as_os_str().is_empty() {
+        tracing::error!("config_path not set in ApiState");
+        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    let config = crate::config::Config::load_from_path(&config_path).map_err(|error| {
+        tracing::error!(%error, "failed to load config before reindex");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    let agent_ids: Vec<String> = if let Some(agent_id) = request.agent_id {
+        vec![agent_id]
+    } else {
+        config.agents.iter().map(|agent| agent.id.clone()).collect()
+    };
+
+    let exe_path = std::env::current_exe().map_err(|error| {
+        tracing::error!(%error, "failed to resolve current executable path");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    for agent_id in &agent_ids {
+        let mut command = tokio::process::Command::new(&exe_path);
+        command
+            .arg("--config")
+            .arg(&config_path)
+            .arg("reindex-embeddings")
+            .arg("--agent")
+            .arg(agent_id)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+
+        match command.spawn() {
+            Ok(_child) => {
+                tracing::info!(agent_id = %agent_id, "started background embedding reindex");
+            }
+            Err(error) => {
+                tracing::error!(%error, agent_id = %agent_id, "failed to start embedding reindex");
+                return Ok(Json(ReindexEmbeddingsResponse {
+                    success: false,
+                    message: format!("Failed to start reindex for agent '{agent_id}': {error}"),
+                }));
+            }
+        }
+    }
+
+    Ok(Json(ReindexEmbeddingsResponse {
+        success: true,
+        message: if agent_ids.len() == 1 {
+            format!("Embedding reindex started for agent '{}'", agent_ids[0])
+        } else {
+            format!("Embedding reindex started for {} agents", agent_ids.len())
+        },
+    }))
 }
 
 pub(super) async fn get_raw_config(

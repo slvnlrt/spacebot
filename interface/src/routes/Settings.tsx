@@ -1930,13 +1930,16 @@ function MemoryInjectionSection({settings, isLoading}: GlobalSettingsSectionProp
 	const queryClient = useQueryClient();
 	const [enabled, setEnabled] = useState(settings?.memory_injection?.enabled ?? true);
 	const [searchLimit, setSearchLimit] = useState(settings?.memory_injection?.search_limit ?? 20);
-	const [contextualMinScore, setContextualMinScore] = useState(settings?.memory_injection?.contextual_min_score ?? 0.70);
 	const [maxTotal, setMaxTotal] = useState(settings?.memory_injection?.max_total ?? 25);
 	const [maxInjectedBlocksInHistory, setMaxInjectedBlocksInHistory] = useState(
 		settings?.memory_injection?.max_injected_blocks_in_history ?? 3
 	);
 	const [semanticThreshold, setSemanticThreshold] = useState(settings?.memory_injection?.semantic_threshold ?? 0.85);
 	const [contextWindowDepth, setContextWindowDepth] = useState(settings?.memory_injection?.context_window_depth ?? 10);
+	const [embeddingModel, setEmbeddingModel] = useState<"paraphrase-multilingual-MiniLM-L12-v2" | "multilingual-e5-small">(
+		settings?.embedding?.model ?? "paraphrase-multilingual-MiniLM-L12-v2"
+	);
+	const [reindexAgentId, setReindexAgentId] = useState("");
 	const [message, setMessage] = useState<{ text: string; type: "success" | "error" } | null>(null);
 
 	// Update form state when settings load
@@ -1944,13 +1947,15 @@ function MemoryInjectionSection({settings, isLoading}: GlobalSettingsSectionProp
 		if (settings?.memory_injection) {
 			setEnabled(settings.memory_injection.enabled ?? true);
 			setSearchLimit(settings.memory_injection.search_limit);
-    setContextualMinScore(settings.memory_injection.contextual_min_score ?? 0.70);
 			setMaxTotal(settings.memory_injection.max_total);
 			setMaxInjectedBlocksInHistory(settings.memory_injection.max_injected_blocks_in_history ?? 3);
 			setSemanticThreshold(settings.memory_injection.semantic_threshold);
 			setContextWindowDepth(settings.memory_injection.context_window_depth);
 		}
-	}, [settings?.memory_injection]);
+		if (settings?.embedding?.model) {
+			setEmbeddingModel(settings.embedding.model);
+		}
+	}, [settings?.memory_injection, settings?.embedding?.model]);
 
 	const updateMutation = useMutation({
 		mutationFn: api.updateGlobalSettings,
@@ -1972,12 +1977,34 @@ function MemoryInjectionSection({settings, isLoading}: GlobalSettingsSectionProp
 			memory_injection: {
 				enabled,
 				search_limit: searchLimit,
-				contextual_min_score: contextualMinScore,
 				max_total: maxTotal,
 				max_injected_blocks_in_history: maxInjectedBlocksInHistory,
 				semantic_threshold: semanticThreshold,
 				context_window_depth: contextWindowDepth,
 			},
+			embedding: {
+				model: embeddingModel,
+			},
+		});
+	};
+
+	const reindexMutation = useMutation({
+		mutationFn: api.reindexEmbeddings,
+		onSuccess: (result) => {
+			if (result.success) {
+				setMessage({text: result.message, type: "success"});
+			} else {
+				setMessage({text: result.message, type: "error"});
+			}
+		},
+		onError: (error) => {
+			setMessage({text: `Failed: ${error.message}`, type: "error"});
+		},
+	});
+
+	const handleReindex = () => {
+		reindexMutation.mutate({
+			agent_id: reindexAgentId.trim() || undefined,
 		});
 	};
 
@@ -2000,6 +2027,41 @@ function MemoryInjectionSection({settings, isLoading}: GlobalSettingsSectionProp
 				</div>
 			) : (
 				<div className="flex flex-col gap-4">
+					<div className="rounded-lg border border-app-line bg-app-box p-4">
+						<span className="text-sm font-medium text-ink">Embedding Model</span>
+						<p className="mt-0.5 text-sm text-ink-dull">
+							Choose the multilingual model used for memory embeddings. Changing this requires reindexing embeddings.
+						</p>
+						<div className="mt-4 grid grid-cols-1 gap-4">
+							<div className="flex flex-col gap-1.5">
+								<label className="text-sm font-medium text-ink">Model</label>
+								<Select value={embeddingModel} onValueChange={(v) => setEmbeddingModel(v as "paraphrase-multilingual-MiniLM-L12-v2" | "multilingual-e5-small")}>
+									<SelectTrigger className="border-app-line/50 bg-app-darkBox/30">
+										<SelectValue />
+									</SelectTrigger>
+									<SelectContent>
+										<SelectItem value="paraphrase-multilingual-MiniLM-L12-v2">paraphrase-multilingual-MiniLM-L12-v2</SelectItem>
+										<SelectItem value="multilingual-e5-small">multilingual-e5-small</SelectItem>
+									</SelectContent>
+								</Select>
+							</div>
+							<div className="flex flex-col gap-1.5">
+								<label className="text-sm font-medium text-ink">Reindex Agent (optional)</label>
+								<Input
+									value={reindexAgentId}
+									onChange={(event) => setReindexAgentId(event.target.value)}
+									placeholder="Leave empty to reindex all agents"
+								/>
+								<p className="text-tiny text-ink-faint">
+									Run reindex after changing model so existing memories are regenerated in the new vector space.
+								</p>
+							</div>
+							<Button onClick={handleReindex} loading={reindexMutation.isPending} variant="secondary">
+								Reindex Embeddings
+							</Button>
+						</div>
+					</div>
+
 					{/* Enable toggle */}
 					<div className="rounded-lg border border-app-line bg-app-box p-4">
 						<div className="flex items-center justify-between">
@@ -2035,22 +2097,6 @@ function MemoryInjectionSection({settings, isLoading}: GlobalSettingsSectionProp
 											min={1}
 											max={100}
 										/>
-									</div>
-									<div>
-										<div className="flex items-center justify-between mb-2">
-											<span className="text-sm text-ink">Context Min Score</span>
-											<span className="text-sm text-ink-dull">{contextualMinScore.toFixed(2)}</span>
-										</div>
-										<Slider
-											value={[contextualMinScore]}
-											onValueChange={(v) => setContextualMinScore(v[0])}
-											min={0}
-											max={1}
-											step={0.01}
-										/>
-										<p className="mt-1 text-tiny text-ink-faint">
-											Relative cosine threshold ratio. Candidates must score at least best_match × ratio. Higher = stricter.
-										</p>
 									</div>
 									<div>
 										<NumberStepper

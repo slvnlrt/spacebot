@@ -7,8 +7,8 @@ pub mod search;
 pub mod store;
 pub mod types;
 
-pub use embedding::{cosine_similarity, is_semantically_duplicate, EmbeddingModel};
+pub use embedding::{EmbeddingModel, cosine_similarity, is_semantically_duplicate};
 pub use lance::EmbeddingTable;
-pub use search::{curate_results, MemorySearch, SearchConfig, SearchMode, SearchSort};
+pub use search::{MemorySearch, SearchConfig, SearchMode, SearchSort, curate_results};
 pub use store::MemoryStore;
 pub use types::{Association, Memory, MemorySearchResult, MemoryType, RelationType, SourceSignal};

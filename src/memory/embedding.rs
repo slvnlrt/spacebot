@@ -14,8 +14,32 @@ pub struct EmbeddingModel {
 
 impl EmbeddingModel {
     /// Create a new embedding model, storing downloaded model files in `cache_dir`.
+    ///
+    /// Uses `paraphrase-multilingual-MiniLM-L12-v2` by default.
     pub fn new(cache_dir: &Path) -> Result<Self> {
-        let options = fastembed::InitOptions::default()
+        Self::new_with_model(cache_dir, "paraphrase-multilingual-MiniLM-L12-v2")
+    }
+
+    /// Create an embedding model with a specific model identifier.
+    ///
+    /// Supported values:
+    /// - `paraphrase-multilingual-MiniLM-L12-v2` (default)
+    /// - `multilingual-e5-small`
+    pub fn new_with_model(cache_dir: &Path, model_id: &str) -> Result<Self> {
+        let selected_model = match model_id {
+            "paraphrase-multilingual-MiniLM-L12-v2" => {
+                fastembed::EmbeddingModel::ParaphraseMLMiniLML12V2
+            }
+            "multilingual-e5-small" => fastembed::EmbeddingModel::MultilingualE5Small,
+            other => {
+                return Err(LlmError::EmbeddingFailed(format!(
+                    "unsupported embedding model '{other}'"
+                ))
+                .into());
+            }
+        };
+
+        let options = fastembed::InitOptions::new(selected_model)
             .with_cache_dir(cache_dir.to_path_buf())
             .with_show_download_progress(true);
 

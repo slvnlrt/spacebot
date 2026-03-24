@@ -384,7 +384,8 @@ impl ProcessRunLogger {
         let pool = self.pool.clone();
         let id = injection_id.to_string();
         let channel_id = channel_id.to_string();
-        let contextual_json = serde_json::to_string(contextual).unwrap_or_else(|_| "[]".to_string());
+        let contextual_json =
+            serde_json::to_string(contextual).unwrap_or_else(|_| "[]".to_string());
         let contextual_count = contextual.len() as i64;
 
         tokio::spawn(async move {
@@ -478,7 +479,7 @@ impl ProcessRunLogger {
             ""
         };
 
-         let query_str = format!(
+        let query_str = format!(
             "SELECT * FROM ( \
                 SELECT 'message' AS item_type, id, role, sender_name, sender_id, content, \
                   NULL AS description, NULL AS conclusion, NULL AS task, NULL AS result, NULL AS status, NULL AS contextual_json, NULL AS contextual_count, \
@@ -569,7 +570,9 @@ impl ProcessRunLogger {
 
                         Some(TimelineItem::MemoryInjection {
                             id: row.try_get("id").unwrap_or_default(),
-                            contextual_count: row.try_get::<i64, _>("contextual_count").unwrap_or(0),
+                            contextual_count: row
+                                .try_get::<i64, _>("contextual_count")
+                                .unwrap_or(0),
                             contextual,
                             injected_at: row
                                 .try_get::<chrono::DateTime<chrono::Utc>, _>("timestamp")

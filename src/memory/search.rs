@@ -445,9 +445,12 @@ fn reciprocal_rank_fusion(
     // Add vector results
     for (rank, scored) in vector_results.iter().enumerate() {
         let rrf_score = 1.0 / (k + (rank as f64 + 1.0));
-        let entry = rrf_scores
-            .entry(scored.memory.id.clone())
-            .or_insert(Entry { score: 0.0, memory: scored.memory.clone(), in_fts: false, in_vector: false });
+        let entry = rrf_scores.entry(scored.memory.id.clone()).or_insert(Entry {
+            score: 0.0,
+            memory: scored.memory.clone(),
+            in_fts: false,
+            in_vector: false,
+        });
         entry.score += rrf_score;
         entry.in_vector = true;
     }
@@ -455,9 +458,12 @@ fn reciprocal_rank_fusion(
     // Add FTS results
     for (rank, scored) in fts_results.iter().enumerate() {
         let rrf_score = 1.0 / (k + (rank as f64 + 1.0));
-        let entry = rrf_scores
-            .entry(scored.memory.id.clone())
-            .or_insert(Entry { score: 0.0, memory: scored.memory.clone(), in_fts: false, in_vector: false });
+        let entry = rrf_scores.entry(scored.memory.id.clone()).or_insert(Entry {
+            score: 0.0,
+            memory: scored.memory.clone(),
+            in_fts: false,
+            in_vector: false,
+        });
         entry.score += rrf_score;
         entry.in_fts = true;
     }
@@ -465,9 +471,12 @@ fn reciprocal_rank_fusion(
     // Add graph results (no source signal flag — graph uses keyword heuristics)
     for (rank, scored) in graph_results.iter().enumerate() {
         let rrf_score = 1.0 / (k + (rank as f64 + 1.0));
-        let entry = rrf_scores
-            .entry(scored.memory.id.clone())
-            .or_insert(Entry { score: 0.0, memory: scored.memory.clone(), in_fts: false, in_vector: false });
+        let entry = rrf_scores.entry(scored.memory.id.clone()).or_insert(Entry {
+            score: 0.0,
+            memory: scored.memory.clone(),
+            in_fts: false,
+            in_vector: false,
+        });
         entry.score += rrf_score;
     }
 

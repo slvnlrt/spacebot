@@ -589,7 +589,6 @@ export interface MemoryPersistenceSection {
 export interface MemoryInjectionSection {
 	enabled: boolean;
 	search_limit: number;
-	contextual_min_score: number;
 	context_window_depth: number;
 	semantic_threshold: number;
 	max_total: number;
@@ -683,7 +682,6 @@ export interface MemoryPersistenceUpdate {
 export interface MemoryInjectionUpdate {
 	enabled?: boolean;
 	search_limit?: number;
-	contextual_min_score?: number;
 	context_window_depth?: number;
 	semantic_threshold?: number;
 	max_total?: number;
@@ -1181,7 +1179,6 @@ export interface OpenCodeSettingsUpdate {
 export interface MemoryInjectionConfig {
 	enabled: boolean;
 	search_limit: number;
-	contextual_min_score: number;
 	context_window_depth: number;
 	semantic_threshold: number;
 	max_total: number;
@@ -1191,15 +1188,17 @@ export interface MemoryInjectionConfig {
 export interface MemoryInjectionConfigUpdate {
 	enabled?: boolean;
 	search_limit?: number;
-	contextual_min_score?: number;
 	context_window_depth?: number;
 	semantic_threshold?: number;
 	max_total?: number;
 	max_injected_blocks_in_history?: number;
 }
 
+export interface EmbeddingSettings {
+	model: "paraphrase-multilingual-MiniLM-L12-v2" | "multilingual-e5-small";
+}
+
 export interface GlobalSettingsResponse {
-	contextual_min_score?: number;
 	brave_search_key: string | null;
 	api_enabled: boolean;
 	api_port: number;
@@ -1207,6 +1206,7 @@ export interface GlobalSettingsResponse {
 	worker_log_mode: string;
 	opencode: OpenCodeSettings;
 	memory_injection: MemoryInjectionConfig;
+	embedding: EmbeddingSettings;
 }
 
 export interface GlobalSettingsUpdate {
@@ -1217,12 +1217,22 @@ export interface GlobalSettingsUpdate {
 	worker_log_mode?: string;
 	opencode?: OpenCodeSettingsUpdate;
 	memory_injection?: MemoryInjectionConfigUpdate;
+	embedding?: EmbeddingSettings;
 }
 
 export interface GlobalSettingsUpdateResponse {
 	success: boolean;
 	message: string;
 	requires_restart: boolean;
+}
+
+export interface ReindexEmbeddingsRequest {
+	agent_id?: string;
+}
+
+export interface ReindexEmbeddingsResponse {
+	success: boolean;
+	message: string;
 }
 
 export interface RawConfigResponse {
@@ -1816,6 +1826,18 @@ export const api = {
 			throw new Error(`API error: ${response.status}`);
 		}
 		return response.json() as Promise<GlobalSettingsUpdateResponse>;
+	},
+
+	reindexEmbeddings: async (request: ReindexEmbeddingsRequest = {}) => {
+		const response = await fetch(`${API_BASE}/settings/embedding/reindex`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify(request),
+		});
+		if (!response.ok) {
+			throw new Error(`API error: ${response.status}`);
+		}
+		return response.json() as Promise<ReindexEmbeddingsResponse>;
 	},
 
 	// Raw config API

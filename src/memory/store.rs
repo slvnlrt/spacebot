@@ -475,6 +475,23 @@ impl MemoryStore {
         Ok(rows.into_iter().map(|row| row_to_memory(&row)).collect())
     }
 
+    /// Return all non-forgotten memories, ordered by creation time ascending.
+    ///
+    /// Used by the reindex-embeddings command to iterate the full corpus.
+    pub async fn list_all_active(&self) -> Result<Vec<Memory>> {
+        let rows = sqlx::query(
+            "SELECT id, content, memory_type, importance, created_at, updated_at, \
+             last_accessed_at, access_count, source, channel_id, forgotten \
+             FROM memories WHERE forgotten = 0 \
+             ORDER BY created_at ASC",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .with_context(|| "failed to list all active memories")?;
+
+        Ok(rows.into_iter().map(|row| row_to_memory(&row)).collect())
+    }
+
     /// Create an in-memory store for testing. Each call creates an isolated
     /// database so tests can run in parallel without migration conflicts.
     #[cfg(test)]

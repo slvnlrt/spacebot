@@ -52,6 +52,18 @@ enum Command {
     /// Manage secrets stored in the running instance
     #[command(subcommand)]
     Secrets(SecretsCommand),
+    /// Re-embed all memories using the current embedding model.
+    ///
+    /// Required after changing the embedding model (e.g. switching to
+    /// paraphrase-multilingual-MiniLM-L12-v2). Iterates every non-forgotten
+    /// memory in SQLite, re-generates its vector with the current model, and
+    /// overwrites the embedding in LanceDB. Recreates HNSW and FTS indexes
+    /// on completion. Safe to interrupt and re-run (idempotent per memory).
+    ReindexEmbeddings {
+        /// Agent ID to reindex. Defaults to the first configured agent.
+        #[arg(short, long)]
+        agent: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -206,6 +218,9 @@ fn main() -> anyhow::Result<()> {
         Command::Skill(skill_cmd) => cmd_skill(cli.config, skill_cmd),
         Command::Auth(auth_cmd) => cmd_auth(cli.config, auth_cmd),
         Command::Secrets(secrets_cmd) => cmd_secrets(cli.config, secrets_cmd),
+        Command::ReindexEmbeddings { agent } => {
+            cmd_reindex_embeddings(cli.config, cli.debug, agent)
+        }
     }
 }
 
@@ -1111,6 +1126,112 @@ fn get_agent_config<'a>(
         .with_context(|| format!("agent not found: {agent_id}"))
 }
 
+/// Re-embed all memories for an agent using the current embedding model.
+///
+/// This command must be run offline (daemon not running) after changing the
+/// embedding model. It iterates every non-forgotten memory by pages, generates
+/// a new embedding for each content string, overwrites the LanceDB row, and
+/// finally rebuilds HNSW and FTS indexes.
+fn cmd_reindex_embeddings(
+    config_path: Option<std::path::PathBuf>,
+    _debug: bool,
+    agent_id: Option<String>,
+) -> anyhow::Result<()> {
+    let config = load_config(&config_path)?;
+    let agent_config_raw = get_agent_config(&config, agent_id.as_deref())?;
+    let agent_config = agent_config_raw.resolve(&config.instance_dir, &config.defaults);
+
+    eprintln!(
+        "Reindexing embeddings for agent '{}' in {}",
+        agent_config.id,
+        agent_config.data_dir.display()
+    );
+
+    let embedding_cache_dir = config.instance_dir.join("embedding_cache");
+    let embedding_model_name = config.defaults.embedding_model.clone();
+    let embedding_model = std::sync::Arc::new(
+        spacebot::memory::EmbeddingModel::new_with_model(
+            &embedding_cache_dir,
+            &embedding_model_name,
+        )
+        .context("failed to initialize embedding model")?,
+    );
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("failed to build tokio runtime")?;
+
+    runtime.block_on(async move {
+        let db = spacebot::db::Db::connect(&agent_config.data_dir)
+            .await
+            .context("failed to connect to agent databases")?;
+
+        let memory_store =
+            spacebot::memory::MemoryStore::with_agent_id(db.sqlite.clone(), &agent_config.id);
+        let embedding_table = spacebot::memory::EmbeddingTable::open_or_create(&db.lance)
+            .await
+            .context("failed to open LanceDB embedding table")?;
+
+        let memories = memory_store
+            .list_all_active()
+            .await
+            .context("failed to list memories")?;
+
+        let total = memories.len();
+        eprintln!("Found {total} memories to reindex.");
+
+        let mut success = 0usize;
+        let mut failed = 0usize;
+
+        for (index, memory) in memories.into_iter().enumerate() {
+            let n = index + 1;
+            match embedding_model.embed_one(&memory.content).await {
+                Ok(embedding) => {
+                    match embedding_table
+                        .store(&memory.id, &memory.content, &embedding)
+                        .await
+                    {
+                        Ok(()) => {
+                            success += 1;
+                            if n % 50 == 0 || n == total {
+                                eprintln!("  [{n}/{total}] re-embedded and stored");
+                            }
+                        }
+                        Err(error) => {
+                            eprintln!(
+                                "  [{n}/{total}] store failed for {}: {error}",
+                                &memory.id[..8.min(memory.id.len())]
+                            );
+                            failed += 1;
+                        }
+                    }
+                }
+                Err(error) => {
+                    eprintln!(
+                        "  [{n}/{total}] embed failed for {}: {error}",
+                        &memory.id[..8.min(memory.id.len())]
+                    );
+                    failed += 1;
+                }
+            }
+        }
+
+        eprintln!("\nRebuilding HNSW and FTS indexes…");
+        if let Err(error) = embedding_table.create_indexes().await {
+            eprintln!("Warning: index rebuild failed: {error}");
+        } else {
+            eprintln!("Indexes rebuilt successfully.");
+        }
+
+        eprintln!("\nDone. {success} succeeded, {failed} failed.");
+        if failed > 0 {
+            anyhow::bail!("{failed} memories failed to reindex — check output above");
+        }
+        Ok(())
+    })
+}
+
 fn load_config(
     config_path: &Option<std::path::PathBuf>,
 ) -> anyhow::Result<spacebot::config::Config> {
@@ -1423,9 +1544,13 @@ async fn run(
 
     // Shared embedding model (stateless, agent-agnostic)
     let embedding_cache_dir = config.instance_dir.join("embedding_cache");
+    let embedding_model_name = config.defaults.embedding_model.clone();
     let embedding_model = Arc::new(
-        spacebot::memory::EmbeddingModel::new(&embedding_cache_dir)
-            .context("failed to initialize embedding model")?,
+        spacebot::memory::EmbeddingModel::new_with_model(
+            &embedding_cache_dir,
+            &embedding_model_name,
+        )
+        .context("failed to initialize embedding model")?,
     );
 
     tracing::info!("shared resources initialized");

@@ -18,7 +18,7 @@ use crate::error::{AgentError, Result};
 use crate::hooks::SpacebotHook;
 use crate::llm::SpacebotModel;
 use crate::memory::{
-    cosine_similarity, is_semantically_duplicate, SearchConfig, SearchMode, SourceSignal,
+    SearchConfig, SearchMode, SourceSignal, cosine_similarity, is_semantically_duplicate,
 };
 use crate::{
     AgentDeps, BranchId, ChannelId, InboundMessage, OutboundResponse, ProcessEvent, ProcessId,
@@ -1214,14 +1214,12 @@ impl Channel {
         let context_window_depth = config.context_window_depth;
         let semantic_threshold = config.semantic_threshold;
         let search_limit = config.search_limit;
-        let contextual_min_score = config.contextual_min_score;
         let max_total = config.max_total;
 
         tracing::info!(
             channel_id = %self.id,
             turn = self.current_turn,
             search_limit,
-            contextual_min_score,
             semantic_threshold,
             context_window_depth,
             max_total,
@@ -1273,7 +1271,11 @@ impl Channel {
 
         let candidate_count = all_candidates.len();
 
-        let query_embedding = match memory_search.embedding_model_arc().embed_one(user_text).await {
+        let query_embedding = match memory_search
+            .embedding_model_arc()
+            .embed_one(user_text)
+            .await
+        {
             Ok(embedding) => embedding,
             Err(error) => {
                 tracing::warn!(%error, channel_id = %self.id, "failed to embed query for memory injection, skipping");
@@ -1336,11 +1338,19 @@ impl Channel {
             }
             seen_ids.insert(memory.id.clone());
 
-            let embedding = match memory_search.embedding_table().get_embedding(&memory.id).await {
+            let embedding = match memory_search
+                .embedding_table()
+                .get_embedding(&memory.id)
+                .await
+            {
                 Ok(Some(embedding)) => embedding,
                 Ok(None) => {
                     tracing::debug!(memory_id = %memory.id, "embedding not found in LanceDB, computing");
-                    match memory_search.embedding_model_arc().embed_one(&memory.content).await {
+                    match memory_search
+                        .embedding_model_arc()
+                        .embed_one(&memory.content)
+                        .await
+                    {
                         Ok(embedding) => embedding,
                         Err(error) => {
                             tracing::warn!(%error, memory_id = %memory.id, "failed to compute embedding");
@@ -1359,7 +1369,11 @@ impl Channel {
                 }
                 Err(error) => {
                     tracing::warn!(%error, memory_id = %memory.id, "failed to get embedding from LanceDB, computing");
-                    match memory_search.embedding_model_arc().embed_one(&memory.content).await {
+                    match memory_search
+                        .embedding_model_arc()
+                        .embed_one(&memory.content)
+                        .await
+                    {
                         Ok(embedding) => embedding,
                         Err(error) => {
                             tracing::warn!(%error, memory_id = %memory.id, "failed to compute embedding");
@@ -1391,33 +1405,152 @@ impl Channel {
             });
         }
 
-        const ABSOLUTE_MIN_COSINE: f32 = 0.60;
-        let dynamic_threshold = (max_cosine * contextual_min_score).max(ABSOLUTE_MIN_COSINE);
+        // ── Adaptive threshold computation ─────────────────────────
+        //
+        // Model-agnostic: no hardcoded absolute cosine floors.
+        // We analyse the score *distribution* of the candidate set to decide
+        // what counts as signal vs noise, regardless of embedding model.
+        //
+        // Two mechanisms work together:
+        // 1. Natural break detection — largest gap in sorted cosines separates
+        //    a quality cluster from noise. This is the primary signal.
+        // 2. Signal ratio (max / median) — if scores are tightly clustered AND
+        //    there is no natural break, we skip. But either indicator alone
+        //    is not sufficient to reject — a strong break overrides a low ratio.
+
+        let mut cosines: Vec<f32> = scored_candidates
+            .iter()
+            .map(|c| c.cosine)
+            .filter(|&c| c > 0.0)
+            .collect();
+        cosines.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+
+        if cosines.is_empty() {
+            let elapsed = started_at.elapsed();
+            tracing::info!(
+                channel_id = %self.id,
+                scored_candidates = scored_candidates.len(),
+                elapsed_ms = elapsed.as_millis() as u64,
+                "memory injection skipped (no candidates with positive cosine)"
+            );
+            return None;
+        }
+
+        let count = cosines.len();
+        let median = if count % 2 == 0 && count >= 2 {
+            (cosines[count / 2 - 1] + cosines[count / 2]) / 2.0
+        } else {
+            cosines[count / 2]
+        };
+
+        let signal_ratio = if median > 0.001 {
+            max_cosine / median
+        } else {
+            if max_cosine > 0.01 { 10.0 } else { 0.0 }
+        };
+
+        // Natural break detection: find the largest gap between consecutive
+        // sorted (descending) cosines. If the gap is large relative to the
+        // total range, it marks a natural boundary between signal and noise.
+        let range = cosines.first().copied().unwrap_or(0.0)
+            - cosines.last().copied().unwrap_or(0.0);
+        let mut max_gap = 0.0_f32;
+        let mut break_value_below = 0.0_f32;
+        let mut break_position = 0usize; // how many items are above the break
+        if cosines.len() > 1 {
+            for (index, window) in cosines.windows(2).enumerate() {
+                let gap = window[0] - window[1];
+                if gap > max_gap {
+                    max_gap = gap;
+                    break_value_below = window[1];
+                    break_position = index + 1;
+                }
+            }
+        }
+
+        let has_natural_break = range > 0.005 && max_gap > range * 0.20;
+
+        // Decision: skip only when BOTH indicators say "no signal".
+        // A natural break = structural separation in scores → trust it even
+        // if the ratio is modest (compressed-score models like multilingual).
+        // A high ratio without break = one outlier in a cluster → still proceed.
+        let skip_no_signal = !has_natural_break && signal_ratio < 1.08;
+
+        if skip_no_signal {
+            let elapsed = started_at.elapsed();
+            tracing::info!(
+                channel_id = %self.id,
+                max_cosine,
+                median,
+                signal_ratio,
+                range,
+                max_gap,
+                has_natural_break,
+                scored_candidates = count,
+                elapsed_ms = elapsed.as_millis() as u64,
+                "memory injection skipped (no break + low signal ratio)"
+            );
+            return None;
+        }
+
+        // Compute base threshold.
+        let (base_threshold, threshold_method) = if has_natural_break {
+            // Threshold sits just above the break point. Items above the gap
+            // pass; items in the lower cluster are filtered.
+            // Place threshold 30% into the gap from below to avoid edge effects.
+            let threshold = break_value_below + max_gap * 0.3;
+            (threshold, "natural_break")
+        } else {
+            // No clear break — progressive margin from max, scaled by signal strength.
+            let margin = if signal_ratio < 1.15 {
+                0.02 // weak signal → very tight window
+            } else if signal_ratio < 1.4 {
+                0.04 // medium signal
+            } else {
+                0.08 // strong signal → wider window
+            };
+            (max_cosine - margin, "progressive_margin")
+        };
+
+        let base_threshold = base_threshold.max(0.0);
 
         tracing::info!(
             channel_id = %self.id,
             max_cosine,
-            contextual_min_score,
-            dynamic_threshold,
-            absolute_min = ABSOLUTE_MIN_COSINE,
+            median,
+            signal_ratio,
+            range,
+            max_gap,
+            has_natural_break,
+            break_position,
+            base_threshold,
+            threshold_method,
             semantic_buffer_size = self.injection_state.semantic_buffer.len(),
             scored_candidates = scored_candidates.len(),
-            "memory injection thresholds computed"
+            "memory injection adaptive thresholds computed"
         );
 
         seen_ids.clear();
 
+        // Source-signal modulation scales with the score range so it stays
+        // proportional regardless of embedding model or score distribution.
+        // ~10% of range as bonus/penalty — meaningful but never dominant.
+        let signal_modulation = (range * 0.10).max(0.001);
+
         for scored in scored_candidates {
+            // Per-candidate modulation by source signal confidence:
+            // Both = lexical + semantic confirmed → slight bonus (accept slightly lower cosine).
+            // FtsOnly = lexical only, unreliable on common/short words → slight penalty.
             let effective_threshold: f32 = match scored.source_signal {
-                Some(SourceSignal::FtsOnly) => 0.45,
-                Some(SourceSignal::Both) => 0.50,
-                _ => dynamic_threshold,
+                Some(SourceSignal::Both) => (base_threshold - signal_modulation).max(0.0),
+                Some(SourceSignal::FtsOnly) => base_threshold + signal_modulation,
+                _ => base_threshold,
             };
 
             let threshold_reason = match scored.source_signal {
-                Some(SourceSignal::FtsOnly) => "fts_floor",
-                Some(SourceSignal::Both) => "both_floor",
-                _ => "dynamic",
+                Some(SourceSignal::Both) => "base-mod (both signals)",
+                Some(SourceSignal::FtsOnly) => "base+mod (fts-only penalty)",
+                _ => "base (vector-only)",
             };
 
             if scored.cosine < effective_threshold {
@@ -1429,7 +1562,7 @@ impl Channel {
                     memory_type = %scored.memory.memory_type,
                     cosine = scored.cosine,
                     threshold = effective_threshold,
-                    dynamic_threshold,
+                    base_threshold,
                     threshold_reason,
                     source_signal = ?scored.source_signal,
                     retrieval_rank = ?scored.retrieval_rank,
@@ -1457,7 +1590,7 @@ impl Channel {
                         memory_type = %scored.memory.memory_type,
                         cosine = scored.cosine,
                         threshold = effective_threshold,
-                        dynamic_threshold,
+                        base_threshold,
                         threshold_reason,
                         source_signal = ?scored.source_signal,
                         retrieval_rank = ?scored.retrieval_rank,
@@ -1480,7 +1613,7 @@ impl Channel {
                 memory_type = %scored.memory.memory_type,
                 cosine = scored.cosine,
                 threshold = effective_threshold,
-                dynamic_threshold,
+                base_threshold,
                 threshold_reason,
                 source_signal = ?scored.source_signal,
                 retrieval_rank = ?scored.retrieval_rank,
@@ -1515,7 +1648,10 @@ impl Channel {
         }
 
         let mut final_memories = Vec::new();
-        for memory in unique_candidates.into_iter().map(|candidate| candidate.memory) {
+        for memory in unique_candidates
+            .into_iter()
+            .map(|candidate| candidate.memory)
+        {
             if final_memories.len() >= max_total {
                 break;
             }
@@ -1547,9 +1683,11 @@ impl Channel {
             .collect::<Vec<_>>();
 
         let injection_id = uuid::Uuid::new_v4().to_string();
-        self.state
-            .process_run_logger
-            .log_memory_injection(&self.id, &injection_id, &contextual_infos);
+        self.state.process_run_logger.log_memory_injection(
+            &self.id,
+            &injection_id,
+            &contextual_infos,
+        );
 
         let _ = self.deps.event_tx.send(ProcessEvent::MemoryInjected {
             agent_id: self.deps.agent_id.clone(),
