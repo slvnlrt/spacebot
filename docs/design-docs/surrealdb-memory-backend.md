@@ -5,13 +5,15 @@ single embedded **SurrealDB v3** instance that unifies the document, graph,
 vector, and full-text concerns the memory subsystem currently splits across two
 databases.
 
-> Status: **design + Phase 0 spike DONE**. The SurrealQL below has now been
-> exercised against a real embedded SurrealDB 3.1.5 (see "Phase 0 spike results"
-> and `spikes/surreal-memory/`). Two adversarial reviews and the empirical spike
-> are folded in; remaining production code is Phase 1+. **Headline result: the
-> filtered-KNN concern (#6949) does *not* reproduce on embedded — the approach is
-> validated.** Note the corrected function name: v3 uses **`type::record`**, not
-> `type::thing`.
+> Status: **design + spike + store/search/maintenance/migration LANDED behind the
+> `surreal-memory` feature (compile-checked; off by default).** What's left is the
+> live wiring/cutover (see "Implementation status"). The SurrealQL has been
+> exercised against a real embedded SurrealDB 3.1.5 (`spikes/surreal-memory/`, 12
+> green tests). Two adversarial reviews + the empirical spike are folded in.
+> **Headline result: the filtered-KNN concern (#6949) does *not* reproduce on
+> embedded — the approach is validated.** Note v3 uses **`type::record`** (not
+> `type::thing`), KNN K/EF must be integer literals, and `RELATE` needs bound
+> `RecordId` endpoints.
 
 ## Problem
 
@@ -404,6 +406,40 @@ It is the blueprint for the in-crate Phase 1 port. Chrono interop is trivial
 Still deferred to later phases (unchanged): per-agent instance model, cross-store
 atomicity inventory, SurrealKV backup story, and HNSW recall/latency benchmarking
 at 384-dim and realistic scale.
+
+## Implementation status
+
+Landed on `feat/surrealdb-memory`, all behind the optional `surreal-memory`
+feature (default build unaffected; `cargo check`/`clippy --features
+surreal-memory` clean):
+
+| Module | What | Verified |
+| --- | --- | --- |
+| `memory::surreal_store` | `SurrealMemoryStore`: CRUD, soft-delete, `record_access`, associations (`RELATE`), graph BFS `get_neighbors`, sorted/typed reads, vector KNN, FTS, `find_similar`, `merge`, `get_all_active` | compile + reference tests |
+| `memory::surreal_search` | `SurrealMemorySearch`: metadata modes + hybrid (vector+FTS+graph BFS+RRF) | compile + reference test |
+| `memory::surreal_maintenance` | decay / prune / merge_similar | compile + reference merge test |
+| `memory::surreal_migrate` | `migrate_from_sqlite`: re-embed + copy memories & associations | compile |
+| `tests/surreal_memory.rs` | in-crate `kv-mem` integration suite | typechecks (`--tests`); runs where ONNX RT links |
+| `spikes/surreal-memory/` | standalone probe + reference port, **12 green tests** | **runs here** |
+
+Build note: where the ONNX Runtime download is network-blocked, check with
+`ORT_LIB_LOCATION=/tmp/ortlib ORT_PREFER_DYNAMIC_LINK=1 cargo check --features
+surreal-memory` (the build script skips the download; `check` doesn't link).
+
+### What's left (deliberately not done — needs your calls / a real env)
+
+1. **Live wiring / cutover.** Add a `surreal` handle to the `Db` bundle and build
+   the stores at the construction sites (`main.rs` ~2890, `api/agents.rs` ~834).
+   Not done because it changes runtime behaviour and depends on decision (2).
+2. **Per-agent instance model** (deferred): one SurrealKv instance per agent vs a
+   shared instance with `use_db(agent_id)`. Decide before wiring.
+3. **Cross-store atomicity inventory** (deferred): classify every write that spans
+   memory (SurrealDB) + working memory (SQLite); decide whether to move working
+   memory too (Phase 4) or accept best-effort.
+4. **Run the in-crate tests / benchmark** in an env with a working ONNX Runtime;
+   benchmark HNSW recall/latency at 384-dim and realistic corpus size.
+5. **SurrealKV backup/restore** story; then **remove LanceDB/Arrow deps** once the
+   default flips.
 
 ## Phased plan
 
