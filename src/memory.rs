@@ -8,6 +8,8 @@ pub mod store;
 #[cfg(feature = "surreal-memory")]
 pub mod surreal_maintenance;
 #[cfg(feature = "surreal-memory")]
+pub mod surreal_migrate;
+#[cfg(feature = "surreal-memory")]
 pub mod surreal_search;
 #[cfg(feature = "surreal-memory")]
 pub mod surreal_store;
