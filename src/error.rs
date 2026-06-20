@@ -114,6 +114,9 @@ pub enum DbError {
     #[error("LanceDB operation failed: {0}")]
     LanceDb(String),
 
+    #[error("SurrealDB operation failed: {0}")]
+    Surreal(String),
+
     #[error("failed to connect to redb: {0}")]
     RedbConnect(#[from] redb::Error),
 

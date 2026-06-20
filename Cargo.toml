@@ -30,6 +30,9 @@ redb = "2.4"
 
 # Vector / embedding operations
 fastembed = "4"
+# Optional: embedded SurrealDB backend for the memory subsystem (feature
+# `surreal-memory`). Validated in spikes/surreal-memory/.
+surrealdb = { version = "3.1", features = ["kv-surrealkv", "kv-mem"], optional = true }
 
 # Encoding
 base64 = "0.22"
@@ -163,6 +166,10 @@ moka = "0.12.13"
 
 [features]
 metrics = ["dep:prometheus"]
+# Experimental: SurrealDB-backed memory subsystem (design doc:
+# docs/design-docs/surrealdb-memory-backend.md). Off by default; the SQLite +
+# LanceDB path remains the default until the cutover phase.
+surreal-memory = ["dep:surrealdb"]
 
 [patch.crates-io]
 imap-proto = { path = "vendor/imap-proto-0.10.2" }
