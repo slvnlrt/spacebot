@@ -463,6 +463,77 @@ impl SurrealMemoryStore {
         Ok(rows.into_iter().map(Memory::from).collect())
     }
 
+    /// All non-forgotten memories, most-recent first, up to `limit`.
+    /// Used by maintenance (decay/merge candidate scan).
+    pub async fn get_all_active(&self, limit: i64) -> Result<Vec<Memory>> {
+        self.get_sorted(SearchSort::Recent, limit, None).await
+    }
+
+    /// Merge `loser` into `survivor`: set survivor content/embedding, rewire the
+    /// loser's edges onto the survivor (preserving direction/type/weight; no
+    /// self-loops), drop the loser's edges, add `survivor->updates->loser`, and
+    /// soft-delete the loser. The SurrealDB equivalent of
+    /// `store.rs::merge_memories_atomic` + the embedding fix-up in
+    /// `maintenance.rs::merge_pair` — but here the embedding lives on the record,
+    /// so it is part of the same operation, not a best-effort afterthought.
+    pub async fn merge(
+        &self,
+        survivor_id: &str,
+        loser_id: &str,
+        new_content: &str,
+        new_embedding: Option<&[f32]>,
+    ) -> Result<()> {
+        // 1. Update survivor content + embedding.
+        self.db
+            .query(
+                "UPDATE type::record('memory', $id) SET \
+                 content = $c, updated_at = time::now(), embedding = $e",
+            )
+            .bind(("id", survivor_id.to_string()))
+            .bind(("c", new_content.to_string()))
+            .bind(("e", new_embedding.map(<[f32]>::to_vec)))
+            .await
+            .map_err(err)?
+            .check()
+            .map_err(err)?;
+
+        // 2. Rewire loser edges onto survivor (preserve direction/type/weight).
+        for assoc in self.get_associations(loser_id).await? {
+            let (mut s, mut t) = (assoc.source_id.clone(), assoc.target_id.clone());
+            if s == loser_id {
+                s = survivor_id.to_string();
+            }
+            if t == loser_id {
+                t = survivor_id.to_string();
+            }
+            if s == t {
+                continue; // would become a self-loop
+            }
+            self.create_association(
+                &Association::new(s, t, assoc.relation_type).with_weight(assoc.weight),
+            )
+            .await?;
+        }
+
+        // 3. Drop the loser's edges.
+        let loser = RecordId::new("memory", loser_id.to_string());
+        self.db
+            .query("DELETE relates WHERE in = $m OR out = $m")
+            .bind(("m", loser))
+            .await
+            .map_err(err)?
+            .check()
+            .map_err(err)?;
+
+        // 4. survivor ->updates-> loser, then 5. soft-delete loser.
+        self.create_association(
+            &Association::new(survivor_id, loser_id, RelationType::Updates).with_weight(1.0),
+        )
+        .await?;
+        self.forget(loser_id).await?;
+        Ok(())
+    }
+
     // ---- vector + full-text (replaces lance.rs) ----
 
     /// KNN by cosine distance. Returns (memory_id, distance) ascending.

@@ -205,3 +205,35 @@ async fn hybrid_search_fuses_and_filters_forgotten() {
     // ranks are 1-based and ascending
     assert_eq!(res[0].rank, 1);
 }
+
+#[tokio::test]
+async fn merge_rewires_edges_and_soft_deletes_loser() {
+    let store = fresh().await;
+    // survivor S, loser L, neighbour X. L is connected to X (L -> X related_to).
+    let s = Memory::new("survivor about saturn", MemoryType::Fact).with_importance(0.9);
+    let l = Memory::new("loser about saturn rockets", MemoryType::Fact).with_importance(0.5);
+    let x = Memory::new("neighbour planet", MemoryType::Fact);
+    store.save(&s, Some(&emb(0.5, 0.5, 0.5, 0.5))).await.unwrap();
+    store.save(&l, Some(&emb(0.5, 0.5, 0.5, 0.51))).await.unwrap();
+    store.save(&x, Some(&emb(0.1, 0.2, 0.3, 0.4))).await.unwrap();
+    store.add_association(&Association::new(&l.id, &x.id, RelationType::PartOf).with_weight(0.6)).await.unwrap();
+
+    store.merge(&s.id, &l.id, "survivor about saturn\n\nloser about saturn rockets", Some(&emb(0.5, 0.5, 0.5, 0.5))).await.unwrap();
+
+    // survivor content updated
+    let s_after = store.load(&s.id).await.unwrap().unwrap();
+    assert!(s_after.content.contains("rockets"));
+    // loser soft-deleted
+    assert!(store.load(&l.id).await.unwrap().unwrap().forgotten);
+    // X is now connected to survivor (edge rewired), with the same PartOf type
+    let s_assocs = store.get_associations(&s.id).await.unwrap();
+    assert!(
+        s_assocs.iter().any(|a| (a.source_id == s.id && a.target_id == x.id) || (a.source_id == x.id && a.target_id == s.id)),
+        "survivor connected to X after rewire: {s_assocs:?}"
+    );
+    // survivor ->updates-> loser exists
+    assert!(s_assocs.iter().any(|a| a.relation_type == RelationType::Updates && a.target_id == l.id));
+    // loser has no live edges left except the incoming updates edge
+    let l_assocs = store.get_associations(&l.id).await.unwrap();
+    assert!(l_assocs.iter().all(|a| a.relation_type == RelationType::Updates));
+}

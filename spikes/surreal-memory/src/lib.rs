@@ -523,6 +523,63 @@ impl<C: Connection> MemoryStore<C> {
         Ok(rows.into_iter().map(|x| (x.id, x.score as f32)).collect())
     }
 
+    /// Merge `loser` into `survivor`: set survivor content/embedding, rewire the
+    /// loser's edges onto the survivor (preserving direction, type, weight; no
+    /// self-loops), drop the loser's edges, add a `survivor->updates->loser`
+    /// edge, and soft-delete the loser. Mirrors store.rs::merge_memories_atomic
+    /// — but here the embedding lives on the record, so it is part of the same
+    /// logical operation rather than a best-effort afterthought.
+    pub async fn merge(
+        &self,
+        survivor_id: &str,
+        loser_id: &str,
+        new_content: &str,
+        new_embedding: Option<&[f32]>,
+    ) -> Result<()> {
+        // 1. Update survivor content + embedding.
+        self.db
+            .query("UPDATE type::record('memory',$id) SET content=$c, updated_at=time::now(), embedding=$e")
+            .bind(("id", survivor_id.to_string()))
+            .bind(("c", new_content.to_string()))
+            .bind(("e", new_embedding.map(|e| e.to_vec())))
+            .await?
+            .check()?;
+
+        // 2. Rewire loser edges onto survivor (preserve direction/type/weight).
+        for assoc in self.get_associations(loser_id).await? {
+            let (mut s, mut t) = (assoc.source_id.clone(), assoc.target_id.clone());
+            if s == loser_id {
+                s = survivor_id.to_string();
+            }
+            if t == loser_id {
+                t = survivor_id.to_string();
+            }
+            if s == t {
+                continue; // would be a self-loop
+            }
+            self.add_association(
+                &Association::new(s, t, assoc.relation_type).with_weight(assoc.weight),
+            )
+            .await?;
+        }
+
+        // 3. Drop the loser's edges.
+        let s = surrealdb::types::RecordId::new("memory", loser_id.to_string());
+        self.db
+            .query("DELETE relates WHERE in = $m OR out = $m")
+            .bind(("m", s))
+            .await?
+            .check()?;
+
+        // 4. survivor ->updates-> loser, and 5. soft-delete loser.
+        self.add_association(
+            &Association::new(survivor_id, loser_id, RelationType::Updates).with_weight(1.0),
+        )
+        .await?;
+        self.forget(loser_id).await?;
+        Ok(())
+    }
+
     /// Memories similar to an existing memory's own embedding, excluding self.
     /// Returns (id, similarity = 1 - distance) >= threshold.
     pub async fn find_similar(&self, id: &str, threshold: f32, limit: usize) -> Result<Vec<(String, f32)>> {
