@@ -74,6 +74,21 @@ RecordId form.
 `chrono::DateTime<Utc>` with `From`/`Into`, so spacebot's chrono timestamps map
 directly: `Datetime::from(dt)` to write, `datetime.into()` to read.
 
+## Compile-checking the in-crate port (`surreal-memory` feature)
+
+The main crate's `cargo check`/`clippy` work even where the ONNX Runtime binary
+download is blocked, by pointing `ort-sys` at a (possibly empty) lib dir so its
+build script skips the download — `check` does not link:
+
+```bash
+mkdir -p /tmp/ortlib
+ORT_LIB_LOCATION=/tmp/ortlib ORT_PREFER_DYNAMIC_LINK=1 \
+  cargo check --lib --features surreal-memory
+```
+
+`cargo test` for the in-crate store still needs a real onnxruntime to link
+(fastembed/ort), so the runnable tests live here in the standalone crate.
+
 ## Caveats / still to validate later
 
 - Tiny embedding dim (4) and modest row counts — enough to prove behavior and the

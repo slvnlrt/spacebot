@@ -412,12 +412,17 @@ at 384-dim and realistic scale.
   FULLTEXT + `RELATION`) applied; insert/KNN/filtered-KNN/FTS/RELATE+traversal/
   `find_similar` all validated on 60- and 1060-row data. Filtered KNN honours the
   `forgotten` filter and returns exactly K — **#6949 does not affect embedded.**
-- **Phase 1 — Store.** Port all of `store.rs` (incl. `get_neighbors` and the
-  dynamic IN-clause queries `store.rs:452-487`) + associations; **rebuild the
-  test harness** on `kv-mem`. Dual-run vs SQLite for parity. (The `sqlx`
-  compile-time check is lost — integration tests must compensate.)
-- **Phase 2 — Search.** Vector/FTS via SurrealQL; keep RRF, multipliers, seed
-  heuristic, and the Rust BFS; assert existing `search.rs` tests pass.
+- **Phase 1 — Store. ✅ landed (compile-checked).**
+  `memory::surreal_store::SurrealMemoryStore` (behind feature `surreal-memory`)
+  ports `store.rs` + `lance.rs` onto one engine: CRUD, soft-delete,
+  `record_access`, associations (`RELATE`), graph BFS `get_neighbors` (same
+  signature), `get_sorted`/`get_by_type`/`get_high_importance`, and vector
+  KNN/FTS/`find_similar`. Uses spacebot's real types + `crate::error`. Runtime
+  parity proven by the reference crate's tests; in-crate `kv-mem` tests are
+  Phase 2 (the test binary links fastembed/ort, which can't run in every env).
+- **Phase 2 — Search.** Port hybrid search (vector + FTS + Rust BFS + RRF +
+  multipliers + seed heuristic) over `SurrealMemoryStore`; wire `EmbeddingModel`
+  for the query vector; add the `kv-mem` test harness.
 - **Phase 3 — Maintenance + cutover.** Decay/prune/merge (merge now truly atomic);
   migrate data; remove `lance.rs`, LanceDB/Arrow deps.
 - **Phase 4 — Working memory (conditional).** Driven by the cross-store atomicity
