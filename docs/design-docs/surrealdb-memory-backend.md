@@ -220,7 +220,9 @@ CREATE type::record('memory', $id) SET
 ### Create an association
 
 ```surql
-RELATE type::record('memory', $source)->relates->type::record('memory', $target)
+-- NB: RELATE rejects type::record(...) as endpoints (parse error). Bind
+-- RecordId values (RecordId::new("memory", id)) and use the bare arrow form:
+RELATE $source->relates->$target
   SET relation_type = $relation_type, weight = $weight;
 ```
 
@@ -383,12 +385,21 @@ HNSW, 60→1060 rows. All checks passed:
 | Graph: 1-hop, edge-metadata projection, 2-hop chain | all work in one query |
 | `find_similar` self-referential KNN | works, excludes self |
 
-Three corrections to earlier drafts, now applied throughout:
+Corrections to earlier drafts, now applied throughout:
 
 - **`type::thing` → `type::record`** (v3 rename; `type::thing` is a parse error).
 - **KNN K/EF must be integer literals**, not bound params — build with
   `format!("<|{k},{ef}|>")` (i64, injection-safe).
+- **`RELATE` rejects `type::record(...)` endpoints** — bind `RecordId` values and
+  use `RELATE $s->relates->$t` (`RecordId::new("memory", id)`).
 - **#6949 / R1 is resolved** — filtered KNN behaves on embedded.
+
+Beyond the probe, `spikes/surreal-memory/` now contains a **tested reference
+implementation** (`src/lib.rs` + `tests/backend.rs`, 10 green integration tests
+on `kv-mem`) that faithfully ports `store.rs`/`search.rs`/`lance.rs` — CRUD,
+associations, graph BFS, vector KNN, FTS, `find_similar`, and hybrid RRF search.
+It is the blueprint for the in-crate Phase 1 port. Chrono interop is trivial
+(`surrealdb::types::Datetime` ⇄ `chrono::DateTime<Utc>` via `From`/`Into`).
 
 Still deferred to later phases (unchanged): per-agent instance model, cross-store
 atomicity inventory, SurrealKV backup story, and HNSW recall/latency benchmarking

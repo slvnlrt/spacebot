@@ -1,16 +1,16 @@
-# Standalone Phase 0 spike — NOT part of the spacebot crate/build.
-# Empirically validates SurrealDB v3.1.5 (embedded) for the memory backend design.
-# Run with: cargo run   (from this directory)
 [package]
 name = "surreal-memory-spike"
 version = "0.0.0"
 edition = "2021"
 publish = false
 
-# Empty workspace table isolates this crate from the parent spacebot package.
+# Isolate from the parent spacebot package build.
 [workspace]
 
 [dependencies]
 surrealdb = { version = "3.1", features = ["kv-surrealkv", "kv-mem"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 serde = { version = "1", features = ["derive"] }
+chrono = "0.4"
+uuid = { version = "1", features = ["v4"] }
+anyhow = "1"

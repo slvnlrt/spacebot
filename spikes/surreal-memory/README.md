@@ -1,14 +1,23 @@
-# Phase 0 spike — SurrealDB embedded, for the memory backend
+# Phase 0 spike + reference backend — SurrealDB embedded
 
-Standalone, runnable validation harness for
-`docs/design-docs/surrealdb-memory-backend.md`. **Not part of the spacebot
-crate** (own `[workspace]`, `publish = false`) — it depends only on `surrealdb`,
-so it compiles and runs in environments where the full spacebot crate cannot
+Standalone, runnable validation harness **and a tested reference implementation**
+of the memory backend for `docs/design-docs/surrealdb-memory-backend.md`. **Not
+part of the spacebot crate** (own `[workspace]`, `publish = false`) — it depends
+only on `surrealdb`, so it compiles and runs where the full spacebot crate cannot
 (the main crate pulls `fastembed`/`ort`, whose ONNX Runtime binary download is
 network-blocked here).
 
+Two pieces:
+- **`src/main.rs`** — the original probe (raw SurrealQL behaviour checks).
+- **`src/lib.rs` + `tests/backend.rs`** — a faithful, **passing** reference port
+  of `src/memory/{store,search,lance}.rs` (CRUD, associations, graph BFS, vector
+  KNN, FTS, `find_similar`, hybrid RRF search) against embedded SurrealDB. This is
+  the proven blueprint for the in-crate Phase 1 port.
+
 ```bash
-cd spikes/surreal-memory && cargo run
+cd spikes/surreal-memory
+cargo run          # probe (raw findings)
+cargo test         # reference backend — 10 integration tests, all green
 ```
 
 Pinned: **SurrealDB 3.1.5**, engine `kv-surrealkv` (on-disk, embedded).
@@ -51,6 +60,19 @@ it's tested) but is no longer forced by the storage layer.
 KNN returning all rows — does **not** occur on embedded SurrealKv 3.1.5, at 60
 rows or 1060 rows. The vector path can assume normal `WHERE … AND forgotten =
 false` filtering. (The upstream report was against the remote/SDK path.)
+
+**E. `RELATE` does not accept `type::record(...)` as endpoints.**
+`RELATE type::record('memory',$s)->relates->type::record('memory',$t)` is a parse
+error ("Unexpected token `::`"). Bind `RecordId` values instead and use the arrow
+form: `RELATE $s->relates->$t SET …`, with
+`surrealdb::types::RecordId::new("memory", id_string)`. (`CREATE`/`UPDATE`/
+`DELETE`/`SELECT … FROM type::record(...)` are all fine — only the `RELATE` arrow
+targets reject the function call.) The reference `add_association` uses the
+RecordId form.
+
+**F. Chrono interop is trivial.** `surrealdb::types::Datetime` wraps
+`chrono::DateTime<Utc>` with `From`/`Into`, so spacebot's chrono timestamps map
+directly: `Datetime::from(dt)` to write, `datetime.into()` to read.
 
 ## Caveats / still to validate later
 
