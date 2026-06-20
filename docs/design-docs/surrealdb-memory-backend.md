@@ -158,8 +158,13 @@ index and a full rebuild.
 > Record-id construction with UUID strings is the load-bearing detail. A raw
 > `memory:5e69...-2c96` lexes the `-` as subtraction, so we **cannot** write
 > `memory:$id`. Use `type::thing('memory', $id)` or bracket-escaped
-> `memory:⟨$id⟩`. The "keep UUIDs, API unchanged" plan depends on this parsing
-> correctly — verify it first.
+> `memory:⟨$id⟩`. The deeper risk is not just *parsing* but **id-type
+> consistency**: `type::thing('memory', $uuid)` builds a *string* id, which can
+> resolve to a different record than a native `memory:u'…'` UUID id (see
+> [#5642](https://github.com/surrealdb/surrealdb/issues/5642)). The plan treats
+> ids as opaque strings end-to-end (matching `types.rs:28`,
+> `Uuid::new_v4().to_string()`), which is internally consistent — but every
+> query *and* the migration `CREATE` must use the same string form. Verify first.
 
 ```surql
 -- Namespace/database selected at connect time (see "Per-agent instance model").
@@ -169,7 +174,7 @@ DEFINE FIELD content          ON memory TYPE string;
 DEFINE FIELD memory_type      ON memory TYPE string
   ASSERT $value IN ['fact','preference','decision','identity',
                     'event','observation','goal','todo'];
-DEFINE FIELD importance       ON memory TYPE float DEFAULT 0.5;
+DEFINE FIELD importance       ON memory TYPE float DEFAULT 0.5;  -- never exercised: the app always supplies a type-specific importance on CREATE (types.rs default_importance)
 DEFINE FIELD created_at       ON memory TYPE datetime DEFAULT time::now();
 DEFINE FIELD updated_at       ON memory TYPE datetime DEFAULT time::now();
 DEFINE FIELD last_accessed_at ON memory TYPE datetime DEFAULT time::now();
@@ -194,7 +199,9 @@ DEFINE INDEX memory_importance_idx ON memory FIELDS importance;
 
 -- Associations as graph edges.
 DEFINE TABLE relates SCHEMAFULL TYPE RELATION FROM memory TO memory;
-DEFINE FIELD relation_type ON relates TYPE string;
+DEFINE FIELD relation_type ON relates TYPE string
+  ASSERT $value IN ['related_to','updates','contradicts',
+                    'caused_by','result_of','part_of'];  -- parity with memory_type; 6 variants from types.rs
 DEFINE FIELD weight        ON relates TYPE float DEFAULT 0.5;
 DEFINE FIELD created_at    ON relates TYPE datetime DEFAULT time::now();
 DEFINE INDEX relates_unique ON relates FIELDS in, out, relation_type UNIQUE;
@@ -388,10 +395,13 @@ flips the default.
   Brute-force `<|K,DIST|>` errors with OR/NOT. This is a fixable engineering
   detail, not a reason to abandon the approach: handle it by filtering
   `forgotten` in Rust post-hoc / over-fetching, pinning a version where it
-  behaves, or contributing an upstream fix. Settle the handling in Phase 0 so the
-  rest of the design assumes a known-good vector path. The one place it really
-  bites is the self-referential `find_similar` (merge) — that query gets the most
-  scrutiny.
+  behaves, or contributing an upstream fix. **Crucially, #6949 reports the fault
+  on the remote/SDK path and explicitly *not* on the embedded database** — and
+  this plan uses embedded SurrealKV throughout. So the blast radius may already
+  be near zero; Phase 0 must first confirm whether embedded is affected at all
+  before designing any workaround. Settle this so the rest of the design assumes
+  a known-good vector path. The one place it would bite hardest is the
+  self-referential `find_similar` (merge) — that query gets the most scrutiny.
 - **R2 — Lost cross-store atomicity.** See "Cross-store atomicity." Not analyzed
   away by "memory only."
 - **R3 — Per-agent instance model is load-bearing.** Shared vs per-agent instance
@@ -401,8 +411,10 @@ flips the default.
 - **R5 — Runtime-only query validation.** Losing `sqlx`'s compile-time check
   shifts the burden onto integration tests; the rebuilt `kv-mem` test harness
   must cover what the type system used to.
-- **R6 — Record-id parsing.** UUID-with-hyphens ids require `type::thing`/bracket
-  escaping; verify in Phase 0 — it underpins "API unchanged."
+- **R6 — Record-id consistency.** Beyond hyphen-parsing, `type::thing` casts
+  UUIDs to *string* ids that can diverge from native UUID ids (#5642); the plan
+  uses opaque string ids everywhere, so every query and the migration `CREATE`
+  must agree. Verify in Phase 0 — it underpins "API unchanged."
 - **R7 — Embedding generation stays external.** No change to fastembed (so it
   isn't mistaken for a feature). `EMBEDDING_DIM=384` now lives in index DDL.
 - **R8 — Kodex reference (private, inaccessible this session).** Before Phase 1,
