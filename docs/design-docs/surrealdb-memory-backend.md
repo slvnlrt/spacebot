@@ -5,12 +5,13 @@ single embedded **SurrealDB v3** instance that unifies the document, graph,
 vector, and full-text concerns the memory subsystem currently splits across two
 databases.
 
-> Status: **design / investigation**. No production code yet. This document is
-> the preliminary research and target design. **Every SurrealQL snippet below is
-> a hypothesis to be falsified in the Phase 0 spike, not a final schema.** A
-> prior adversarial review (see "Review findings" at the end) corrected several
-> claims and SurrealQL errors in the first draft; those corrections are folded
-> into the body below.
+> Status: **design + Phase 0 spike DONE**. The SurrealQL below has now been
+> exercised against a real embedded SurrealDB 3.1.5 (see "Phase 0 spike results"
+> and `spikes/surreal-memory/`). Two adversarial reviews and the empirical spike
+> are folded in; remaining production code is Phase 1+. **Headline result: the
+> filtered-KNN concern (#6949) does *not* reproduce on embedded — the approach is
+> validated.** Note the corrected function name: v3 uses **`type::record`**, not
+> `type::thing`.
 
 ## Problem
 
@@ -153,18 +154,17 @@ index and a full rebuild.
   `limit+1`. Used by merge (`maintenance.rs:234`) — i.e. a self-referential KNN,
   exactly where the filtered-KNN bug (R1) bites hardest.
 
-## Target SurrealDB schema (draft — to be validated in Phase 0)
+## Target SurrealDB schema (validated in Phase 0)
 
-> Record-id construction with UUID strings is the load-bearing detail. A raw
-> `memory:5e69...-2c96` lexes the `-` as subtraction, so we **cannot** write
-> `memory:$id`. Use `type::thing('memory', $id)` or bracket-escaped
-> `memory:⟨$id⟩`. The deeper risk is not just *parsing* but **id-type
-> consistency**: `type::thing('memory', $uuid)` builds a *string* id, which can
-> resolve to a different record than a native `memory:u'…'` UUID id (see
-> [#5642](https://github.com/surrealdb/surrealdb/issues/5642)). The plan treats
-> ids as opaque strings end-to-end (matching `types.rs:28`,
-> `Uuid::new_v4().to_string()`), which is internally consistent — but every
-> query *and* the migration `CREATE` must use the same string form. Verify first.
+> Record-id construction with UUID strings: a raw `memory:5e69...-2c96` lexes the
+> `-` as subtraction, so we **cannot** write `memory:$id`. Use
+> **`type::record('memory', $id)`** (v3 renamed `type::thing` → `type::record`).
+> The spike confirmed hyphenated UUID-v4 strings round-trip cleanly: created via
+> `type::record`, read back identically via both a backtick literal and a
+> `type::record` param, and `meta::id(id)` extracts the string key. Ids stay
+> opaque strings end to end (matching `types.rs:28`, `Uuid::new_v4().to_string()`)
+> — R6 resolved. Just keep the same string form in every query and the migration
+> `CREATE`.
 
 ```surql
 -- Namespace/database selected at connect time (see "Per-agent instance model").
@@ -212,7 +212,7 @@ DEFINE INDEX relates_unique ON relates FIELDS in, out, relation_type UNIQUE;
 ### Create a memory (+ embedding, one statement)
 
 ```surql
-CREATE type::thing('memory', $id) SET
+CREATE type::record('memory', $id) SET
   content = $content, memory_type = $type, importance = $importance,
   source = $source, channel_id = $channel_id, embedding = $embedding;
 ```
@@ -220,26 +220,31 @@ CREATE type::thing('memory', $id) SET
 ### Create an association
 
 ```surql
-RELATE type::thing('memory', $source)->relates->type::thing('memory', $target)
+RELATE type::record('memory', $source)->relates->type::record('memory', $target)
   SET relation_type = $relation_type, weight = $weight;
 ```
 
 ### Vector KNN (replaces `EmbeddingTable::vector_search`)
 
 ```surql
--- HNSW operator REQUIRES the EF arg: <|K, EF|>. Whether K/EF can be bound
--- params or must be literals is unverified — test in Phase 0.
+-- HNSW operator REQUIRES the EF arg: <|K, EF|>. K and EF must be INTEGER
+-- LITERALS — bound params (<|$k,$ef|>) are a parse error (spike [6]), so build
+-- the operator with format!("<|{k},{ef}|>") (values are i64, injection-safe).
 SELECT id, content, importance, memory_type,
        vector::distance::knn() AS distance
 FROM memory
 WHERE embedding <|20, 40|> $query_embedding
-  AND forgotten = false;            -- ⚠️ see R1: filter may be ignored (bug #6949)
+  AND forgotten = false;            -- ✅ spike [5][10]: filter honored, K respected
+ORDER BY distance;
 ```
 
-`vector::distance::knn()` is valid but only returns a value for rows selected via
-the `<|K,EF|>` operator in the same WHERE. (There is no `vector::distance::cosine`
-— exact cosine is `vector::similarity::cosine`, relevant only if we fall back to
-brute-force `<|K, COSINE|>`, which errors when combined with OR/NOT.)
+Spike confirmed: the `AND forgotten = false` filter is applied correctly and
+exactly K rows are returned (60 and 1060-row runs) — **#6949 does not affect
+embedded** (R1). `vector::distance::knn()` only returns a value for rows selected
+via the `<|K,EF|>` operator in the same WHERE. (There is no
+`vector::distance::cosine` — exact cosine is `vector::similarity::cosine`,
+relevant only for a brute-force `<|K, COSINE|>` fallback, which errors with
+OR/NOT.)
 
 ### Full-text (replaces `EmbeddingTable::text_search`)
 
@@ -253,40 +258,39 @@ ORDER BY score DESC LIMIT $k;
 The `0` in `@0@` and `search::score(0)` is a per-query predicate reference (they
 must match), not an index id. This form is correct v3 syntax.
 
-### Graph traversal (replaces the BFS) — NOT a one-hop query
+### Graph traversal (replaces the BFS)
 
-The draft must reproduce depths 0–2 (three levels), re-queue only
-`related_to`/`part_of`, and filter `forgotten` at every hop. SurrealQL recursive
-graph syntax for this is the **riskiest** part to express; recommendation is to
-**keep the traversal in Rust** (it is tested and cheap) and use SurrealDB only to
-fetch a node's edges+neighbors per hop:
+The traversal must reproduce depths 0–2 (three levels), re-queue only
+`related_to`/`part_of`, and filter `forgotten` at every hop. **Recommendation:
+keep the BFS loop in Rust** (it is tested) and use SurrealDB to fetch a node's
+edges+neighbours per hop. The spike confirmed the per-hop query returns full edge
+metadata in one shot:
 
 ```surql
--- one hop, used by the Rust BFS loop:
-SELECT
-  ->relates.{ id: out, relation_type, weight } AS edges
-FROM type::thing('memory', $node)
-WHERE forgotten = false;
--- then load neighbor records (filtering forgotten) in the loop, as today.
+-- one hop, used by the Rust BFS loop (spike [8b] — works, returns out + fields):
+SELECT ->relates.{ out, relation_type, weight } AS edges
+FROM type::record('memory', $node);
+-- then load neighbour records (filtering forgotten) in the loop, as today.
 ```
 
-Pushing the full recursion into SurrealQL is a *possible* later optimisation, not
-a Phase 2 requirement. Do not claim it is both "cheap, already tested in Rust"
-and "pushed into SurrealQL" — pick one. Default: Rust.
+Spike also confirmed multi-hop chaining works in a single query
+(`->relates->memory->relates->memory`, spike [8c]), so pushing the full recursion
+into SurrealQL is a viable later optimisation — but the Rust BFS is the default
+because its per-edge-type scoring and re-queue rules are already tested.
 
-### `find_similar` (self-referential KNN — highest R1 exposure)
+### `find_similar` (self-referential KNN)
 
 ```surql
-LET $vec = (SELECT VALUE embedding FROM ONLY type::thing('memory', $id));
-SELECT id, vector::similarity::cosine(embedding, $vec) AS sim
+LET $vec = (SELECT VALUE embedding FROM ONLY type::record('memory', $id));
+SELECT id, vector::distance::knn() AS distance
 FROM memory
-WHERE embedding <|$k1, 40|> $vec AND id != type::thing('memory', $id)
-  AND forgotten = false;
+WHERE embedding <|6, 40|> $vec AND id != type::record('memory', $id)
+ORDER BY distance;
 ```
 
-This is precisely the pattern bug #6949 breaks. If Phase 0 confirms the filter is
-ignored, `find_similar` must over-fetch and filter in Rust, and merge correctness
-depends on that.
+Spike [9] confirmed this works: the `LET`-bound self embedding feeds the KNN
+operator, self is excluded, results come back ranked. (K/EF literals as above; add
+`AND forgotten = false` — confirmed honored.) The merge path is safe.
 
 ### Hybrid end-goal
 
@@ -352,7 +356,7 @@ decision: re-evaluate after that inventory.
 Per agent, one-time, idempotent:
 
 1. Read all `memories` + `associations` (SQLite) and all vectors (Lance).
-2. `CREATE type::thing('memory', uuid) SET … embedding = ⟨vec⟩` per memory.
+2. `CREATE type::record('memory', uuid) SET … embedding = ⟨vec⟩` per memory.
 3. `RELATE` each association.
 4. **Verify counts AND a vector sample** (the empty-table recovery bug means some
    Lance vectors may already be missing — regenerate via fastembed where absent).
@@ -361,17 +365,42 @@ Per agent, one-time, idempotent:
 7. **Backup/restore story for SurrealKV must be defined** (SQLite is a copyable
    single file; SurrealKV's on-disk format and backup path is not — specify it).
 
+## Phase 0 spike results
+
+Run `spikes/surreal-memory/` (standalone crate, depends only on `surrealdb` so it
+builds where the main crate can't). Against **embedded SurrealKv 3.1.5**, dim-4
+HNSW, 60→1060 rows. All checks passed:
+
+| Check | Result |
+| --- | --- |
+| Embedded SurrealKv on disk | connects |
+| Schema: `memory` SCHEMAFULL + HNSW + FULLTEXT + `RELATION` | applies clean |
+| UUID-string ids via `type::record` | round-trip OK; `meta::id` extracts key |
+| KNN `<\|K,EF\|>` | returns exactly K, distance-sorted |
+| **Filtered KNN `… AND forgotten = false`** | **honoured, exactly K, no leak (60 & 1060 rows) — #6949 N/A on embedded** |
+| K/EF as params `<\|$k,$ef\|>` | rejected — **must be integer literals** |
+| FTS `@0@` + `search::score(0)` BM25 | works; discriminative term scores >0 |
+| Graph: 1-hop, edge-metadata projection, 2-hop chain | all work in one query |
+| `find_similar` self-referential KNN | works, excludes self |
+
+Three corrections to earlier drafts, now applied throughout:
+
+- **`type::thing` → `type::record`** (v3 rename; `type::thing` is a parse error).
+- **KNN K/EF must be integer literals**, not bound params — build with
+  `format!("<|{k},{ef}|>")` (i64, injection-safe).
+- **#6949 / R1 is resolved** — filtered KNN behaves on embedded.
+
+Still deferred to later phases (unchanged): per-agent instance model, cross-store
+atomicity inventory, SurrealKV backup story, and HNSW recall/latency benchmarking
+at 384-dim and realistic scale.
+
 ## Phased plan
 
-- **Phase 0 — Spike.** Embedded SurrealKV up, schema applied, four primitives
-  validated on realistic data: insert, KNN, FTS, `RELATE`+traversal. **First
-  thing to settle:** how `embedding <|K,EF|> $q AND forgotten = false` behaves at
-  realistic volume — does it return ≤K *filtered* rows? If the filter is ignored
-  (the situation in #6949), pick the handling strategy: filter `forgotten` in
-  Rust post-hoc / over-fetch, pin a version where it works, or patch upstream.
-  Also settle: UUID record-id parsing, whether K/EF can be params, `Surreal`
-  clone semantics, build-size delta. Output: findings + chosen approach appended
-  here.
+- **Phase 0 — Spike. ✅ DONE** (see "Phase 0 spike results" and
+  `spikes/surreal-memory/`). Embedded SurrealKv 3.1.5 stood up; schema (HNSW +
+  FULLTEXT + `RELATION`) applied; insert/KNN/filtered-KNN/FTS/RELATE+traversal/
+  `find_similar` all validated on 60- and 1060-row data. Filtered KNN honours the
+  `forgotten` filter and returns exactly K — **#6949 does not affect embedded.**
 - **Phase 1 — Store.** Port all of `store.rs` (incl. `get_neighbors` and the
   dynamic IN-clause queries `store.rs:452-487`) + associations; **rebuild the
   test harness** on `kv-mem`. Dual-run vs SQLite for parity. (The `sqlx`
@@ -388,20 +417,15 @@ flips the default.
 
 ## Risks and open questions (ranked)
 
-- **R1 — Filtered KNN: known sharp edge to design around.** SurrealDB
-  [#6949](https://github.com/surrealdb/surrealdb/issues/6949) reports HNSW +
-  `WHERE` filter returning *all* rows instead of the K nearest — the shape of our
-  `embedding <|K,EF|> $q AND forgotten = false` and the `find_similar` merge.
-  Brute-force `<|K,DIST|>` errors with OR/NOT. This is a fixable engineering
-  detail, not a reason to abandon the approach: handle it by filtering
-  `forgotten` in Rust post-hoc / over-fetching, pinning a version where it
-  behaves, or contributing an upstream fix. **Crucially, #6949 reports the fault
-  on the remote/SDK path and explicitly *not* on the embedded database** — and
-  this plan uses embedded SurrealKV throughout. So the blast radius may already
-  be near zero; Phase 0 must first confirm whether embedded is affected at all
-  before designing any workaround. Settle this so the rest of the design assumes
-  a known-good vector path. The one place it would bite hardest is the
-  self-referential `find_similar` (merge) — that query gets the most scrutiny.
+- **R1 — Filtered KNN: RESOLVED by the spike.** The headline concern, SurrealDB
+  [#6949](https://github.com/surrealdb/surrealdb/issues/6949) (HNSW + `WHERE`
+  returning all rows), **does not reproduce on embedded SurrealKv 3.1.5** —
+  confirmed empirically at 60 and 1060 rows: `embedding <|K,EF|> $q AND forgotten
+  = false` returns exactly K rows with zero forgotten leakage, including the
+  self-referential `find_similar` merge query. (#6949 was filed against the
+  remote/SDK path.) The vector path assumes normal filtering. *Residual:* the
+  spike used dim-4 vectors and small corpora — HNSW recall/latency at 384-dim and
+  realistic scale is a Phase 2 benchmark, not a correctness risk.
 - **R2 — Lost cross-store atomicity.** See "Cross-store atomicity." Not analyzed
   away by "memory only."
 - **R3 — Per-agent instance model is load-bearing.** Shared vs per-agent instance
@@ -411,10 +435,11 @@ flips the default.
 - **R5 — Runtime-only query validation.** Losing `sqlx`'s compile-time check
   shifts the burden onto integration tests; the rebuilt `kv-mem` test harness
   must cover what the type system used to.
-- **R6 — Record-id consistency.** Beyond hyphen-parsing, `type::thing` casts
-  UUIDs to *string* ids that can diverge from native UUID ids (#5642); the plan
-  uses opaque string ids everywhere, so every query and the migration `CREATE`
-  must agree. Verify in Phase 0 — it underpins "API unchanged."
+- **R6 — Record-id consistency: RESOLVED by the spike.** `type::record('memory',
+  $uuid)` round-trips hyphenated UUID-v4 strings cleanly; ids stay opaque strings
+  everywhere (create, read-back, `meta::id`). Just use the same string form in
+  every query and the migration `CREATE`. (Don't mix in native `u'…'` UUID ids —
+  the plan never does.)
 - **R7 — Embedding generation stays external.** No change to fastembed (so it
   isn't mistaken for a feature). `EMBEDDING_DIM=384` now lives in index DDL.
 - **R8 — Kodex reference (private, inaccessible this session).** Before Phase 1,
@@ -430,9 +455,11 @@ incorporated above: `forgotten` comes from a later migration; a second BFS
 already half-atomic; Lance "recovery" silently drops vectors; the test harness
 (`connect_in_memory`) must be rebuilt on a different engine; and several SurrealQL
 errors — bare `<|$k|>` (needs `<|K,EF|>`), `memory:$id` interpolation (needs
-`type::thing`), `TYPE`/`DIST` ordering, and a one-hop traversal that didn't match
-the depth-0–2 BFS. Verdict: **the approach is sound; start the spike, settle the
-filtered-KNN handling and the two deferred decisions early, and build on them.**
+`type::record`), `TYPE`/`DIST` ordering, and a one-hop traversal that didn't match
+the depth-0–2 BFS. Verdict: **the approach is sound.** The Phase 0 spike has since
+confirmed it empirically (filtered KNN, FTS, graph, `find_similar` all work on
+embedded), and corrected `type::thing` → `type::record` plus the K/EF-literal
+constraint.
 
 ## References
 
