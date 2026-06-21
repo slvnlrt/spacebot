@@ -167,7 +167,7 @@ moka = "0.12.13"
 [features]
 metrics = ["dep:prometheus"]
 # Experimental: SurrealDB-backed memory subsystem (design doc:
-# docs/design-docs/surrealdb-memory-backend.md). Off by default; the SQLite +
+# docs/design-docs/surrealdb-memory/design.md). Off by default; the SQLite +
 # LanceDB path remains the default until the cutover phase.
 surreal-memory = ["dep:surrealdb"]
 

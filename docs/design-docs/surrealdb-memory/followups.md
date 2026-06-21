@@ -1,7 +1,7 @@
 # SurrealDB memory backend — follow-ups & known issues
 
 Tracking doc for the `feat/surrealdb-memory` work. Companion to
-`surrealdb-memory-backend.md` (the design). Captures self-review findings on the
+`design.md`. Captures self-review findings on the
 **implementation** (not the design), their severity, and status.
 
 ## Process note (why these surfaced late)

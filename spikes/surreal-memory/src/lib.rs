@@ -2,7 +2,7 @@
 //!
 //! This is a *runnable, tested* prototype (against embedded SurrealDB) of what
 //! `src/memory/` becomes under the design in
-//! `docs/design-docs/surrealdb-memory-backend.md`. It mirrors spacebot's memory
+//! `docs/design-docs/surrealdb-memory/design.md`. It mirrors spacebot's memory
 //! types and store/search behaviour closely enough to prove the SurrealQL and
 //! the surrealdb 3.x API usage before transplanting into the main crate.
 //!

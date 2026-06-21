@@ -6,7 +6,7 @@
 //! table. Embeddings are still generated externally (`embedding.rs` / fastembed)
 //! and passed in.
 //!
-//! Design + rationale: `docs/design-docs/surrealdb-memory-backend.md`. The query
+//! Design + rationale: `docs/design-docs/surrealdb-memory/design.md`. The query
 //! shapes here were validated against embedded SurrealDB 3.1.5 in
 //! `spikes/surreal-memory/` (a runnable, tested reference port).
 //!

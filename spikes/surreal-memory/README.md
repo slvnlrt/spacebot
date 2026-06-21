@@ -1,7 +1,7 @@
 # Phase 0 spike + reference backend — SurrealDB embedded
 
 Standalone, runnable validation harness **and a tested reference implementation**
-of the memory backend for `docs/design-docs/surrealdb-memory-backend.md`. **Not
+of the memory backend for `docs/design-docs/surrealdb-memory/design.md`. **Not
 part of the spacebot crate** (own `[workspace]`, `publish = false`) — it depends
 only on `surrealdb`, so it compiles and runs where the full spacebot crate cannot
 (the main crate pulls `fastembed`/`ort`, whose ONNX Runtime binary download is
