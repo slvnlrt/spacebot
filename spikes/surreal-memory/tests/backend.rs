@@ -237,3 +237,29 @@ async fn merge_rewires_edges_and_soft_deletes_loser() {
     let l_assocs = store.get_associations(&l.id).await.unwrap();
     assert!(l_assocs.iter().all(|a| a.relation_type == RelationType::Updates));
 }
+
+#[tokio::test]
+async fn prune_below_deletes_only_old_low_importance_non_identity() {
+    let store = fresh().await;
+    let old = chrono::Utc::now() - chrono::Duration::days(60);
+    // low + old + fact  -> pruned
+    let mut a = Memory::new("low old fact", MemoryType::Fact).with_importance(0.05);
+    a.created_at = old;
+    // low + old + identity -> kept (identity never pruned)
+    let mut b = Memory::new("low old identity", MemoryType::Identity).with_importance(0.05);
+    b.created_at = old;
+    // low + recent -> kept (too new)
+    let c = Memory::new("low recent", MemoryType::Fact).with_importance(0.05);
+    // high + old -> kept (above threshold)
+    let mut d = Memory::new("high old", MemoryType::Fact).with_importance(0.9);
+    d.created_at = old;
+    for m in [&a, &b, &c, &d] { store.save(m, None).await.unwrap(); }
+
+    let cutoff = chrono::Utc::now() - chrono::Duration::days(30);
+    let pruned = store.prune_below(0.1, cutoff).await.unwrap();
+    assert_eq!(pruned, 1, "only the low+old+fact is pruned");
+    assert!(store.load(&a.id).await.unwrap().is_none());
+    assert!(store.load(&b.id).await.unwrap().is_some());
+    assert!(store.load(&c.id).await.unwrap().is_some());
+    assert!(store.load(&d.id).await.unwrap().is_some());
+}

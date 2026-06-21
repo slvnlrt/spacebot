@@ -17,7 +17,7 @@ Two pieces:
 ```bash
 cd spikes/surreal-memory
 cargo run          # probe (raw findings)
-cargo test         # reference backend — 11 integration tests, all green
+cargo test         # reference backend — 12 integration tests, all green
 ```
 
 Pinned: **SurrealDB 3.1.5**, engine `kv-surrealkv` (on-disk, embedded).

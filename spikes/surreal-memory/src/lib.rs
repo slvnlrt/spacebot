@@ -498,6 +498,31 @@ impl<C: Connection> MemoryStore<C> {
         Ok(out)
     }
 
+    /// Server-side prune: delete non-identity memories below `threshold` and
+    /// older than `older_than`. Returns the number deleted. Edges cascade.
+    pub async fn prune_below(
+        &self,
+        threshold: f32,
+        older_than: chrono::DateTime<chrono::Utc>,
+    ) -> Result<u64> {
+        let mut r = self
+            .db
+            .query(
+                "DELETE memory WHERE importance < $t AND created_at < $cut \
+                 AND memory_type != 'identity' RETURN BEFORE",
+            )
+            .bind(("t", threshold as f64))
+            .bind(("cut", surrealdb::types::Datetime::from(older_than)))
+            .await?;
+        let deleted: surrealdb::types::Value = r.take(0)?;
+        let n = if let surrealdb::types::Value::Array(a) = deleted {
+            a.len() as u64
+        } else {
+            0
+        };
+        Ok(n)
+    }
+
     // ---- vector + fts (mirror lance.rs) ----
 
     /// KNN by cosine distance. Returns (id, distance) ascending. K/EF literals.
@@ -523,12 +548,12 @@ impl<C: Connection> MemoryStore<C> {
         Ok(rows.into_iter().map(|x| (x.id, x.score as f32)).collect())
     }
 
-    /// Merge `loser` into `survivor`: set survivor content/embedding, rewire the
-    /// loser's edges onto the survivor (preserving direction, type, weight; no
-    /// self-loops), drop the loser's edges, add a `survivor->updates->loser`
-    /// edge, and soft-delete the loser. Mirrors store.rs::merge_memories_atomic
-    /// — but here the embedding lives on the record, so it is part of the same
-    /// logical operation rather than a best-effort afterthought.
+    /// Merge `loser` into `survivor` atomically (single BEGIN/COMMIT transaction).
+    /// Sets survivor content/embedding, rewires the loser's edges onto the
+    /// survivor (preserving direction/type/weight; no self-loops; pre-deleting
+    /// any conflicting survivor edge to satisfy the UNIQUE index), drops the
+    /// loser's edges, adds `survivor->updates->loser`, and soft-deletes the loser.
+    /// SurrealDB rolls the whole thing back on any failure.
     pub async fn merge(
         &self,
         survivor_id: &str,
@@ -536,18 +561,14 @@ impl<C: Connection> MemoryStore<C> {
         new_content: &str,
         new_embedding: Option<&[f32]>,
     ) -> Result<()> {
-        // 1. Update survivor content + embedding.
-        self.db
-            .query("UPDATE type::record('memory',$id) SET content=$c, updated_at=time::now(), embedding=$e")
-            .bind(("id", survivor_id.to_string()))
-            .bind(("c", new_content.to_string()))
-            .bind(("e", new_embedding.map(|e| e.to_vec())))
-            .await?
-            .check()?;
+        use surrealdb::types::RecordId;
 
-        // 2. Rewire loser edges onto survivor (preserve direction/type/weight).
-        for assoc in self.get_associations(loser_id).await? {
-            let (mut s, mut t) = (assoc.source_id.clone(), assoc.target_id.clone());
+        // Read the loser's edges first (reads can't share the write transaction
+        // cleanly), then compute the rewired set in Rust.
+        let mut rewires: Vec<(String, String, RelationType, f32)> = Vec::new();
+        for a in self.get_associations(loser_id).await? {
+            let mut s = a.source_id;
+            let mut t = a.target_id;
             if s == loser_id {
                 s = survivor_id.to_string();
             }
@@ -555,28 +576,46 @@ impl<C: Connection> MemoryStore<C> {
                 t = survivor_id.to_string();
             }
             if s == t {
-                continue; // would be a self-loop
+                continue; // self-loop
             }
-            self.add_association(
-                &Association::new(s, t, assoc.relation_type).with_weight(assoc.weight),
-            )
-            .await?;
+            rewires.push((s, t, a.relation_type, a.weight));
         }
 
-        // 3. Drop the loser's edges.
-        let s = surrealdb::types::RecordId::new("memory", loser_id.to_string());
-        self.db
-            .query("DELETE relates WHERE in = $m OR out = $m")
-            .bind(("m", s))
-            .await?
-            .check()?;
+        // Build one transaction with indexed params.
+        let mut sql = String::from("BEGIN;\n");
+        sql.push_str(
+            "UPDATE $survivor SET content=$content, updated_at=time::now(), embedding=$emb;\n",
+        );
+        for i in 0..rewires.len() {
+            sql.push_str(&format!(
+                "DELETE relates WHERE in=$s{i} AND out=$t{i} AND relation_type=$rt{i};\n"
+            ));
+            sql.push_str(&format!(
+                "RELATE $s{i}->relates->$t{i} SET relation_type=$rt{i}, weight=$w{i};\n"
+            ));
+        }
+        sql.push_str("DELETE relates WHERE in=$loser OR out=$loser;\n");
+        sql.push_str(
+            "RELATE $survivor->relates->$loser SET relation_type='updates', weight=1.0;\n",
+        );
+        sql.push_str("UPDATE $loser SET forgotten=true;\n");
+        sql.push_str("COMMIT;");
 
-        // 4. survivor ->updates-> loser, and 5. soft-delete loser.
-        self.add_association(
-            &Association::new(survivor_id, loser_id, RelationType::Updates).with_weight(1.0),
-        )
-        .await?;
-        self.forget(loser_id).await?;
+        let mut q = self
+            .db
+            .query(sql)
+            .bind(("survivor", RecordId::new("memory", survivor_id.to_string())))
+            .bind(("loser", RecordId::new("memory", loser_id.to_string())))
+            .bind(("content", new_content.to_string()))
+            .bind(("emb", new_embedding.map(|e| e.to_vec())));
+        for (i, (s, t, rt, w)) in rewires.into_iter().enumerate() {
+            q = q
+                .bind((format!("s{i}"), RecordId::new("memory", s)))
+                .bind((format!("t{i}"), RecordId::new("memory", t)))
+                .bind((format!("rt{i}"), rt.as_str().to_string()))
+                .bind((format!("w{i}"), w as f64));
+        }
+        q.await?.check()?;
         Ok(())
     }
 

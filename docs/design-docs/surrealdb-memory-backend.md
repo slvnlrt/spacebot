@@ -397,7 +397,7 @@ Corrections to earlier drafts, now applied throughout:
 - **#6949 / R1 is resolved** — filtered KNN behaves on embedded.
 
 Beyond the probe, `spikes/surreal-memory/` now contains a **tested reference
-implementation** (`src/lib.rs` + `tests/backend.rs`, 11 green integration tests
+implementation** (`src/lib.rs` + `tests/backend.rs`, 12 green integration tests
 on `kv-mem`) that faithfully ports `store.rs`/`search.rs`/`lance.rs` — CRUD,
 associations, graph BFS, vector KNN, FTS, `find_similar`, and hybrid RRF search.
 It is the blueprint for the in-crate Phase 1 port. Chrono interop is trivial
@@ -420,7 +420,7 @@ surreal-memory` clean):
 | `memory::surreal_maintenance` | decay / prune / merge_similar | compile + reference merge test |
 | `memory::surreal_migrate` | `migrate_from_sqlite`: re-embed + copy memories & associations | compile |
 | `tests/surreal_memory.rs` | in-crate `kv-mem` integration suite | typechecks (`--tests`); runs where ONNX RT links |
-| `spikes/surreal-memory/` | standalone probe + reference port, **11 green tests** | **runs here** |
+| `spikes/surreal-memory/` | standalone probe + reference port, **12 green tests** | **runs here** |
 
 Build note: where the ONNX Runtime download is network-blocked, check with
 `ORT_LIB_LOCATION=/tmp/ortlib ORT_PREFER_DYNAMIC_LINK=1 cargo check --features

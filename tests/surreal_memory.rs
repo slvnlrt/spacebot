@@ -186,3 +186,21 @@ async fn hybrid_search_fuses_and_excludes_forgotten() {
     assert!(res.iter().all(|r| r.memory.id != ghost.id));
     assert_eq!(res[0].rank, 1);
 }
+
+#[tokio::test]
+async fn prune_below_server_side() {
+    let store = fresh().await;
+    let old = chrono::Utc::now() - chrono::Duration::days(60);
+    let mut a = Memory::new("low old fact", MemoryType::Fact).with_importance(0.05);
+    a.created_at = old;
+    let mut id = Memory::new("low old identity", MemoryType::Identity).with_importance(0.05);
+    id.created_at = old;
+    let recent = Memory::new("low recent", MemoryType::Fact).with_importance(0.05);
+    for m in [&a, &id, &recent] { store.save(m, None).await.unwrap(); }
+    let cutoff = chrono::Utc::now() - chrono::Duration::days(30);
+    let pruned = store.prune_below(0.1, cutoff).await.unwrap();
+    assert_eq!(pruned, 1);
+    assert!(store.load(&a.id).await.unwrap().is_none());
+    assert!(store.load(&id.id).await.unwrap().is_some());
+    assert!(store.load(&recent.id).await.unwrap().is_some());
+}

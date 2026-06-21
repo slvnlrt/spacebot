@@ -21,7 +21,10 @@ use crate::memory::types::{Memory, MemoryType};
 const MAX_MERGES_PER_PASS: usize = 500;
 const MAX_SIMILAR_CANDIDATES: usize = 25;
 const MAX_MERGED_MEMORY_CONTENT_BYTES: usize = 50_000;
-const MAINTENANCE_SCAN_LIMIT: i64 = 2_000;
+/// Per-type decay scan cap (mirrors `maintenance.rs::apply_decay`, 1000/type).
+const DECAY_SCAN_LIMIT_PER_TYPE: i64 = 1_000;
+/// Merge candidate scan cap.
+const MERGE_SCAN_LIMIT: i64 = 2_000;
 
 /// Run decay, prune, and merge over the SurrealDB memory store.
 pub async fn run_maintenance(
@@ -37,58 +40,53 @@ pub async fn run_maintenance(
 }
 
 /// Importance decay based on recency and access patterns (mirrors
-/// `maintenance.rs::apply_decay`). Identity memories never decay.
+/// `maintenance.rs::apply_decay`). Identity memories never decay. Iterates per
+/// non-identity type (so the scan cap is per-type, matching the original,
+/// instead of a single global cap that could silently skip the tail).
 pub async fn apply_decay(store: &SurrealMemoryStore, decay_rate: f32) -> Result<usize> {
-    let memories = store.get_all_active(MAINTENANCE_SCAN_LIMIT).await?;
     let now = chrono::Utc::now();
     let mut decayed = 0;
 
-    for mut memory in memories {
-        if memory.memory_type == MemoryType::Identity {
+    for &mem_type in MemoryType::ALL {
+        if mem_type == MemoryType::Identity {
             continue;
         }
-        let days_old = (now - memory.updated_at).num_days();
-        let days_since_access = (now - memory.last_accessed_at).num_days();
+        let memories = store.get_by_type(mem_type, DECAY_SCAN_LIMIT_PER_TYPE).await?;
+        for mut memory in memories {
+            let days_old = (now - memory.updated_at).num_days();
+            let days_since_access = (now - memory.last_accessed_at).num_days();
 
-        let age_decay = 1.0 - (days_old as f32 * decay_rate).min(0.5);
-        let access_boost = if days_since_access < 7 {
-            1.1
-        } else if days_since_access > 30 {
-            0.9
-        } else {
-            1.0
-        };
-        let new_importance = memory.importance * age_decay * access_boost;
+            let age_decay = 1.0 - (days_old as f32 * decay_rate).min(0.5);
+            let access_boost = if days_since_access < 7 {
+                1.1
+            } else if days_since_access > 30 {
+                0.9
+            } else {
+                1.0
+            };
+            let new_importance = memory.importance * age_decay * access_boost;
 
-        if (new_importance - memory.importance).abs() > 0.01 {
-            memory.importance = new_importance.clamp(0.0, 1.0);
-            memory.updated_at = now;
-            store.update(&memory).await?;
-            decayed += 1;
+            if (new_importance - memory.importance).abs() > 0.01 {
+                memory.importance = new_importance.clamp(0.0, 1.0);
+                memory.updated_at = now;
+                store.update(&memory).await?;
+                decayed += 1;
+            }
         }
     }
     Ok(decayed)
 }
 
 /// Delete non-identity memories below the importance threshold that are older
-/// than `min_age_days` (mirrors `maintenance.rs::prune_memories`).
+/// than `min_age_days` (mirrors `maintenance.rs::prune_memories`). The predicate
+/// runs server-side — no client-side scan, no row cap.
 pub async fn prune_memories(
     store: &SurrealMemoryStore,
     config: &MaintenanceConfig,
 ) -> Result<usize> {
     let cutoff = chrono::Utc::now() - chrono::Duration::days(config.min_age_days);
-    let memories = store.get_all_active(MAINTENANCE_SCAN_LIMIT).await?;
-    let mut pruned = 0;
-    for memory in memories {
-        if memory.memory_type != MemoryType::Identity
-            && memory.importance < config.prune_threshold
-            && memory.created_at < cutoff
-        {
-            store.delete(&memory.id).await?;
-            pruned += 1;
-        }
-    }
-    Ok(pruned)
+    let pruned = store.prune_below(config.prune_threshold, cutoff).await?;
+    Ok(pruned as usize)
 }
 
 /// Merge near-duplicate memories (mirrors `maintenance.rs::merge_similar_memories`).
@@ -97,7 +95,7 @@ pub async fn merge_similar_memories(
     embedding_model: &Arc<EmbeddingModel>,
     similarity_threshold: f32,
 ) -> Result<usize> {
-    let candidates = store.get_all_active(MAINTENANCE_SCAN_LIMIT).await?;
+    let candidates = store.get_all_active(MERGE_SCAN_LIMIT).await?;
     let mut merged_count = 0_usize;
     let mut merged_ids: HashSet<String> = HashSet::new();
 
