@@ -8,7 +8,7 @@ databases.
 > Status: **design + spike + store/search/maintenance/migration LANDED behind the
 > `surreal-memory` feature (compile-checked; off by default).** What's left is the
 > live wiring/cutover (see "Implementation status"). The SurrealQL has been
-> exercised against a real embedded SurrealDB 3.1.5 (`spikes/surreal-memory/`, 11
+> exercised against a real embedded SurrealDB 3.1.5 (`spikes/surreal-memory/`, 12
 > green tests). Two adversarial reviews + the empirical spike are folded in.
 > **Headline result: the filtered-KNN concern (#6949) does *not* reproduce on
 > embedded — the approach is validated.** Note v3 uses **`type::record`** (not
