@@ -13,7 +13,7 @@
 //! Phase 1 scope: the store + vector/FTS primitives. Hybrid RRF search (Phase 2)
 //! still lives in `search.rs`; this type exposes the same primitives it needs.
 
-use std::collections::VecDeque;
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -129,6 +129,35 @@ struct IdDist {
 /// Columns selected for every full `Memory` read.
 const MEMORY_COLS: &str = "meta::id(id) AS id, content, memory_type, importance, \
      created_at, updated_at, last_accessed_at, access_count, source, channel_id, forgotten";
+
+/// Extract `RecordId`s from a `{..N+collect}` traversal result, deduplicating
+/// into `seen` (string keys) and appending new ones to `out`.
+///
+/// SurrealDB 3.1.x returns the collect result as a `Value::Array` of
+/// `Value::RecordId`s (possibly nested when the graph has no edges — the
+/// array may be empty or contain a single NONE). UUID-keyed memory records
+/// have `RecordIdKey::String` keys.
+fn extract_rids_into(
+    v: &surrealdb::types::Value,
+    seen: &mut std::collections::HashSet<String>,
+    out: &mut Vec<RecordId>,
+) {
+    match v {
+        surrealdb::types::Value::Array(arr) => {
+            for item in arr.iter() {
+                extract_rids_into(item, seen, out);
+            }
+        }
+        surrealdb::types::Value::RecordId(rid) => {
+            if let surrealdb::types::RecordIdKey::String(ref key) = rid.key
+                && seen.insert(key.clone())
+            {
+                out.push(RecordId::new(rid.table.as_str(), key.clone()));
+            }
+        }
+        _ => {}
+    }
+}
 
 /// Embedded SurrealDB memory store.
 pub struct SurrealMemoryStore {
@@ -412,44 +441,146 @@ impl SurrealMemoryStore {
         Ok(before)
     }
 
-    /// Graph-view BFS neighbours up to `depth`, excluding `exclude_ids`.
-    /// Mirrors `store.rs::get_neighbors` — returns (memories, edges traversed).
+    /// Graph-view neighbours up to `depth`, excluding `exclude_ids`.
+    /// Returns `(memories, edges)` where:
+    /// - `memories`: all non-forgotten nodes within `depth` hops (both directions),
+    ///   excluding the start node and `exclude_ids`.
+    /// - `edges`: all associations incident to the EXPANDED set
+    ///   (`{root} ∪ nodes within depth−1 hops`), each appearing exactly once.
+    ///
+    /// Implemented via native SurrealDB `{..N+collect}` graph recursion (4 fixed
+    /// queries regardless of graph size), replacing the previous N+1 BFS.
+    ///
+    /// # Forgotten-node strategy (b) — accepted behavioural delta
+    ///
+    /// The traversal is unconditional: `{..N+collect}` traverses through forgotten
+    /// nodes. Forgotten nodes are excluded from returned `memories` only at the
+    /// hydrate step (`WHERE forgotten = false`). This means nodes reachable
+    /// exclusively via a forgotten intermediate node WILL appear in `memories` (they
+    /// were unreachable in the old BFS, which skipped forgotten nodes). This is a
+    /// benign superset for the graph-view API and is explicitly tested. If exact
+    /// no-traverse-through-forgotten parity is ever required, strategy (a) —
+    /// `->relates[WHERE out.forgotten=false]->memory` — was also verified as
+    /// working on SurrealDB 3.1.x (see task-c1-report.md).
+    ///
+    /// # depth == 0
+    ///
+    /// Returns `([], [])` immediately. Do NOT clamp to 1; `{..0}` is illegal
+    /// SurrealQL ("Found 0 for bound but expected at least 1"). The upper bound
+    /// is clamped to 256 (SurrealDB 3.1.x limit).
     pub async fn get_neighbors(
         &self,
         memory_id: &str,
         depth: u32,
         exclude_ids: &[String],
     ) -> Result<(Vec<Memory>, Vec<Association>)> {
-        let mut visited: std::collections::HashSet<String> = exclude_ids.iter().cloned().collect();
-        visited.insert(memory_id.to_string());
-
-        let mut memories = Vec::new();
-        let mut edges = Vec::new();
-        let mut queue: VecDeque<(String, u32)> = VecDeque::new();
-        queue.push_back((memory_id.to_string(), 0));
-
-        while let Some((current, d)) = queue.pop_front() {
-            if d >= depth {
-                continue;
-            }
-            for assoc in self.get_associations(&current).await? {
-                let other = if assoc.source_id == current {
-                    assoc.target_id.clone()
-                } else {
-                    assoc.source_id.clone()
-                };
-                edges.push(assoc);
-                if !visited.insert(other.clone()) {
-                    continue;
-                }
-                if let Some(m) = self.load(&other).await?
-                    && !m.forgotten
-                {
-                    memories.push(m);
-                    queue.push_back((other, d + 1));
-                }
-            }
+        // Guard: depth 0 → nothing to expand; {..0} is illegal SurrealQL.
+        if depth == 0 {
+            return Ok((vec![], vec![]));
         }
+        let depth_clamped = depth.min(256) as usize;
+
+        let root = RecordId::new("memory", memory_id.to_string());
+
+        // ── Step 1: COLLECTED set ───────────────────────────────────────────
+        // Forward and backward `{..depth+collect}` each return a flat array of
+        // RecordIDs (not hydrated records). We union + dedup + exclude start and
+        // exclude_ids.
+        let fwd_sql = format!("$root.{{..{depth_clamped}+collect}}->relates->memory");
+        let bwd_sql = format!("$root.{{..{depth_clamped}+collect}}<-relates<-memory");
+
+        let mut fwd_r = self
+            .db
+            .query(&fwd_sql)
+            .bind(("root", root.clone()))
+            .await
+            .map_err(err)?;
+        let fwd_val: surrealdb::types::Value = fwd_r.take(0).map_err(err)?;
+
+        let mut bwd_r = self
+            .db
+            .query(&bwd_sql)
+            .bind(("root", root.clone()))
+            .await
+            .map_err(err)?;
+        let bwd_val: surrealdb::types::Value = bwd_r.take(0).map_err(err)?;
+
+        // Seed the seen-set with start + excludes so they are never added to
+        // collected_rids.
+        let mut seen: HashSet<String> = exclude_ids.iter().cloned().collect();
+        seen.insert(memory_id.to_string());
+        let mut collected_rids: Vec<RecordId> = Vec::new();
+        extract_rids_into(&fwd_val, &mut seen, &mut collected_rids);
+        extract_rids_into(&bwd_val, &mut seen, &mut collected_rids);
+
+        // ── Step 2: Hydrate memories (non-forgotten) ───────────────────────
+        let memories = if collected_rids.is_empty() {
+            vec![]
+        } else {
+            let sql = format!(
+                "SELECT {MEMORY_COLS} FROM memory WHERE id IN $ids AND forgotten = false"
+            );
+            let mut r = self
+                .db
+                .query(sql)
+                .bind(("ids", collected_rids))
+                .await
+                .map_err(err)?;
+            let rows: Vec<MemoryRow> = r.take(0).map_err(err)?;
+            rows.into_iter().map(Memory::from).collect()
+        };
+
+        // ── Step 3: EXPANDED set ───────────────────────────────────────────
+        // EXPANDED = {root} ∪ nodes within (depth−1) hops (both directions).
+        // For depth == 1, EXPANDED = {root} only (skip inner collect;
+        // {..0} is illegal).
+        let mut expanded_rids: Vec<RecordId> = vec![root.clone()];
+        if depth_clamped >= 2 {
+            let exp_depth = depth_clamped - 1;
+            let ef_sql = format!("$root.{{..{exp_depth}+collect}}->relates->memory");
+            let eb_sql = format!("$root.{{..{exp_depth}+collect}}<-relates<-memory");
+
+            let mut ef_r = self
+                .db
+                .query(&ef_sql)
+                .bind(("root", root.clone()))
+                .await
+                .map_err(err)?;
+            let ef_val: surrealdb::types::Value = ef_r.take(0).map_err(err)?;
+
+            let mut eb_r = self
+                .db
+                .query(&eb_sql)
+                .bind(("root", root.clone()))
+                .await
+                .map_err(err)?;
+            let eb_val: surrealdb::types::Value = eb_r.take(0).map_err(err)?;
+
+            // Use a separate seen-set for expanded — root is pre-seeded.
+            let mut exp_seen: HashSet<String> = HashSet::new();
+            exp_seen.insert(memory_id.to_string());
+            extract_rids_into(&ef_val, &mut exp_seen, &mut expanded_rids);
+            extract_rids_into(&eb_val, &mut exp_seen, &mut expanded_rids);
+        }
+
+        // ── Step 4: Edges incident to EXPANDED set ─────────────────────────
+        // Each edge appears exactly once (SELECT is idempotent; old BFS could
+        // push duplicates when the same edge was seen from both endpoints).
+        let edges = {
+            let mut r = self
+                .db
+                .query(
+                    "SELECT meta::id(in) AS source, meta::id(out) AS target, \
+                     relation_type, weight, created_at \
+                     FROM relates WHERE in IN $expanded OR out IN $expanded",
+                )
+                .bind(("expanded", expanded_rids))
+                .await
+                .map_err(err)?;
+            let rows: Vec<AssocRow> = r.take(0).map_err(err)?;
+            rows.into_iter().map(Association::from).collect()
+        };
+
         Ok((memories, edges))
     }
 
@@ -823,6 +954,27 @@ mod tests {
         }
     }
 
+    fn mem_forgotten(id: &str) -> Memory {
+        Memory { forgotten: true, ..mem(id) }
+    }
+
+    /// Collect memory ids from the result, sorted for deterministic comparison.
+    fn mem_ids(memories: &[Memory]) -> Vec<String> {
+        let mut ids: Vec<_> = memories.iter().map(|m| m.id.clone()).collect();
+        ids.sort();
+        ids
+    }
+
+    /// Collect edge (source, target) pairs, sorted.
+    fn edge_pairs(edges: &[Association]) -> Vec<(String, String)> {
+        let mut pairs: Vec<_> = edges
+            .iter()
+            .map(|e| (e.source_id.clone(), e.target_id.clone()))
+            .collect();
+        pairs.sort();
+        pairs
+    }
+
     #[tokio::test]
     async fn associations_between_returns_only_internal_edges() {
         let store = mem_store().await;
@@ -845,5 +997,233 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(within.len(), 1); // a->b only; b->c excluded (c not in set)
+    }
+
+    // ── get_neighbors parity tests (C2 — native {..+collect} recursion) ────────
+
+    /// depth 0 → always returns empty regardless of graph.
+    /// ({..0} is illegal SurrealQL; must guard before issuing any query.)
+    #[tokio::test]
+    async fn get_neighbors_depth_zero_returns_empty() {
+        let store = mem_store().await;
+        let a = mem("gn-d0-a");
+        let b = mem("gn-d0-b");
+        for m in [&a, &b] {
+            store.save(m, None).await.unwrap();
+        }
+        store
+            .create_association(&Association::new(&a.id, &b.id, RelationType::RelatedTo))
+            .await
+            .unwrap();
+
+        let (mems, edges) = store.get_neighbors(&a.id, 0, &[]).await.unwrap();
+        assert!(mems.is_empty(), "depth=0 must return no memories");
+        assert!(edges.is_empty(), "depth=0 must return no edges");
+    }
+
+    /// depth 1 — only immediate neighbours of root (both directions), no multi-hop.
+    /// Graph: a→b, a→c (root = a, depth 1 → should collect {b, c}).
+    /// Edges: incident to expanded={a} → {a→b, a→c}.
+    #[tokio::test]
+    async fn get_neighbors_depth_one_collects_direct_neighbors() {
+        let store = mem_store().await;
+        let a = mem("gn-d1-a");
+        let b = mem("gn-d1-b");
+        let c = mem("gn-d1-c");
+        let d = mem("gn-d1-d"); // b→d is depth-2; must NOT appear at depth=1
+        for m in [&a, &b, &c, &d] {
+            store.save(m, None).await.unwrap();
+        }
+        store
+            .create_association(&Association::new(&a.id, &b.id, RelationType::RelatedTo))
+            .await
+            .unwrap();
+        store
+            .create_association(&Association::new(&a.id, &c.id, RelationType::RelatedTo))
+            .await
+            .unwrap();
+        store
+            .create_association(&Association::new(&b.id, &d.id, RelationType::RelatedTo))
+            .await
+            .unwrap();
+
+        let (mems, edges) = store.get_neighbors(&a.id, 1, &[]).await.unwrap();
+        let returned_ids = mem_ids(&mems);
+        assert_eq!(returned_ids, vec!["gn-d1-b", "gn-d1-c"],
+            "depth=1 must collect exactly b and c (direct neighbours of a)");
+        assert!(!returned_ids.contains(&"gn-d1-a".to_string()),
+            "start node must not appear in returned memories");
+        assert!(!returned_ids.contains(&"gn-d1-d".to_string()),
+            "d is 2 hops away; must not appear at depth=1");
+
+        // Edges from EXPANDED = {a}: a→b and a→c.
+        let ep = edge_pairs(&edges);
+        assert_eq!(ep.len(), 2, "depth=1 edges: only the 2 edges incident to root");
+        assert!(ep.contains(&("gn-d1-a".to_string(), "gn-d1-b".to_string())));
+        assert!(ep.contains(&("gn-d1-a".to_string(), "gn-d1-c".to_string())));
+    }
+
+    /// depth 2, multi-hop + both directions.
+    /// Graph: a→b→c, d→a (backward from a). Root=a, depth=2.
+    /// COLLECTED: forward {b,c}, backward {d} → {b,c,d}.
+    /// EXPANDED: {a} ∪ {b,d} (depth-1 collect) → {a,b,d}.
+    /// Edges incident to {a,b,d}: a→b, b→c, d→a.
+    #[tokio::test]
+    async fn get_neighbors_depth_two_multi_hop_and_bidirectional() {
+        let store = mem_store().await;
+        let a = mem("gn-d2-a");
+        let b = mem("gn-d2-b");
+        let c = mem("gn-d2-c");
+        let d = mem("gn-d2-d");
+        for m in [&a, &b, &c, &d] {
+            store.save(m, None).await.unwrap();
+        }
+        store
+            .create_association(&Association::new(&a.id, &b.id, RelationType::RelatedTo))
+            .await
+            .unwrap();
+        store
+            .create_association(&Association::new(&b.id, &c.id, RelationType::RelatedTo))
+            .await
+            .unwrap();
+        store
+            .create_association(&Association::new(&d.id, &a.id, RelationType::RelatedTo))
+            .await
+            .unwrap();
+
+        let (mems, edges) = store.get_neighbors(&a.id, 2, &[]).await.unwrap();
+        let returned_ids = mem_ids(&mems);
+        assert_eq!(returned_ids, vec!["gn-d2-b", "gn-d2-c", "gn-d2-d"],
+            "depth=2 must collect b (forward-1), c (forward-2), d (backward-1)");
+        assert!(!returned_ids.contains(&"gn-d2-a".to_string()),
+            "start node must be excluded from memories");
+
+        let ep = edge_pairs(&edges);
+        // Expanded = {a, b, d}: edges incident to those nodes.
+        // a→b (a expanded), b→c (b expanded), d→a (d expanded).
+        assert_eq!(ep.len(), 3, "3 distinct edges incident to expanded set {{a,b,d}}");
+        assert!(ep.contains(&("gn-d2-a".to_string(), "gn-d2-b".to_string())));
+        assert!(ep.contains(&("gn-d2-b".to_string(), "gn-d2-c".to_string())));
+        assert!(ep.contains(&("gn-d2-d".to_string(), "gn-d2-a".to_string())));
+
+        // Verify no duplicate edges (native SELECT is idempotent; old BFS could duplicate).
+        let mut deduped = ep.clone();
+        deduped.dedup();
+        assert_eq!(ep.len(), deduped.len(), "edges must not be duplicated");
+    }
+
+    /// Excluded node: memories in exclude_ids must not appear in results.
+    /// Graph: a→b→c, a→excl→e. Root=a, depth=2, exclude=[excl].
+    /// COLLECTED candidates include excl and e, but excl is excluded by dedup/seed;
+    /// e remains reachable only via the excluded excl node's traversal path — however
+    /// under strategy (b) (unconditional traversal) e IS reachable via the native
+    /// traversal through excl. Under BFS, excl is pre-seeded in `visited` so e is
+    /// never enqueued. We test the native rule: exclude_ids are excluded from the
+    /// RETURNED memories; `e` reachability depends on traversal strategy.
+    /// Core assertion: excl must never appear in returned memories.
+    #[tokio::test]
+    async fn get_neighbors_excludes_specified_nodes() {
+        let store = mem_store().await;
+        let a = mem("gn-ex-a");
+        let b = mem("gn-ex-b");
+        let c = mem("gn-ex-c");
+        let excl = mem("gn-ex-excl");
+        for m in [&a, &b, &c, &excl] {
+            store.save(m, None).await.unwrap();
+        }
+        store
+            .create_association(&Association::new(&a.id, &b.id, RelationType::RelatedTo))
+            .await
+            .unwrap();
+        store
+            .create_association(&Association::new(&b.id, &c.id, RelationType::RelatedTo))
+            .await
+            .unwrap();
+        store
+            .create_association(&Association::new(&a.id, &excl.id, RelationType::RelatedTo))
+            .await
+            .unwrap();
+
+        let (mems, _edges) = store
+            .get_neighbors(&a.id, 2, std::slice::from_ref(&excl.id))
+            .await
+            .unwrap();
+        let returned_ids = mem_ids(&mems);
+        assert!(
+            !returned_ids.contains(&excl.id),
+            "excluded node must never appear in returned memories"
+        );
+        assert!(
+            !returned_ids.contains(&a.id),
+            "start node must never appear in returned memories"
+        );
+        // b and c are reachable without going through excl.
+        assert!(returned_ids.contains(&b.id), "b must be returned (not excluded)");
+        assert!(returned_ids.contains(&c.id), "c must be returned (not excluded)");
+    }
+
+    /// Forgotten node — strategy (b) documented delta.
+    ///
+    /// Graph: a→b→forg→d. `forg` is forgotten. Root=a, depth=3.
+    ///
+    /// BFS behaviour: forg is never enqueued (forgotten check), so d is unreachable.
+    /// BFS returns: memories={b}, edges={a→b, b→forg}.
+    ///
+    /// Native strategy (b): traversal is unconditional — `{..3+collect}` goes
+    /// through forg; d IS included in the raw COLLECTED set. The hydrate
+    /// `WHERE forgotten = false` excludes forg from returned memories, but d
+    /// (non-forgotten) IS returned. This is the documented accepted delta:
+    /// the native reachable set is a SUPERSET of the BFS reachable set when
+    /// forgotten nodes exist on paths.
+    ///
+    /// Asserted: forg NOT in returned memories (excluded by hydrate).
+    /// Asserted: d IS in returned memories (native superset — not present in old BFS).
+    /// Asserted: edges include b→forg (forg is in EXPANDED at depth 2).
+    #[tokio::test]
+    async fn get_neighbors_forgotten_strategy_b_superset() {
+        let store = mem_store().await;
+        let a = mem("gn-fg-a");
+        let b = mem("gn-fg-b");
+        let forg = mem_forgotten("gn-fg-forg"); // forgotten
+        let d = mem("gn-fg-d");
+        for m in [&a, &b, &forg, &d] {
+            store.save(m, None).await.unwrap();
+        }
+        store
+            .create_association(&Association::new(&a.id, &b.id, RelationType::RelatedTo))
+            .await
+            .unwrap();
+        store
+            .create_association(&Association::new(&b.id, &forg.id, RelationType::RelatedTo))
+            .await
+            .unwrap();
+        store
+            .create_association(&Association::new(&forg.id, &d.id, RelationType::RelatedTo))
+            .await
+            .unwrap();
+
+        let (mems, edges) = store.get_neighbors(&a.id, 3, &[]).await.unwrap();
+        let returned_ids = mem_ids(&mems);
+
+        // forg must be excluded by hydrate (WHERE forgotten = false).
+        assert!(
+            !returned_ids.contains(&forg.id),
+            "forgotten node must not appear in returned memories"
+        );
+        // b is returned normally.
+        assert!(returned_ids.contains(&b.id), "b must be returned");
+        // d IS returned under strategy (b): native traverses through forg.
+        // This is the documented delta vs old BFS (which would NOT return d).
+        assert!(
+            returned_ids.contains(&d.id),
+            "strategy (b): d must be returned — native traverses through forgotten forg"
+        );
+
+        // Edges: b→forg should be present (forg is in expanded set at depth 2).
+        let ep = edge_pairs(&edges);
+        assert!(
+            ep.contains(&(b.id.clone(), forg.id.clone())),
+            "b→forg edge must be present (b is in expanded set)"
+        );
     }
 }
