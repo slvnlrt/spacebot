@@ -32,7 +32,7 @@
 ### The trait gap (only two real deltas; everything else already matches)
 
 `SurrealMemoryStore` already has, with signatures matching `MemoryBackend`: `agent_id`, `save(&Memory, Option<&[f32]>)`, `load`, `update`, `delete`, `forget`, `record_access`, `create_association`, `get_associations`, `delete_associations_for_memory`, `get_neighbors`, `get_by_type`, `get_high_importance`, `get_sorted`, `prune_below`, `merge(survivor_id, loser_id, new_content, new_embedding)`, `vector_search`, `text_search`, `find_similar`. The deltas:
-1. **`set_embedding`**: inherent is `set_embedding(&self, id: &str, embedding: &[f32])`; trait is `set_embedding(&self, memory: &Memory, embedding: &[f32])`. Resolve by renaming the inherent to `set_embedding_by_id` and having the trait method call `self.set_embedding_by_id(&memory.id, embedding)` (avoids same-name recursion). Update internal callers of the inherent.
+1. **`set_embedding`**: inherent is `set_embedding(&self, id: &str, embedding: &[f32])`; trait is `set_embedding(&self, memory: &Memory, embedding: &[f32])`. The rename to `set_embedding_by_id` is needed because the **signatures differ** (`&str` vs `&Memory`) — NOT to avoid recursion. (Rust resolves `self.method(...)` to the inherent method first when an inherent of that name exists, so the other same-name trait methods — `save`, `merge`, `agent_id`, etc. — delegate to their inherents with no recursion and need no rename.) Verified: there are **zero other in-crate callers** of the inherent `set_embedding` (grep `set_embedding src/memory/` hits only `backend.rs`'s `&Memory`-based code and this site), so the rename is local.
 2. **`get_associations_between`**: missing — add an inherent + trait method (SurrealQL: select `relates` edges whose both endpoints are in `$ids`).
 
 ---
@@ -111,7 +111,7 @@ impl crate::memory::backend::MemoryBackend for SurrealMemoryStore {
     async fn merge(&self, s: &str, l: &str, c: &str, e: Option<&[f32]>) -> Result<()> { self.merge(s, l, c, e).await }
 }
 ```
-(The `agent_id` trait method vs inherent `agent_id()` have the same name and signature — the inherent shadows fine via `self.agent_id()`; if the compiler complains about recursion, inline `&self.agent_id` field access instead.)
+(Inherent methods take priority in method-call syntax, so `self.agent_id()` / `self.save(...)` etc. resolve to the inherents — no recursion, no rename needed for those. Only `set_embedding` was renamed, because its signature differs.)
 
 - [ ] **Step 5: Build-check (feature on) + run gated tests if ort available**
 
@@ -122,33 +122,73 @@ Expected: clean. If a real ONNX runtime is present, also `cargo test --features 
 
 ---
 
-### Task 2: Config backend selector
+### Task 2: Config backend selector (instance default + per-agent override)
+
+**IMPORTANT — config architecture (verified):** `DefaultsConfig`/`AgentConfig`/`ResolvedAgentConfig` (`src/config/types.rs`) are NOT `Deserialize`. Deserialization happens on the `Toml*` structs in `src/config/toml_schema.rs` (which ARE `Deserialize`), then `src/config/load.rs` merges them by hand into the typed structs. `DefaultsConfig` has a **manual `Default`** (`types.rs:~1482`) and a **manual `Debug`** (`types.rs:~667`). Mirror the existing `worker_log_mode` field exactly — it is the template (`types.rs:662` field, `:696` Debug, `:1508` Default; `toml_schema.rs:311` `Option<String>`; `load.rs:1763` merge).
 
 **Files:**
-- Modify: `src/config/types.rs` (enum + `DefaultsConfig` field), and `src/config/toml_schema.rs` if it mirrors `DefaultsConfig`.
-- Test: `src/config/types.rs` (serde default test).
+- Modify: `src/config/types.rs` (enum; `DefaultsConfig` field + its manual `Default` + manual `Debug`; `AgentConfig` Option-override field; `ResolvedAgentConfig` field; `AgentConfig::resolve`).
+- Modify: `src/config/toml_schema.rs` (`TomlDefaultsConfig` + `TomlAgentConfig` `Option<String>` fields).
+- Modify: `src/config/load.rs` (merge both, parsing the string → enum).
+- Test: `src/config/types.rs` (resolve test).
 
 **Interfaces:**
-- Produces: `pub enum MemoryBackendKind { Sqlite, Surreal }` (serde `rename_all = "lowercase"`, `Default` = `Sqlite`); `DefaultsConfig.memory_backend: MemoryBackendKind`.
+- Produces: `pub enum MemoryBackendKind { Sqlite, Surreal }` (`Default`=`Sqlite`, with `FromStr`/parse); `DefaultsConfig.memory_backend: MemoryBackendKind`; `AgentConfig.memory_backend: Option<MemoryBackendKind>`; `ResolvedAgentConfig.memory_backend: MemoryBackendKind`.
 
-- [ ] **Step 1: Add the enum + field with a default test**
+- [ ] **Step 1: Add the enum with a parse helper**
 
 ```rust
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum MemoryBackendKind {
     #[default]
     Sqlite,
     Surreal,
 }
+impl MemoryBackendKind {
+    pub fn parse_opt(s: Option<&str>) -> Option<Self> {
+        match s?.trim().to_ascii_lowercase().as_str() {
+            "sqlite" => Some(Self::Sqlite),
+            "surreal" | "surrealdb" => Some(Self::Surreal),
+            _ => None, // unknown → let caller fall back to default
+        }
+    }
+}
 ```
-Add to `DefaultsConfig`: `#[serde(default)] pub memory_backend: MemoryBackendKind,`. Test: deserializing a `DefaultsConfig` TOML without the key yields `MemoryBackendKind::Sqlite`; with `memory_backend = "surreal"` yields `Surreal`.
+(No serde derive — the typed structs aren't `Deserialize`; the `Toml*` structs hold `Option<String>` and `load.rs` parses via `parse_opt`.)
 
-- [ ] **Step 2: Run the test (bounded)** — `systemd-run --scope -q -p MemoryMax=24G cargo test -p spacebot --lib config::` (no ort needed for config tests if they don't link the whole bin — if they do, use the ort bypass). Expected: pass.
+- [ ] **Step 2: Thread it through the typed structs (mirror `worker_log_mode`)**
 
-- [ ] **Step 3: Mirror in `toml_schema.rs`** if that file defines a parallel schema (check with `grep -n memory_janitor src/config/toml_schema.rs` — if `DefaultsConfig` fields are mirrored there, add `memory_backend`). If not mirrored, skip.
+- `DefaultsConfig`: add `pub memory_backend: MemoryBackendKind,`; add `memory_backend: MemoryBackendKind::default(),` to the manual `Default` impl; add `.field("memory_backend", &self.memory_backend)` to the manual `Debug` impl.
+- `AgentConfig`: add `pub memory_backend: Option<MemoryBackendKind>,` (the override layer; default it to `None` wherever `AgentConfig` is built).
+- `ResolvedAgentConfig`: add `pub memory_backend: MemoryBackendKind,`.
+- `AgentConfig::resolve(&self, defaults: &DefaultsConfig, ...)`: set `memory_backend: self.memory_backend.unwrap_or(defaults.memory_backend),`.
 
-- [ ] **Step 4: Commit** — `git commit -m "feat(config): memory_backend selector (sqlite|surreal)"`
+- [ ] **Step 3: Toml schema + load merge**
+
+- `toml_schema.rs`: `TomlDefaultsConfig` += `pub(super) memory_backend: Option<String>,`; `TomlAgentConfig` += `pub(super) memory_backend: Option<String>,`.
+- `load.rs` (defaults merge, near `:1763`): `memory_backend: MemoryBackendKind::parse_opt(toml.defaults.memory_backend.as_deref()).unwrap_or(base_defaults.memory_backend),`.
+- `load.rs` (per-agent `AgentConfig` build): `memory_backend: MemoryBackendKind::parse_opt(toml_agent.memory_backend.as_deref()),` (stays `Option`, resolved against defaults later).
+(Match the exact field/merge style already used for `worker_log_mode` in each location.)
+
+- [ ] **Step 4: Resolve test**
+
+```rust
+#[test]
+fn agent_memory_backend_falls_back_to_defaults() {
+    let mut defaults = DefaultsConfig::default();
+    defaults.memory_backend = MemoryBackendKind::Surreal;
+    let agent = AgentConfig { memory_backend: None, ..AgentConfig::minimal_for_test() };
+    let resolved = agent.resolve(&defaults /*, … other args */);
+    assert_eq!(resolved.memory_backend, MemoryBackendKind::Surreal); // inherited
+    let agent2 = AgentConfig { memory_backend: Some(MemoryBackendKind::Sqlite), ..AgentConfig::minimal_for_test() };
+    assert_eq!(agent2.resolve(&defaults /*, … */).memory_backend, MemoryBackendKind::Sqlite); // override wins
+}
+```
+(Use whatever existing test constructor/`resolve` arity the file already has — adapt to the real `resolve` signature; do not invent `minimal_for_test` if a different pattern exists.)
+
+- [ ] **Step 5: Run (bounded)** — `systemd-run --scope -q -p MemoryMax=24G cargo test -p spacebot --lib config 2>&1` (if it links ort, use the `ORT_LIB_LOCATION` bypass). Expected: pass.
+
+- [ ] **Step 6: Commit** — `git commit -m "feat(config): memory_backend selector (defaults + per-agent override)"`
 
 ---
 
@@ -158,41 +198,51 @@ Add to `DefaultsConfig`: `#[serde(default)] pub memory_backend: MemoryBackendKin
 - Modify: `src/main.rs` (~2886-2906), `src/api/agents.rs` (~833-852).
 
 **Interfaces:**
-- Consumes: `MemoryBackendKind`, `SurrealMemoryStore::open`, `SqliteBackend::new`, the embedding dimension constant (`crate::memory::lance::EMBEDDING_DIM` or the 384 used by `define_schema`).
+- Consumes: `agent_config.memory_backend` (`ResolvedAgentConfig`, Task 2), `agent_config.data_dir`, `agent_config.id`, `SurrealMemoryStore::open` (returns `Result<Arc<Self>>`), `SqliteBackend::new`, `crate::memory::lance::EMBEDDING_DIM` (made `pub` below).
 
-- [ ] **Step 1: Replace the backend construction at both sites with a feature+config switch**
+- [ ] **Step 1: Make `EMBEDDING_DIM` shareable**
+
+In `src/memory/lance.rs:12` change `const EMBEDDING_DIM: i32 = 384;` → `pub const EMBEDDING_DIM: i32 = 384;` (and re-export if convenient). It's `i32`, so callers cast `as usize`.
+
+- [ ] **Step 2: Replace the backend construction at EACH site (site-specific SQLite branch)**
+
+The two sites differ: `main.rs` builds the SQLite store with `MemoryStore::with_agent_id(db.sqlite.clone(), &agent_config.id)`; `api/agents.rs` uses `MemoryStore::new(db.sqlite.clone())`. **Preserve each site's existing SQLite constructor** — do NOT paste `with_agent_id` into `agents.rs`. Only the new Surreal branch + the selection wrapper are added. For `main.rs`:
 
 ```rust
 let backend: Arc<dyn MemoryBackend> = {
     #[cfg(feature = "surreal-memory")]
-    {
-        if matches!(resolved_memory_backend, MemoryBackendKind::Surreal) {
-            let dim = crate::memory::lance::EMBEDDING_DIM as usize;
-            Arc::new(
-                crate::memory::SurrealMemoryStore::open(&data_dir, &agent_config.id, dim).await?,
-            ) as Arc<dyn MemoryBackend>
-        } else {
-            let store = MemoryStore::with_agent_id(db.sqlite.clone(), &agent_config.id);
-            let embedding_table = EmbeddingTable::open_or_create(&db.lance).await?;
-            embedding_table.ensure_fts_index().await.ok();
-            Arc::new(SqliteBackend::new(store, embedding_table))
-        }
+    if matches!(agent_config.memory_backend, MemoryBackendKind::Surreal) {
+        let dim = crate::memory::lance::EMBEDDING_DIM as usize;
+        // open() already returns Arc<Self>; coerce to the trait object (NO extra Arc::new).
+        let store = spacebot::memory::SurrealMemoryStore::open(
+            &agent_config.data_dir, &agent_config.id, dim,
+        ).await.map_err(|e| /* same error-context style as the SQLite path */ e)?;
+        store as Arc<dyn MemoryBackend>
+    } else {
+        let memory_store = MemoryStore::with_agent_id(db.sqlite.clone(), &agent_config.id);
+        let embedding_table = EmbeddingTable::open_or_create(&db.lance).await?;
+        let _ = embedding_table.ensure_fts_index().await; // Plan A behaviour
+        Arc::new(SqliteBackend::new(memory_store, embedding_table))
     }
     #[cfg(not(feature = "surreal-memory"))]
     {
-        let store = MemoryStore::with_agent_id(db.sqlite.clone(), &agent_config.id);
+        if matches!(agent_config.memory_backend, MemoryBackendKind::Surreal) {
+            tracing::warn!(agent = %agent_config.id,
+                "memory_backend=surreal but the `surreal-memory` feature is not compiled in; using SQLite");
+        }
+        let memory_store = MemoryStore::with_agent_id(db.sqlite.clone(), &agent_config.id);
         let embedding_table = EmbeddingTable::open_or_create(&db.lance).await?;
-        embedding_table.ensure_fts_index().await.ok();
-        Arc::new(SqliteBackend::new(store, embedding_table))
+        let _ = embedding_table.ensure_fts_index().await;
+        Arc::new(SqliteBackend::new(memory_store, embedding_table))
     }
 };
 let memory_search = Arc::new(MemorySearch::new(backend, embedding_model.clone()));
 ```
-`resolved_memory_backend` = the agent's effective `memory_backend` (defaults inherited from `DefaultsConfig`). `SurrealMemoryStore::open` returns `Arc<Self>`; wrap/coerce to `Arc<dyn MemoryBackend>`. Mirror exactly in `api/agents.rs` (it uses `agent_id`/`db` similarly). Keep the SQLite branch's `ensure_fts_index` call (Plan A behaviour).
+For `api/agents.rs`: identical structure, but the SQLite branch keeps `MemoryStore::new(db.sqlite.clone())` (its current call) and the site's existing error-handling/`?` style. (`Arc<SurrealMemoryStore>` → `Arc<dyn MemoryBackend>` is a valid unsizing coercion once Task 1's impl exists.)
 
-- [ ] **Step 2: Default-build compile-check (feature OFF — must be unchanged behaviour)**
+- [ ] **Step 3: Default-build compile-check (feature OFF — must be unchanged behaviour)**
 
-`systemd-run --scope -q -p MemoryMax=24G cargo check -p spacebot --bin spacebot` (or the lib+bins). Expected: clean; the `#[cfg(not(...))]` arm is identical to today.
+`systemd-run --scope -q -p MemoryMax=24G cargo check -p spacebot --bin spacebot`. Expected: clean; the `#[cfg(not(...))]` arm behaves exactly as today (SQLite), only adding a warn when misconfigured.
 
 - [ ] **Step 3: Feature-on compile-check**
 
@@ -213,15 +263,21 @@ let memory_search = Arc::new(MemorySearch::new(backend, embedding_model.clone())
 
 - [ ] **Step 1: Confirm nothing references the deleted items**
 
-`grep -rnE "SurrealMemorySearch|surreal_search|surreal_maintenance" src/ tests/` — the only hits should be the module decls/re-exports in `memory.rs` and the usage in `tests/surreal_memory.rs`. If anything in `src/` (other than memory.rs) uses them, STOP and report (the cutover should already route Surreal through generic `MemorySearch`).
+`grep -rnE "SurrealMemorySearch|surreal_search|surreal_maintenance" src/ tests/` — expected hits ONLY: `memory.rs` module decls/re-export (verified at `memory.rs:9-10` surreal_maintenance mod, `:13-14` surreal_search mod, `:25-26` `pub use surreal_search::SurrealMemorySearch`) and `tests/surreal_memory.rs:6,17,230`. `surreal_migrate` (`:11-12`) and `surreal_store` (`:15-16`, `:27-28`) STAY. If anything else in `src/` uses them, STOP and report.
 
 - [ ] **Step 2: Delete the files and their module wiring**
 
-`git rm src/memory/surreal_search.rs src/memory/surreal_maintenance.rs`; in `src/memory.rs` remove the two `#[cfg(feature="surreal-memory")] pub mod surreal_{search,maintenance};` lines and the `pub use surreal_search::SurrealMemorySearch;`.
+`git rm src/memory/surreal_search.rs src/memory/surreal_maintenance.rs`; in `src/memory.rs` remove the exact lines: the `surreal_maintenance` `#[cfg]`+`pub mod` (9-10), the `surreal_search` `#[cfg]`+`pub mod` (13-14), and the `#[cfg]`+`pub use surreal_search::SurrealMemorySearch` (25-26). Leave `surreal_migrate` and `surreal_store` wiring intact.
 
-- [ ] **Step 3: Migrate `tests/surreal_memory.rs`**
+- [ ] **Step 3: Rework `tests/surreal_memory.rs` (do NOT route hybrid through `MemorySearch`)**
 
-Replace the `SurrealMemorySearch::new(store)` usage (~line 230) with the generic path: build `let backend: Arc<dyn MemoryBackend> = store.clone();` (a `SurrealMemoryStore` is now a backend) and `let search = MemorySearch::new(backend, embedding_model);`, then assert the same hybrid/metadata search behaviour. If the test asserted maintenance behaviour via `surreal_maintenance`, switch to `maintenance::run_maintenance(backend.clone(), embedding_model, &config)`. Where the test needs an `EmbeddingModel`, reuse the crate's shared-model test helper pattern (as in `tests/maintenance.rs`).
+CONSTRAINT (verified): `tests/surreal_memory.rs` uses `DIM=4` and passes hand-built 4-element vectors. The deleted `SurrealMemorySearch::search` took an explicit `query_embedding`. The generic `MemorySearch::search(query, config)` takes NO embedding — it computes one internally via `self.embedding_model.embed_one(query)` (`search.rs:86-90`), which needs a real ONNX model AND emits 384-dim vectors — **incompatible** with the test's dim-4 SurrealKV schema (`vector_search` rejects dim mismatch, `surreal_store.rs:603`). So the old hybrid test CANNOT be ported to `MemorySearch` with hand vectors.
+
+Do this instead:
+- **Delete** the `SurrealMemorySearch`-based hybrid test (the `~line 230` block). The hybrid RRF/traversal *logic* is now the single shared `MemorySearch`/`search.rs` implementation, already covered by the SQLite-backed tests in `src/memory/search.rs` — re-testing it over Surreal would only duplicate that logic coverage.
+- **Keep / add** store-primitive tests on `SurrealMemoryStore` directly (these take explicit dim-4 vectors, need no `EmbeddingModel`): `vector_search`, `text_search`, `find_similar`, `get_neighbors`, plus the Task 1 `get_associations_between`. These validate exactly the Surreal-specific behaviour the shared search logic depends on.
+- If any test referenced `surreal_maintenance`, replace with `maintenance::run_maintenance(backend.clone(), embedding_model, &config)` ONLY in an ort-capable, dim-384 setup; otherwise drop it and note that full-pipeline Surreal validation is deferred to an ONNX-capable environment (see Task 5 Step 3).
+- Remove the now-unused `use` of `SurrealMemorySearch` and any `EmbeddingModel` import that's no longer needed.
 
 - [ ] **Step 4: Feature-on compile-check + run if ort available**
 
@@ -240,11 +296,21 @@ Replace the `SurrealMemorySearch::new(store)` usage (~line 230) with the generic
 
 ---
 
-## Self-Review
+## Self-Review (updated after Opus adversarial review of this plan)
 
-- **Spec coverage:** trait impl + gaps (Task 1), config selector (Task 2), construction wiring (Task 3), delete duplicates + migrate test (Task 4), gates (Task 5). Followup #3 (duplication) is closed by Task 4.
-- **Default build untouched:** Tasks 3/5 explicitly compile-check the feature-off path; all Surreal code is `#[cfg]`-gated.
-- **Known risks to flag for review:** (a) `set_embedding`/`agent_id` same-name inherent-vs-trait — handled by rename / field access, but verify no infinite recursion; (b) `SurrealMemoryStore::open` returns `Arc<Self>` — confirm the `as Arc<dyn MemoryBackend>` coercion compiles (may need `Arc<SurrealMemoryStore>` → `Arc<dyn _>` unsizing, which works); (c) the surreal store still uses a hand-rolled BFS in `get_neighbors`/search seeds (Plan C replaces it) — out of scope here; (d) running the feature for real needs ONNX — compile-checks are the gate in this environment.
+- **Spec coverage:** trait impl + gaps (Task 1), config selector (Task 2), construction wiring (Task 3), delete duplicates + rework test (Task 4), gates (Task 5). Followup #3 (duplication) is closed by Task 4.
+- **Default build untouched:** Tasks 3/5 explicitly compile-check the feature-off path; all Surreal code is `#[cfg]`-gated; the feature-off arm only adds a warn on misconfiguration.
+
+**Corrections applied from the Opus review (each verified against source):**
+- 🔴 Config: `DefaultsConfig`/`AgentConfig`/`ResolvedAgentConfig` are NOT `Deserialize`. Task 2 rewritten to mirror `worker_log_mode`: enum has no serde derive; `Toml*` structs carry `Option<String>`; `load.rs` parses+merges; `DefaultsConfig` gets manual `Default`+`Debug` entries. Per-agent override threaded through `ResolvedAgentConfig`.
+- 🔴 `resolved_memory_backend` was undefined → now `agent_config.memory_backend` (a real `ResolvedAgentConfig` field), in scope at both sites.
+- 🔴 `EMBEDDING_DIM` is private `i32` → Task 3 makes it `pub` (cast `as usize`).
+- 🔴 Double-`Arc`: `open()` returns `Result<Arc<Self>>` → use `store as Arc<dyn MemoryBackend>`, no outer `Arc::new`.
+- 🔴 Construction sites differ (`with_agent_id` in main.rs vs `new` in agents.rs) → Task 3 keeps each site's SQLite constructor; only adds the Surreal branch.
+- 🔴 Test migration infeasible (dim-4 hand vectors vs `MemorySearch`'s internal 384-dim embed) → Task 4 drops the hybrid-via-MemorySearch test (logic already covered by SQLite search tests) and keeps Surreal store-primitive tests instead.
+- 🟠 `set_embedding` rename rationale corrected (signatures differ, not recursion); inherent methods take call priority so `save`/`merge`/`agent_id` don't recurse.
+
+**Remaining known risks (acceptable / out of scope):** the surreal store still uses a hand-rolled BFS in `get_neighbors` + keyword-seed graph search (Plan C replaces it); running the feature for real needs ONNX (compile-checks + dim-4 store tests are the gate in this environment; live 384-dim validation deferred to an ort-capable env).
 
 ## Out of scope (Plan C)
 Native graph recursion (`{..N+collect}`/`{..N+shortest}`) replacing the hand-rolled BFS, `snowball(english)` FTS analyzer, EF tuning, 384-dim recall/latency benchmark.
