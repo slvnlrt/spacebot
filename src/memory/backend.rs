@@ -245,12 +245,7 @@ impl MemoryBackend for SqliteBackend {
         self.embeddings.text_search(q, limit).await
     }
 
-    async fn find_similar(
-        &self,
-        id: &str,
-        th: f32,
-        limit: usize,
-    ) -> Result<Vec<(String, f32)>> {
+    async fn find_similar(&self, id: &str, th: f32, limit: usize) -> Result<Vec<(String, f32)>> {
         self.embeddings.find_similar(id, th, limit).await
     }
 
@@ -293,24 +288,12 @@ impl MemoryBackend for SqliteBackend {
         // merge_memories_atomic(updated_survivor, loser) internally forgets the
         // loser and rewires its associations onto the survivor — DO NOT set
         // forgotten here. We only build the updated survivor.
-        let mut survivor = self
-            .store
-            .load(survivor_id)
-            .await?
-            .ok_or_else(|| {
-                crate::error::DbError::Query(format!(
-                    "merge survivor {survivor_id} not found"
-                ))
-            })?;
-        let loser = self
-            .store
-            .load(loser_id)
-            .await?
-            .ok_or_else(|| {
-                crate::error::DbError::Query(format!(
-                    "merge loser {loser_id} not found"
-                ))
-            })?;
+        let mut survivor = self.store.load(survivor_id).await?.ok_or_else(|| {
+            crate::error::DbError::Query(format!("merge survivor {survivor_id} not found"))
+        })?;
+        let loser = self.store.load(loser_id).await?.ok_or_else(|| {
+            crate::error::DbError::Query(format!("merge loser {loser_id} not found"))
+        })?;
 
         survivor.content = new_content.to_string();
         survivor.updated_at = chrono::Utc::now();
@@ -398,12 +381,13 @@ mod tests {
         let loser = be.load(&b.id).await.unwrap().unwrap();
         assert!(loser.forgotten);
         // The loser's embedding must be gone (no stale vector for it).
-        assert!(be
-            .vector_search(&vec![0.2; DIM], 5)
-            .await
-            .unwrap()
-            .iter()
-            .all(|(id, _)| id != &b.id));
+        assert!(
+            be.vector_search(&vec![0.2; DIM], 5)
+                .await
+                .unwrap()
+                .iter()
+                .all(|(id, _)| id != &b.id)
+        );
     }
 
     #[tokio::test]

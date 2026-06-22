@@ -1,9 +1,9 @@
 //! Memory search: hybrid (vector + FTS + RRF + graph), temporal, importance, and typed queries.
 
 use crate::error::Result;
+use crate::memory::EmbeddingModel;
 use crate::memory::backend::MemoryBackend;
 use crate::memory::types::{Memory, MemorySearchResult, MemoryType, RelationType};
-use crate::memory::EmbeddingModel;
 
 use std::collections::HashMap;
 use std::sync::Arc;

@@ -842,15 +842,11 @@ pub async fn create_agent_internal(
         tracing::warn!(%error, agent_id = %agent_id, "failed to create FTS index");
     }
 
-    let backend: std::sync::Arc<dyn crate::memory::MemoryBackend> =
-        std::sync::Arc::new(crate::memory::SqliteBackend::new(
-            memory_store,
-            embedding_table,
-        ));
-    let memory_search = std::sync::Arc::new(crate::memory::MemorySearch::new(
-        backend,
-        embedding_model,
-    ));
+    let backend: std::sync::Arc<dyn crate::memory::MemoryBackend> = std::sync::Arc::new(
+        crate::memory::SqliteBackend::new(memory_store, embedding_table),
+    );
+    let memory_search =
+        std::sync::Arc::new(crate::memory::MemorySearch::new(backend, embedding_model));
     let task_store = state
         .task_store
         .load()

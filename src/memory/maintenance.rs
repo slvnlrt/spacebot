@@ -47,13 +47,7 @@ pub async fn run_maintenance(
     config: &MaintenanceConfig,
 ) -> Result<MaintenanceReport> {
     let (_maintenance_cancel_tx, maintenance_cancel_rx) = watch::channel(false);
-    run_maintenance_with_cancel(
-        backend,
-        embedding_model,
-        config,
-        maintenance_cancel_rx,
-    )
-    .await
+    run_maintenance_with_cancel(backend, embedding_model, config, maintenance_cancel_rx).await
 }
 
 /// Run maintenance tasks with a cancellation signal.
@@ -106,11 +100,9 @@ async fn apply_decay(
     let mut decayed_count = 0;
 
     for mem_type in all_types {
-        let memories = maintenance_cancelable_op(
-            maintenance_cancel_rx,
-            backend.get_by_type(mem_type, 1000),
-        )
-        .await?;
+        let memories =
+            maintenance_cancelable_op(maintenance_cancel_rx, backend.get_by_type(mem_type, 1000))
+                .await?;
 
         for mut memory in memories {
             check_maintenance_cancellation(maintenance_cancel_rx).await?;
@@ -134,8 +126,7 @@ async fn apply_decay(
             if (new_importance - memory.importance).abs() > 0.01 {
                 memory.importance = new_importance.clamp(0.0, 1.0);
                 memory.updated_at = now;
-                maintenance_cancelable_op(maintenance_cancel_rx, backend.update(&memory))
-                    .await?;
+                maintenance_cancelable_op(maintenance_cancel_rx, backend.update(&memory)).await?;
                 decayed_count += 1;
             }
         }
@@ -321,11 +312,9 @@ async fn merge_pair(
 
     let content = merged_memory_content(survivor.content.clone(), &merged.content);
 
-    let embedding = maintenance_cancelable_op(
-        maintenance_cancel_rx,
-        embedding_model.embed_one(&content),
-    )
-    .await?;
+    let embedding =
+        maintenance_cancelable_op(maintenance_cancel_rx, embedding_model.embed_one(&content))
+            .await?;
 
     maintenance_cancelable_op(
         maintenance_cancel_rx,
@@ -350,7 +339,11 @@ async fn fetch_candidate_memory_ids(
     use crate::memory::search::SearchSort;
     let memories = maintenance_cancelable_op(
         maintenance_cancel_rx,
-        backend.get_sorted(SearchSort::Importance, MAX_MAINTENANCE_MERGE_SOURCE_MEMORIES, None),
+        backend.get_sorted(
+            SearchSort::Importance,
+            MAX_MAINTENANCE_MERGE_SOURCE_MEMORIES,
+            None,
+        ),
     )
     .await
     .with_context(|| "failed to fetch candidate memories for maintenance")?;
@@ -471,8 +464,7 @@ mod tests {
         let embeddings = crate::memory::EmbeddingTable::open_or_create(&conn)
             .await
             .unwrap();
-        let backend: Arc<dyn MemoryBackend> =
-            Arc::new(SqliteBackend::new(store, embeddings));
+        let backend: Arc<dyn MemoryBackend> = Arc::new(SqliteBackend::new(store, embeddings));
         (backend, dir)
     }
 
@@ -649,30 +641,20 @@ mod tests {
         )
         .await;
 
-        let related_a = create_memory_with_embedding(
-            &backend,
-            "related A",
-            MemoryType::Fact,
-            0.7,
-            {
+        let related_a =
+            create_memory_with_embedding(&backend, "related A", MemoryType::Fact, 0.7, {
                 let mut embedding = vec![0.0; 384];
                 embedding[0] = 1.0;
                 embedding
-            },
-        )
-        .await;
-        let related_b = create_memory_with_embedding(
-            &backend,
-            "related B",
-            MemoryType::Fact,
-            0.7,
-            {
+            })
+            .await;
+        let related_b =
+            create_memory_with_embedding(&backend, "related B", MemoryType::Fact, 0.7, {
                 let mut embedding = vec![0.0; 384];
                 embedding[1] = 1.0;
                 embedding
-            },
-        )
-        .await;
+            })
+            .await;
 
         backend
             .create_association(&Association::new(
@@ -798,9 +780,12 @@ mod tests {
         };
 
         let embedding_model = shared_embedding_model();
-        let result =
-            run_maintenance(Arc::clone(&backend), Arc::clone(&embedding_model), &invalid_config)
-                .await;
+        let result = run_maintenance(
+            Arc::clone(&backend),
+            Arc::clone(&embedding_model),
+            &invalid_config,
+        )
+        .await;
         assert!(result.is_err(), "expected invalid config to fail");
         assert!(
             result
