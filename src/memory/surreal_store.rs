@@ -572,8 +572,11 @@ impl SurrealMemoryStore {
                 .map_err(err)?;
             let eb_val: surrealdb::types::Value = eb_r.take(0).map_err(err)?;
 
-            // Use a separate seen-set for expanded — root is pre-seeded.
-            let mut exp_seen: HashSet<String> = HashSet::new();
+            // Separate seen-set for expanded — seed with start + excludes so an
+            // excluded node never becomes an edge source (mirrors the COLLECTED
+            // `seen` seeding; otherwise an excluded node within depth-1 would
+            // contribute its outgoing edges to the result).
+            let mut exp_seen: HashSet<String> = exclude_ids.iter().cloned().collect();
             exp_seen.insert(memory_id.to_string());
             extract_rids_into(&ef_val, &mut exp_seen, &mut expanded_rids);
             extract_rids_into(&eb_val, &mut exp_seen, &mut expanded_rids);
@@ -1172,23 +1175,18 @@ mod tests {
         let b = mem("gn-ex-b");
         let c = mem("gn-ex-c");
         let excl = mem("gn-ex-excl");
-        for m in [&a, &b, &c, &excl] {
+        let e = mem("gn-ex-e");
+        for m in [&a, &b, &c, &excl, &e] {
             store.save(m, None).await.unwrap();
         }
-        store
-            .create_association(&Association::new(&a.id, &b.id, RelationType::RelatedTo))
-            .await
-            .unwrap();
-        store
-            .create_association(&Association::new(&b.id, &c.id, RelationType::RelatedTo))
-            .await
-            .unwrap();
-        store
-            .create_association(&Association::new(&a.id, &excl.id, RelationType::RelatedTo))
-            .await
-            .unwrap();
+        for (s, t) in [(&a, &b), (&b, &c), (&a, &excl), (&excl, &e)] {
+            store
+                .create_association(&Association::new(&s.id, &t.id, RelationType::RelatedTo))
+                .await
+                .unwrap();
+        }
 
-        let (mems, _edges) = store
+        let (mems, edges) = store
             .get_neighbors(&a.id, 2, std::slice::from_ref(&excl.id))
             .await
             .unwrap();
@@ -1209,6 +1207,20 @@ mod tests {
         assert!(
             returned_ids.contains(&c.id),
             "c must be returned (not excluded)"
+        );
+
+        // Edge-set parity: the excluded node is NOT an edge source. The edge
+        // a→excl IS present (a, the root, is expanded and pushes it), but
+        // excl→e is NOT (excl is excluded from the EXPANDED set, mirroring the
+        // old BFS which pre-seeds excludes into `visited` and never expands them).
+        let ep = edge_pairs(&edges);
+        assert!(
+            ep.contains(&(a.id.clone(), excl.id.clone())),
+            "a→excl present (a is expanded)"
+        );
+        assert!(
+            !ep.iter().any(|(s, _)| *s == excl.id),
+            "excluded node must never be an edge source (no excl→* edges)"
         );
     }
 
