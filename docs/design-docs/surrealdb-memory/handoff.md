@@ -3,8 +3,9 @@
 Where the branch stands and what to do next. Read [`README.md`](./README.md) for
 the objective and [`gotchas.md`](./gotchas.md) before editing code.
 
-> Updated 2026-06-22 after Plan A + Plan B landed. Earlier revisions of this doc
-> described a pre-cutover state — superseded below.
+> Updated 2026-06-22 after Plans A–E landed (branch feature-complete). The table
+> below is the Plan A+B snapshot; Plans C/D/E and the current backlog are in the
+> dated sections further down — those govern where they overlap.
 
 ## What's done (Plan A + Plan B)
 
@@ -20,7 +21,7 @@ per agent by config; the duplicated Surreal search/maintenance code is gone.
 | `impl MemoryBackend for SurrealMemoryStore` + `get_associations_between` | `src/memory/surreal_store.rs` | done; **8 feature-on tests run green vs real SurrealKV (real ort)** |
 | `memory_backend` config selector (defaults + per-agent override) | `src/config/types.rs`, `toml_schema.rs`, `load.rs` | done; config tests 110/0 |
 | Backend selection at construction | `src/main.rs`, `src/api/agents.rs` | done; feature-off + feature-on both compile clean |
-| Migration (SQLite+Lance → SurrealDB) | `src/memory/surreal_migrate.rs` | exists; **NOT wired into runtime** (no callers — manual/tool path) |
+| Migration (SQLite+Lance → SurrealDB) | `src/memory/surreal_migrate.rs` | done; **wired via `spacebot migrate-memory` (Plan E)** — see the Plan E section below |
 | Standalone probe + reference port | `spikes/surreal-memory/` | reference (12 green) |
 
 Gates: feature-off `just gate-pr` ALL GREEN; feature-on `clippy --all-targets -Dwarnings` clean.
