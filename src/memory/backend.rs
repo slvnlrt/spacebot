@@ -336,6 +336,28 @@ impl MemoryBackend for SqliteBackend {
     }
 }
 
+// ── Construction helper ───────────────────────────────────────────────────────
+
+/// Build a `SqliteBackend` wrapped in an `Arc<dyn MemoryBackend>`.
+///
+/// Opens (or creates) the LanceDB embedding table, attempts to ensure the FTS
+/// index (non-fatal on failure), then wraps the result.  The caller is
+/// responsible for constructing the `MemoryStore` with the appropriate scope
+/// (e.g. `MemoryStore::with_agent_id` vs `MemoryStore::new`).
+pub async fn sqlite_backend_arc(
+    store: Arc<crate::memory::store::MemoryStore>,
+    lance: &lancedb::Connection,
+    agent_id: &str,
+) -> crate::error::Result<Arc<dyn MemoryBackend>> {
+    let embeddings = crate::memory::lance::EmbeddingTable::open_or_create(lance)
+        .await
+        .map_err(|e| crate::error::DbError::LanceConnect(format!("agent '{agent_id}': {e}")))?;
+    if let Err(error) = embeddings.ensure_fts_index().await {
+        tracing::warn!(%error, agent = %agent_id, "failed to ensure FTS index");
+    }
+    Ok(Arc::new(SqliteBackend::new(store, embeddings)))
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]

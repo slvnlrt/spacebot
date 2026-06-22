@@ -851,19 +851,9 @@ pub async fn create_agent_internal(
             store as std::sync::Arc<dyn crate::memory::MemoryBackend>
         } else {
             let memory_store = crate::memory::MemoryStore::new(db.sqlite.clone());
-            let embedding_table = crate::memory::EmbeddingTable::open_or_create(&db.lance)
+            crate::memory::sqlite_backend_arc(memory_store, &db.lance, &agent_id)
                 .await
-                .map_err(|error| {
-                    tracing::error!(%error, agent_id = %agent_id, "failed to init embeddings");
-                    format!("failed to init embeddings: {error}")
-                })?;
-            if let Err(error) = embedding_table.ensure_fts_index().await {
-                tracing::warn!(%error, agent_id = %agent_id, "failed to create FTS index");
-            }
-            std::sync::Arc::new(crate::memory::SqliteBackend::new(
-                memory_store,
-                embedding_table,
-            ))
+                .map_err(|e| format!("failed to init memory backend: {e}"))?
         }
         #[cfg(not(feature = "surreal-memory"))]
         {
@@ -877,19 +867,9 @@ pub async fn create_agent_internal(
                 );
             }
             let memory_store = crate::memory::MemoryStore::new(db.sqlite.clone());
-            let embedding_table = crate::memory::EmbeddingTable::open_or_create(&db.lance)
+            crate::memory::sqlite_backend_arc(memory_store, &db.lance, &agent_id)
                 .await
-                .map_err(|error| {
-                    tracing::error!(%error, agent_id = %agent_id, "failed to init embeddings");
-                    format!("failed to init embeddings: {error}")
-                })?;
-            if let Err(error) = embedding_table.ensure_fts_index().await {
-                tracing::warn!(%error, agent_id = %agent_id, "failed to create FTS index");
-            }
-            std::sync::Arc::new(crate::memory::SqliteBackend::new(
-                memory_store,
-                embedding_table,
-            ))
+                .map_err(|e| format!("failed to init memory backend: {e}"))?
         }
     };
     let memory_search =
