@@ -160,6 +160,14 @@ impl MemoryBackend for SqliteBackend {
             self.embeddings
                 .store(&memory.id, &memory.content, emb)
                 .await?;
+            // Ensure the FTS index exists once content has been written. The
+            // index can fail to create at startup on an empty table; this
+            // per-save retry (idempotent — no-ops once it exists) is how FTS
+            // starts working. Dropping it would leave text_search permanently
+            // falling back to vector+graph. A failure here is non-fatal.
+            if let Err(error) = self.embeddings.ensure_fts_index().await {
+                tracing::warn!(%error, "failed to ensure FTS index after memory save");
+            }
         }
         Ok(())
     }

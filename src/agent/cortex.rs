@@ -4530,7 +4530,6 @@ async fn run_association_pass(
     let is_backfill = since.is_none();
 
     let store = deps.memory_search.backend();
-    let embedding_table = store;
 
     // Get the memories to process
     let memories = match fetch_memories_for_association(&deps.sqlite_pool, since).await {
@@ -4554,7 +4553,7 @@ async fn run_association_pass(
         }
 
         // Find similar memories via embedding search
-        let similar = match embedding_table
+        let similar = match store
             .find_similar(memory_id, similarity_threshold, 10)
             .await
         {
