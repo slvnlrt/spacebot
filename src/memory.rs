@@ -13,7 +13,7 @@ pub mod surreal_store;
 pub mod types;
 pub mod working;
 
-pub use backend::{sqlite_backend_arc, MemoryBackend, SqliteBackend};
+pub use backend::{MemoryBackend, SqliteBackend, sqlite_backend_arc};
 pub use embedding::EmbeddingModel;
 pub use lance::EmbeddingTable;
 pub use search::{MemorySearch, SearchConfig, SearchMode, SearchSort, curate_results};

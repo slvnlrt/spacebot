@@ -1172,16 +1172,13 @@ fn cmd_migrate_memory(
         }
 
         // Shared EmbeddingModel (Arc — migrate_from_sqlite wants &Arc<EmbeddingModel>).
-        let embedding_model = std::sync::Arc::new(
-            spacebot::memory::EmbeddingModel::new(
-                &config.instance_dir.join("embedding_cache"),
-            )?,
-        );
+        let embedding_model = std::sync::Arc::new(spacebot::memory::EmbeddingModel::new(
+            &config.instance_dir.join("embedding_cache"),
+        )?);
 
         for a in &targets {
             let db = spacebot::db::Db::connect(&a.data_dir).await?;
-            let source =
-                spacebot::memory::MemoryStore::with_agent_id(db.sqlite.clone(), &a.id);
+            let source = spacebot::memory::MemoryStore::with_agent_id(db.sqlite.clone(), &a.id);
             let target = spacebot::memory::SurrealMemoryStore::open(
                 &a.data_dir,
                 &a.id,
