@@ -75,11 +75,11 @@ stays in `search.rs`, no per-backend duplication).
 
 1. **Migration wiring** (#15) — `surreal_migrate` has no runtime caller; needs a
    CLI/tool entry before an existing agent can be switched to `surreal` with its data.
-2. **CI buildability (#8), dependency-weight / Lance removal (#9)** — open.
-3. **Decision (C) SurrealKV backup/restore** — still required before enabling
-   `surreal` by default in production.
-4. Cosmetic: SQLite construction branch duplicated 4× (#14); `Association.id`
-   synthesized (#10); schema re-applied per open (#11); `migrate` not transactional (#12).
+2. **CI buildability (#8)** — add a feature-on build/clippy job so the gated code can't rot.
+3. **Dependency-weight / slim build (#9)** — deferred per owner. Measured: +50 MiB (+18%)
+   for embedding both backends; the slim path is dropping Lance (memory-only), not SQLite.
+4. Cosmetic: SQLite construction branch duplicated 4× (#14). (#10/#11/#12 triaged as
+   accept/won't-fix — see followups.md.)
 
 ## Decisions
 
@@ -90,9 +90,15 @@ stays in `search.rs`, no per-backend duplication).
   stays on SQLite (`WorkingMemoryStore`) while memory goes to the selected backend;
   a `MemorySaved` that touches both spans two engines with no shared transaction.
   Verified: no code path assumes a single txn across them. Accepted for now.
-- **(C) SurrealKV backup/restore — STILL OPEN.** SQLite is a copyable file; SurrealKV's
-  on-disk format needs a defined backup/restore path before trusting it with
-  long-term memory in production. Address before enabling `surreal` by default.
+- **(C) SurrealKV backup/restore — RESOLVED (ops story, verified).** There is no
+  in-app backup for ANY backend (SQLite/Lance included); backup = copy the agent
+  `data_dir`, which already contains `data_dir/surreal`. A **cold filesystem copy**
+  of a quiesced SurrealKV directory restores cleanly with data intact — verified by
+  `spikes/surreal-memory` test `surrealkv_cold_copy_backup_restores`. For a LIVE
+  copy, quiesce the agent first (stop it) — the **same constraint as SQLite WAL /
+  LanceDB** (a live copy without a checkpoint can be inconsistent). So SurrealKV
+  needs no special backup machinery: the existing "back up the data dir" story
+  covers it; document "stop the agent for a consistent snapshot" for operators.
 
 ## Known landmines / debt
 
