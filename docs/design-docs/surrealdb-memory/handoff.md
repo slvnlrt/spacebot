@@ -3,86 +3,94 @@
 Where the branch stands and what to do next. Read [`README.md`](./README.md) for
 the objective and [`gotchas.md`](./gotchas.md) before editing code.
 
-## What's done
+> Updated 2026-06-22 after Plan A + Plan B landed. Earlier revisions of this doc
+> described a pre-cutover state — superseded below.
 
-A complete, **compile-checked** SurrealDB memory backend behind the optional
-`surreal-memory` Cargo feature (default build untouched), with its logic proven
-by a runnable reference crate.
+## What's done (Plan A + Plan B)
+
+A **runtime-validated, pluggable** memory backend. The SQLite+Lance stack and
+SurrealDB now both sit behind one `trait MemoryBackend`; the backend is chosen
+per agent by config; the duplicated Surreal search/maintenance code is gone.
 
 | Area | Where | State |
 | --- | --- | --- |
-| Store (CRUD, soft-delete, associations, graph BFS, vector KNN, FTS, `find_similar`, **atomic `merge`**, **server-side `prune_below`**) | `src/memory/surreal_store.rs` | compile-checked; logic proven in reference |
-| Hybrid + metadata search (vector+FTS+BFS+RRF) | `src/memory/surreal_search.rs` | compile-checked; proven in reference |
-| Maintenance (decay / prune / merge) | `src/memory/surreal_maintenance.rs` | compile-checked |
-| Migration (SQLite+Lance → SurrealDB) | `src/memory/surreal_migrate.rs` | compile-checked |
-| In-crate integration tests (`kv-mem`) | `tests/surreal_memory.rs` | typecheck only here (needs ONNX RT to run) |
-| Standalone probe + reference port | `spikes/surreal-memory/` | **12 tests run green here** |
+| `trait MemoryBackend` + `SqliteBackend` (SQLite+Lance) | `src/memory/backend.rs` | done, reviewed, default-build tested (`test --lib` 881/0) |
+| Generic hybrid search over `dyn MemoryBackend` | `src/memory/search.rs` | done (replaces the deleted `surreal_search`) |
+| Generic decay/prune/merge over `dyn MemoryBackend` | `src/memory/maintenance.rs` | done (replaces the deleted `surreal_maintenance`) |
+| `impl MemoryBackend for SurrealMemoryStore` + `get_associations_between` | `src/memory/surreal_store.rs` | done; **8 feature-on tests run green vs real SurrealKV (real ort)** |
+| `memory_backend` config selector (defaults + per-agent override) | `src/config/types.rs`, `toml_schema.rs`, `load.rs` | done; config tests 110/0 |
+| Backend selection at construction | `src/main.rs`, `src/api/agents.rs` | done; feature-off + feature-on both compile clean |
+| Migration (SQLite+Lance → SurrealDB) | `src/memory/surreal_migrate.rs` | exists; **NOT wired into runtime** (no callers — manual/tool path) |
+| Standalone probe + reference port | `spikes/surreal-memory/` | reference (12 green) |
 
-Design decisions baked in: SurrealDB is **memory-scoped** and coexists with
-SQLite; embeddings stay external (fastembed); ids stay opaque UUID strings;
-`Memory`/`Association` are unchanged, bridged to the DB via internal `*Row`
-structs. Two stacks (SQLite and SurrealDB) deliberately live in parallel — the
-`MemoryBackend` trait abstraction is a **separate future session**, not this one.
+Gates: feature-off `just gate-pr` ALL GREEN; feature-on `clippy --all-targets -Dwarnings` clean.
+
+Design invariants held: SurrealDB is **memory-scoped** and coexists with SQLite;
+embeddings stay external (fastembed); ids stay opaque UUID strings;
+`Memory`/`Association` unchanged, bridged via internal `*Row` structs.
 
 ## How to build / test
 
 ```bash
-# Runnable reference + probe (no ONNX needed — depends only on surrealdb):
-cd spikes/surreal-memory
-cargo run            # raw SurrealQL probe (prints findings)
-cargo test           # reference backend — 12 green
+# Default (feature off) — the production default, full gate:
+just gate-pr               # or: systemd-run --scope -p MemoryMax=40G ./scripts/gate-pr.sh
 
-# Compile-check the in-crate feature (works even with ONNX download blocked):
+# Feature-on compile-check (clippy doesn't link the final binary):
 mkdir -p /tmp/ortlib
 ORT_LIB_LOCATION=/tmp/ortlib ORT_PREFER_DYNAMIC_LINK=1 \
-  cargo clippy --lib --tests --features surreal-memory
+  cargo clippy --all-targets --features surreal-memory -- -Dwarnings
 
-# Run the in-crate tests (needs a working ONNX Runtime to link):
-cargo test --features surreal-memory --test surreal_memory
+# Run the feature-on Surreal tests FOR REAL (real ort links; kv-mem, no network):
+cargo test --features surreal-memory --test surreal_memory   # 7 store-primitive tests
+cargo test --features surreal-memory --lib memory::surreal_store  # get_associations_between
+
+# RAM/disk safety: wrap heavy cargo in `systemd-run --scope -p MemoryMax=40G -p MemorySwapMax=0 …`;
+# CARGO_BUILD_JOBS is capped (8) globally. Do NOT use the ORT_LIB_LOCATION bypass when you
+# want to RUN tests — it only satisfies compile-check; real ort is available here.
 ```
 
-## What's NOT done (next steps)
+## What's NOT done — this is **Plan C**
 
-1. **Live wiring / cutover.** Add a `surreal` handle to the `Db` bundle
-   (`src/db.rs`) and build the stores at the construction sites
-   (`src/main.rs` ~2890, `src/api/agents.rs` ~834), switched by the feature /
-   config. This is the main remaining work and changes runtime behaviour — do it
-   only after decision (A).
-2. **Run the tests + benchmark for real.** Execute `tests/surreal_memory.rs` in
-   an env with ONNX Runtime, then benchmark HNSW recall/latency at **384-dim**
-   and a realistic corpus (tune `EF`). All validation so far is dim-4 / small.
-3. **Work the `followups.md` backlog** — notably FTS-vs-Tantivy parity (#5),
-   dependency-weight / build-size measurement (#9), CI buildability of the
-   feature (#8).
-4. **Then** the `MemoryBackend` trait (de-duplicate the two stacks) — its own
-   session, per owner.
+(`docs/superpowers/plans/` — Plan C not yet written.)
 
-## Open decisions (needed before cutover)
+1. **Native graph recursion** — `SurrealMemoryStore::get_neighbors` + the hybrid
+   search seed-traversal still use a **hand-rolled BFS** (N+1 round-trips). Replace
+   with SurrealDB `$root.{..N+collect}->relates->memory` + a single hydrate, and
+   `{..N+shortest}` for paths. This was the original motivation (`README.md`). See
+   `/opt/Kodex/docs/references/surrealdb-v3/graph-traversal.md` (empirical reference).
+2. **FTS parity (`followups.md` #5)** — add `snowball(english)` to the `memory_an`
+   analyzer to approach Tantivy stemming.
+3. **EF tuning + 384-dim recall benchmark (#6, #7)** — store primitives now run at
+   384-dim, but HNSW recall/latency on a realistic corpus is unmeasured; `EF=(limit*4).max(40)` is a guess.
+4. **CI buildability of the feature (#8)** and **dependency-weight measurement (#9)**.
+5. **Migration wiring** — `surreal_migrate` has no runtime caller; needs a CLI/tool
+   entry if migrating existing SQLite+Lance data into SurrealDB is wanted.
 
-- **(A) Per-agent instance model.** One embedded SurrealKv instance **per agent**
-  (mirrors today's per-agent `data_dir`; strong isolation) vs **one shared
-  instance** with `use_db(agent_id)` (fewer handles, new shared failure/
-  concurrency domain). Determines the concurrency/backup model. `open()` today
-  assumes per-agent; `from_handle()` supports the shared case.
-- **(B) Cross-store atomicity.** Working memory stays on SQLite, so a write that
-  touches both memory (SurrealDB) and `working_memory_*` (SQLite) — e.g.
-  `MemorySaved` — spans two engines with no shared transaction. Inventory those
-  paths and decide: accept best-effort, or move working memory too.
-- **(C) SurrealKV backup/restore** story (SQLite is a copyable file; SurrealKV's
-  on-disk format needs a defined backup path) before trusting it with long-term
-  memory.
+## Decisions
 
-## ⚠️ Process note
+- **(A) Per-agent instance — SETTLED.** One embedded SurrealKv per agent at
+  `agent_config.data_dir/surreal` (mirrors the per-agent data dir; strong isolation).
+  `SurrealMemoryStore::open` is the path used at the construction sites.
+- **(B) Cross-store atomicity — DOCUMENTED / accepted best-effort.** Working memory
+  stays on SQLite (`WorkingMemoryStore`) while memory goes to the selected backend;
+  a `MemorySaved` that touches both spans two engines with no shared transaction.
+  Verified: no code path assumes a single txn across them. Accepted for now.
+- **(C) SurrealKV backup/restore — STILL OPEN.** SQLite is a copyable file; SurrealKV's
+  on-disk format needs a defined backup/restore path before trusting it with
+  long-term memory in production. Address before enabling `surreal` by default.
 
-The implementation was written in one autonomous session and **only the design
-doc was ever reviewed** — the ~700 lines of in-crate code were not. A cold
-self-review already found and fixed two real issues (non-atomic merge,
-client-side prune; see `followups.md`). **First action next session: run a code
-review on the implementation diff** before wiring it live.
+## Known landmines / debt
+
+- `src/conversation/context.rs::build_channel_context(&MemoryStore, …)` takes the
+  concrete SQLite store — **dead code (0 callers)**, but would bypass the backend
+  abstraction (read an empty SQLite store under `memory_backend=surreal`) if wired
+  in. Convert to `&Arc<dyn MemoryBackend>` or delete.
+- The SQLite construction branch is duplicated 4× across the cfg-split in
+  `main.rs`/`agents.rs` — correct but could be a shared helper.
+- Full debt list with severities: [`followups.md`](./followups.md).
 
 ## Branch
 
-All work is on `feat/surrealdb-memory` (off `main` @ v0.5.0). No PR opened.
-Default build is unaffected (feature off). Nothing is wired into the daemon yet,
-so merging the branch is safe but inert until the cutover.
-</content>
+All work on `feat/surrealdb-memory` (off `main` @ v0.5.0). No PR opened. Default
+build unaffected (feature off). Plan B's final whole-branch review verdict:
+**READY TO MERGE** — but the branch is held as a checkpoint pending Plan C.

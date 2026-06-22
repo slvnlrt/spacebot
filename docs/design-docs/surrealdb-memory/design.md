@@ -5,15 +5,21 @@ single embedded **SurrealDB v3** instance that unifies the document, graph,
 vector, and full-text concerns the memory subsystem currently splits across two
 databases.
 
-> Status: **design + spike + store/search/maintenance/migration LANDED behind the
-> `surreal-memory` feature (compile-checked; off by default).** What's left is the
-> live wiring/cutover (see "Implementation status"). The SurrealQL has been
-> exercised against a real embedded SurrealDB 3.1.5 (`spikes/surreal-memory/`, 12
-> green tests). Two adversarial reviews + the empirical spike are folded in.
-> **Headline result: the filtered-KNN concern (#6949) does *not* reproduce on
-> embedded — the approach is validated.** Note v3 uses **`type::record`** (not
-> `type::thing`), KNN K/EF must be integer literals, and `RELATE` needs bound
-> `RecordId` endpoints.
+> ⚠️ **This document is the original design intent and predates the implementation.**
+> For the CURRENT state (cutover wired, `MemoryBackend` trait, config selector,
+> deleted duplicate modules, runtime validation, remaining Plan C work) see
+> [`README.md`](./README.md), [`handoff.md`](./handoff.md), and the debt tracker
+> [`followups.md`](./followups.md). The design below is retained as the canonical
+> rationale; where it says "to do / next session," consult those three for what
+> actually landed (Plan A + Plan B, 2026-06-22).
+>
+> Status (historical): design + spike + store/search/maintenance/migration landed
+> behind the `surreal-memory` feature. The SurrealQL was exercised against a real
+> embedded SurrealDB 3.1.5 (`spikes/surreal-memory/`, 12 green tests). Two
+> adversarial reviews + the empirical spike are folded in. **Headline result: the
+> filtered-KNN concern (#6949) does *not* reproduce on embedded — the approach is
+> validated.** Note v3 uses **`type::record`** (not `type::thing`), KNN K/EF must
+> be integer literals, and `RELATE` needs bound `RecordId` endpoints.
 
 ## Problem
 

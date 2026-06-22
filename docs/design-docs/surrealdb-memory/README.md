@@ -18,10 +18,20 @@ collapses all of that.
 
 ## Status (one line)
 
-Design + spike + **store / search / maintenance / migration implemented behind
-the `surreal-memory` feature** (off by default, compile-checked clean). Logic
-proven by a runnable reference crate (12 green tests). **Not yet wired into the
-live daemon** — that's the next session. See [`handoff.md`](./handoff.md).
+**Cutover wired and runtime-validated (2026-06-22).** A `MemoryBackend` trait
+now abstracts storage; `SurrealMemoryStore` implements it; the backend is
+selectable per-agent via `memory_backend = "sqlite" | "surreal"` config (behind
+the `surreal-memory` feature). The duplicated `surreal_search`/`surreal_maintenance`
+modules are **deleted** — the generic `MemorySearch`/`maintenance` now drive both
+stacks. Default (feature-off) build unchanged; both configs pass gates; **8 feature-on
+Surreal tests run green against real embedded SurrealKV** (real ort). Remaining =
+**Plan C** (native graph recursion, snowball FTS, 384-dim recall benchmark). See
+[`handoff.md`](./handoff.md) and [`followups.md`](./followups.md).
+
+Implementation history: Plan A (`docs/superpowers/plans/2026-06-21-memory-backend-abstraction.md`)
+introduced the `MemoryBackend` trait + `SqliteBackend`; Plan B
+(`docs/superpowers/plans/2026-06-22-surreal-backend-cutover.md`) conformed
+SurrealDB to it + wired the per-agent config selector.
 
 ## Documents
 
@@ -32,15 +42,24 @@ live daemon** — that's the next session. See [`handoff.md`](./handoff.md).
 | [`followups.md`](./followups.md) | Self-review of the **implementation**: fixed items, open items, deferred items, and verified non-issues. The to-do backlog. |
 | [`handoff.md`](./handoff.md) | Current state, what landed where, how to build/run/test, and the concrete next steps + open decisions for the next session. |
 
-## Code map
+## Code map (current)
 
-- `src/memory/surreal_store.rs` — `SurrealMemoryStore` (CRUD, associations,
-  graph BFS, vector/FTS, `find_similar`, atomic `merge`, server-side prune).
-- `src/memory/surreal_search.rs` — `SurrealMemorySearch` (hybrid + metadata).
-- `src/memory/surreal_maintenance.rs` — decay / prune / merge.
-- `src/memory/surreal_migrate.rs` — SQLite+Lance → SurrealDB migration.
-- `tests/surreal_memory.rs` — in-crate `kv-mem` integration tests (gated).
-- `spikes/surreal-memory/` — standalone probe + **runnable** reference port.
+- `src/memory/backend.rs` — **`trait MemoryBackend`** (the storage interface) +
+  `SqliteBackend` (wraps `MemoryStore` + `EmbeddingTable`). The pluggability seam.
+- `src/memory/search.rs` — generic `MemorySearch` over `Arc<dyn MemoryBackend>`
+  (hybrid vector+FTS+graph+RRF). Backend-agnostic — drives SQLite and SurrealDB.
+- `src/memory/maintenance.rs` — generic decay / prune / merge over `dyn MemoryBackend`.
+- `src/memory/surreal_store.rs` — `SurrealMemoryStore` + `impl MemoryBackend`
+  (CRUD, associations, **hand-rolled graph BFS [Plan C: → native recursion]**,
+  vector/FTS, `find_similar`, atomic `merge`, server-side prune).
+- `src/memory/surreal_migrate.rs` — SQLite+Lance → SurrealDB migration (NOT yet
+  wired into runtime — manual/tool path; see followups).
+- `src/config/types.rs` — `MemoryBackendKind` selector (defaults + per-agent override).
+- `src/main.rs` / `src/api/agents.rs` — construction sites select the backend by config+feature.
+- `tests/surreal_memory.rs` — gated store-primitive integration tests (8 green, real ort).
+- `spikes/surreal-memory/` — standalone probe + runnable reference port.
 
-All in-crate code is gated behind the `surreal-memory` Cargo feature.
+**Deleted in the cutover:** `surreal_search.rs`, `surreal_maintenance.rs` (their
+logic is now the single generic `search.rs`/`maintenance.rs`). All Surreal-specific
+code is gated behind the `surreal-memory` Cargo feature.
 </content>
