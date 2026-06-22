@@ -442,6 +442,54 @@ impl SurrealMemoryStore {
         Ok(rows.into_iter().map(Association::from).collect())
     }
 
+    /// All associations incident to ANY of `ids` (either endpoint).
+    /// Binds a `Vec<RecordId>` and uses `WHERE in IN $ids OR out IN $ids`.
+    /// Empty `ids` → empty result.
+    pub async fn get_associations_for(&self, ids: &[String]) -> Result<Vec<Association>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let recs: Vec<RecordId> = ids
+            .iter()
+            .map(|s| RecordId::new("memory", s.clone()))
+            .collect();
+        let mut r = self
+            .db
+            .query(
+                "SELECT meta::id(in) AS source, meta::id(out) AS target, relation_type, weight, \
+                 created_at FROM relates WHERE in IN $ids OR out IN $ids",
+            )
+            .bind(("ids", recs))
+            .await
+            .map_err(err)?;
+        let rows: Vec<AssocRow> = r.take(0).map_err(err)?;
+        Ok(rows.into_iter().map(Association::from).collect())
+    }
+
+    /// Batch-load memories by id. Missing ids are silently omitted.
+    /// Forgotten memories ARE included — callers must check `memory.forgotten`.
+    /// Empty `ids` → empty result.
+    pub async fn load_many(&self, ids: &[String]) -> Result<Vec<Memory>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let recs: Vec<RecordId> = ids
+            .iter()
+            .map(|s| RecordId::new("memory", s.clone()))
+            .collect();
+        // NOTE: No `AND forgotten = false` — must return forgotten rows.
+        // The caller (traverse_graph) marks visited then skips forgotten in Rust.
+        let sql = format!("SELECT {MEMORY_COLS} FROM memory WHERE id IN $ids");
+        let mut r = self
+            .db
+            .query(sql)
+            .bind(("ids", recs))
+            .await
+            .map_err(err)?;
+        let rows: Vec<MemoryRow> = r.take(0).map_err(err)?;
+        Ok(rows.into_iter().map(Memory::from).collect())
+    }
+
     /// Delete all edges incident to a memory. Returns the number removed.
     pub async fn delete_associations_for_memory(&self, memory_id: &str) -> Result<u64> {
         let before = self.get_associations(memory_id).await?.len() as u64;
@@ -916,6 +964,12 @@ impl crate::memory::backend::MemoryBackend for SurrealMemoryStore {
     async fn get_associations_between(&self, ids: &[String]) -> Result<Vec<Association>> {
         self.get_associations_between(ids).await
     }
+    async fn get_associations_for(&self, ids: &[String]) -> Result<Vec<Association>> {
+        self.get_associations_for(ids).await
+    }
+    async fn load_many(&self, ids: &[String]) -> Result<Vec<Memory>> {
+        self.load_many(ids).await
+    }
     async fn delete_associations_for_memory(&self, id: &str) -> Result<u64> {
         self.delete_associations_for_memory(id).await
     }
@@ -1339,5 +1393,65 @@ mod tests {
             "snowball(english): 'database' query must match memory with 'databases' \
              (would miss with un-stemmed analyzer)"
         );
+    }
+
+    // ── D1: get_associations_for + load_many ─────────────────────────────────────
+
+    #[tokio::test]
+    async fn get_associations_for_returns_incident_edges() {
+        let store = mem_store().await;
+        let a = mem("gaf-a");
+        let b = mem("gaf-b");
+        let c = mem("gaf-c");
+        for m in [&a, &b, &c] {
+            store.save(m, None).await.unwrap();
+        }
+        store
+            .create_association(&Association::new(&a.id, &b.id, RelationType::RelatedTo))
+            .await
+            .unwrap();
+        store
+            .create_association(&Association::new(&b.id, &c.id, RelationType::RelatedTo))
+            .await
+            .unwrap();
+        // incident to {a}: only a→b
+        let e = store
+            .get_associations_for(&[a.id.clone()])
+            .await
+            .unwrap();
+        assert_eq!(e.len(), 1);
+        assert_eq!(e[0].source_id, a.id);
+        // incident to {a, c}: a→b (a is source) and b→c (c is target)
+        let e2 = store
+            .get_associations_for(&[a.id.clone(), c.id.clone()])
+            .await
+            .unwrap();
+        assert_eq!(e2.len(), 2);
+        // empty → empty
+        assert!(store.get_associations_for(&[]).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn load_many_returns_present_memories() {
+        let store = mem_store().await;
+        let a = mem("lm-present");
+        store.save(&a, None).await.unwrap();
+        let got = store
+            .load_many(&[a.id.clone(), "lm-missing".into()])
+            .await
+            .unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].id, a.id);
+        assert!(store.load_many(&[]).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn load_many_includes_forgotten() {
+        let store = mem_store().await;
+        let a = mem_forgotten("lm-forgotten");
+        store.save(&a, None).await.unwrap();
+        let got = store.load_many(&[a.id.clone()]).await.unwrap();
+        assert_eq!(got.len(), 1, "load_many must return forgotten rows");
+        assert!(got[0].forgotten, "returned row must be marked forgotten");
     }
 }

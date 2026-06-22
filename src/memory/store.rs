@@ -486,6 +486,70 @@ impl MemoryStore {
             .collect())
     }
 
+    /// All associations incident to ANY of `ids` (either endpoint).
+    /// Returns only associations where `source_id IN ids OR target_id IN ids`.
+    /// Empty `ids` → empty result.
+    pub async fn get_associations_for(&self, ids: &[String]) -> Result<Vec<Association>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let placeholders: String = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let query_str = format!(
+            "SELECT id, source_id, target_id, relation_type, weight, created_at \
+             FROM associations \
+             WHERE source_id IN ({placeholders}) OR target_id IN ({placeholders})"
+        );
+
+        let mut query = sqlx::query(&query_str);
+        // Bind once for source_id IN, once for target_id IN
+        for id in ids {
+            query = query.bind(id);
+        }
+        for id in ids {
+            query = query.bind(id);
+        }
+
+        let rows = query
+            .fetch_all(&self.pool)
+            .await
+            .context("failed to get associations for id set")?;
+
+        Ok(rows
+            .into_iter()
+            .map(|row| row_to_association(&row))
+            .collect())
+    }
+
+    /// Batch-load memories by ID. Missing IDs are silently omitted.
+    /// Order is unspecified. Forgotten memories ARE included — callers must
+    /// check `memory.forgotten` themselves.
+    /// Empty `ids` → empty result.
+    pub async fn load_many(&self, ids: &[String]) -> Result<Vec<Memory>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let placeholders: String = ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let query_str = format!(
+            "SELECT id, content, memory_type, importance, created_at, updated_at, \
+             last_accessed_at, access_count, source, channel_id, forgotten \
+             FROM memories WHERE id IN ({placeholders})"
+        );
+
+        let mut query = sqlx::query(&query_str);
+        for id in ids {
+            query = query.bind(id);
+        }
+
+        let rows = query
+            .fetch_all(&self.pool)
+            .await
+            .context("failed to batch-load memories")?;
+
+        Ok(rows.into_iter().map(|row| row_to_memory(&row)).collect())
+    }
+
     /// Get neighbors of a memory: all associations plus the connected memories.
     /// Returns (neighbors, edges) where neighbors excludes any IDs in `exclude_ids`.
     pub async fn get_neighbors(

@@ -68,6 +68,13 @@ pub trait MemoryBackend: Send + Sync + std::fmt::Debug {
     /// Get associations where both endpoints are within `ids`.
     async fn get_associations_between(&self, ids: &[String]) -> Result<Vec<Association>>;
 
+    /// All associations incident to ANY of `ids` (either endpoint). Empty → empty.
+    async fn get_associations_for(&self, ids: &[String]) -> Result<Vec<Association>>;
+
+    /// Batch-load memories by id (order unspecified; missing ids omitted; INCLUDES forgotten).
+    /// Empty → empty.
+    async fn load_many(&self, ids: &[String]) -> Result<Vec<Memory>>;
+
     /// Delete all associations referencing `id`. Returns the number deleted.
     async fn delete_associations_for_memory(&self, id: &str) -> Result<u64>;
 
@@ -230,6 +237,14 @@ impl MemoryBackend for SqliteBackend {
 
     async fn get_associations_between(&self, ids: &[String]) -> Result<Vec<Association>> {
         self.store.get_associations_between(ids).await
+    }
+
+    async fn get_associations_for(&self, ids: &[String]) -> Result<Vec<Association>> {
+        self.store.get_associations_for(ids).await
+    }
+
+    async fn load_many(&self, ids: &[String]) -> Result<Vec<Memory>> {
+        self.store.load_many(ids).await
     }
 
     async fn delete_associations_for_memory(&self, id: &str) -> Result<u64> {
@@ -415,6 +430,59 @@ mod tests {
         assert_eq!(n, 1);
         assert!(be.load(&low.id).await.unwrap().is_none());
         assert!(be.load(&ident.id).await.unwrap().is_some()); // identity preserved
+    }
+
+    #[tokio::test]
+    async fn get_associations_for_returns_incident_edges() {
+        let (be, _dir) = sqlite_backend().await;
+        use crate::memory::types::RelationType;
+        let a = Memory::new("a", MemoryType::Fact);
+        let b = Memory::new("b", MemoryType::Fact);
+        let c = Memory::new("c", MemoryType::Fact);
+        for m in [&a, &b, &c] {
+            be.save(m, None).await.unwrap();
+        }
+        be.create_association(&Association::new(&a.id, &b.id, RelationType::RelatedTo))
+            .await
+            .unwrap();
+        be.create_association(&Association::new(&b.id, &c.id, RelationType::RelatedTo))
+            .await
+            .unwrap();
+        // incident to {a}: only a→b
+        let e = be.get_associations_for(&[a.id.clone()]).await.unwrap();
+        assert_eq!(e.len(), 1);
+        // incident to {a, c}: a→b (a is endpoint) and b→c (c is endpoint)
+        let e2 = be
+            .get_associations_for(&[a.id.clone(), c.id.clone()])
+            .await
+            .unwrap();
+        assert_eq!(e2.len(), 2);
+        assert!(be.get_associations_for(&[]).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn load_many_returns_present_memories() {
+        let (be, _dir) = sqlite_backend().await;
+        let a = Memory::new("x", MemoryType::Fact);
+        be.save(&a, None).await.unwrap();
+        let got = be
+            .load_many(&[a.id.clone(), "missing".into()])
+            .await
+            .unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].id, a.id);
+        assert!(be.load_many(&[]).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn load_many_includes_forgotten() {
+        let (be, _dir) = sqlite_backend().await;
+        let a = Memory::new("forgotten fact", MemoryType::Fact);
+        be.save(&a, None).await.unwrap();
+        be.forget(&a.id).await.unwrap();
+        let got = be.load_many(&[a.id.clone()]).await.unwrap();
+        assert_eq!(got.len(), 1, "load_many must return forgotten rows");
+        assert!(got[0].forgotten, "the returned row must be marked forgotten");
     }
 
     #[tokio::test]
