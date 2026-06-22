@@ -211,6 +211,23 @@ impl SurrealMemoryStore {
     }
 
     /// Apply the schema. Idempotent (`IF NOT EXISTS`).
+    ///
+    /// # Analyzer `IF NOT EXISTS` caveat
+    ///
+    /// The `memory_an` analyzer now includes `snowball(english)` stemming.
+    /// `IF NOT EXISTS` is sufficient here because **no on-disk SurrealKV store
+    /// exists yet** (the backend isn't production-enabled — decision C open) —
+    /// fresh stores (tests, new agents) will always get this analyzer.
+    ///
+    /// **IMPORTANT — live migration:** if an on-disk Surreal store already
+    /// exists, `IF NOT EXISTS` will silently leave the old analyzer in place
+    /// (without stemming). To apply this change to a live store you must:
+    ///
+    /// 1. `DEFINE ANALYZER OVERWRITE memory_an TOKENIZERS class FILTERS lowercase, ascii, snowball(english);`
+    /// 2. Rebuild the FTS index (re-index `memory_fts`) so it is tokenised with
+    ///    the new analyzer — otherwise searches will silently mismatch.
+    ///
+    /// See followups.md for the live-migration item.
     pub async fn define_schema(&self) -> Result<()> {
         let dim = self.dim;
         let sql = format!(
@@ -228,7 +245,7 @@ impl SurrealMemoryStore {
              DEFINE FIELD IF NOT EXISTS forgotten ON memory TYPE bool DEFAULT false;\
              DEFINE FIELD IF NOT EXISTS embedding ON memory TYPE option<array<float>>;\
              DEFINE INDEX IF NOT EXISTS memory_hnsw ON memory FIELDS embedding HNSW DIMENSION {dim} TYPE F32 DIST COSINE;\
-             DEFINE ANALYZER IF NOT EXISTS memory_an TOKENIZERS class FILTERS lowercase, ascii;\
+             DEFINE ANALYZER IF NOT EXISTS memory_an TOKENIZERS class FILTERS lowercase, ascii, snowball(english);\
              DEFINE INDEX IF NOT EXISTS memory_fts ON memory FIELDS content FULLTEXT ANALYZER memory_an BM25;\
              DEFINE INDEX IF NOT EXISTS memory_type_idx ON memory FIELDS memory_type;\
              DEFINE INDEX IF NOT EXISTS memory_importance_idx ON memory FIELDS importance;\
@@ -1224,6 +1241,58 @@ mod tests {
         assert!(
             ep.contains(&(b.id.clone(), forg.id.clone())),
             "b→forg edge must be present (b is in expanded set)"
+        );
+    }
+
+    // ── C3: snowball(english) stemming tests ─────────────────────────────────
+
+    /// Verify that `snowball(english)` stemming is active: a memory whose content
+    /// contains "running" must be matched by the stem query "run".
+    ///
+    /// An un-stemmed analyzer (lowercase + ascii only) would NOT match "run"
+    /// against "running" because they are distinct tokens after tokenisation.
+    /// With snowball(english) both are reduced to the stem "run", so BM25 finds
+    /// the match.
+    ///
+    /// This test will fail (0 results) against the old analyzer without stemming,
+    /// confirming the regression guard.
+    #[tokio::test]
+    async fn fts_snowball_stem_running_matches_run() {
+        let store = mem_store().await;
+        // Save a memory with the inflected form "running".
+        let mut m = mem("stem-running");
+        m.content = "running quickly through the park".to_string();
+        store.save(&m, None).await.unwrap();
+
+        // Query with the bare stem "run" — must match due to snowball(english).
+        let results = store.text_search("run", 10).await.unwrap();
+        let ids: Vec<_> = results.iter().map(|(id, _)| id.as_str()).collect();
+        assert!(
+            ids.contains(&"stem-running"),
+            "snowball(english): stem query 'run' must match memory with content 'running' \
+             (would miss with un-stemmed analyzer)"
+        );
+    }
+
+    /// Verify plural-to-singular stemming: "databases" is stemmed to "databas"
+    /// (the Porter stem) so searching "database" should also match.
+    ///
+    /// Note: Porter stem of "database" and "databases" converges to "databas",
+    /// so both queries hit the same indexed token.
+    #[tokio::test]
+    async fn fts_snowball_stem_databases_matches_database() {
+        let store = mem_store().await;
+        let mut m = mem("stem-databases");
+        m.content = "relational databases store structured data".to_string();
+        store.save(&m, None).await.unwrap();
+
+        // Query with the singular form — both share the Porter stem "databas".
+        let results = store.text_search("database", 10).await.unwrap();
+        let ids: Vec<_> = results.iter().map(|(id, _)| id.as_str()).collect();
+        assert!(
+            ids.contains(&"stem-databases"),
+            "snowball(english): 'database' query must match memory with 'databases' \
+             (would miss with un-stemmed analyzer)"
         );
     }
 }
