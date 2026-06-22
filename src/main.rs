@@ -2884,23 +2884,85 @@ async fn initialize_agents(
             };
 
         // Per-agent memory system
-        let memory_store =
-            spacebot::memory::MemoryStore::with_agent_id(db.sqlite.clone(), &agent_config.id);
         let project_store = global_project_store.clone();
-        let embedding_table = spacebot::memory::EmbeddingTable::open_or_create(&db.lance)
-            .await
-            .with_context(|| {
-                format!("failed to init embeddings for agent '{}'", agent_config.id)
-            })?;
 
-        // Ensure FTS index exists for full-text search queries
-        if let Err(error) = embedding_table.ensure_fts_index().await {
-            tracing::warn!(%error, agent = %agent_config.id, "failed to create FTS index");
-        }
-
-        let backend: Arc<dyn spacebot::memory::MemoryBackend> = Arc::new(
-            spacebot::memory::SqliteBackend::new(memory_store, embedding_table),
-        );
+        let backend: Arc<dyn spacebot::memory::MemoryBackend> = {
+            #[cfg(feature = "surreal-memory")]
+            if matches!(
+                agent_config.memory_backend,
+                spacebot::config::MemoryBackendKind::Surreal
+            ) {
+                let dim = spacebot::memory::lance::EMBEDDING_DIM as usize;
+                let store = spacebot::memory::SurrealMemoryStore::open(
+                    &agent_config.data_dir,
+                    &agent_config.id,
+                    dim,
+                )
+                .await
+                .with_context(|| {
+                    format!(
+                        "failed to init SurrealDB memory for agent '{}'",
+                        agent_config.id
+                    )
+                })?;
+                store as Arc<dyn spacebot::memory::MemoryBackend>
+            } else {
+                let memory_store = spacebot::memory::MemoryStore::with_agent_id(
+                    db.sqlite.clone(),
+                    &agent_config.id,
+                );
+                let embedding_table =
+                    spacebot::memory::EmbeddingTable::open_or_create(&db.lance)
+                        .await
+                        .with_context(|| {
+                            format!(
+                                "failed to init embeddings for agent '{}'",
+                                agent_config.id
+                            )
+                        })?;
+                // Ensure FTS index exists for full-text search queries
+                if let Err(error) = embedding_table.ensure_fts_index().await {
+                    tracing::warn!(%error, agent = %agent_config.id, "failed to create FTS index");
+                }
+                Arc::new(spacebot::memory::SqliteBackend::new(
+                    memory_store,
+                    embedding_table,
+                ))
+            }
+            #[cfg(not(feature = "surreal-memory"))]
+            {
+                if matches!(
+                    agent_config.memory_backend,
+                    spacebot::config::MemoryBackendKind::Surreal
+                ) {
+                    tracing::warn!(
+                        agent = %agent_config.id,
+                        "memory_backend=surreal but the `surreal-memory` feature is not compiled in; using SQLite"
+                    );
+                }
+                let memory_store = spacebot::memory::MemoryStore::with_agent_id(
+                    db.sqlite.clone(),
+                    &agent_config.id,
+                );
+                let embedding_table =
+                    spacebot::memory::EmbeddingTable::open_or_create(&db.lance)
+                        .await
+                        .with_context(|| {
+                            format!(
+                                "failed to init embeddings for agent '{}'",
+                                agent_config.id
+                            )
+                        })?;
+                // Ensure FTS index exists for full-text search queries
+                if let Err(error) = embedding_table.ensure_fts_index().await {
+                    tracing::warn!(%error, agent = %agent_config.id, "failed to create FTS index");
+                }
+                Arc::new(spacebot::memory::SqliteBackend::new(
+                    memory_store,
+                    embedding_table,
+                ))
+            }
+        };
         let memory_search = Arc::new(spacebot::memory::MemorySearch::new(
             backend,
             embedding_model.clone(),

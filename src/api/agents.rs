@@ -831,21 +831,67 @@ pub async fn create_agent_internal(
             .clone()
     };
 
-    let memory_store = crate::memory::MemoryStore::new(db.sqlite.clone());
-    let embedding_table = crate::memory::EmbeddingTable::open_or_create(&db.lance)
-        .await
-        .map_err(|error| {
-            tracing::error!(%error, agent_id = %agent_id, "failed to init embeddings");
-            format!("failed to init embeddings: {error}")
-        })?;
-
-    if let Err(error) = embedding_table.ensure_fts_index().await {
-        tracing::warn!(%error, agent_id = %agent_id, "failed to create FTS index");
-    }
-
-    let backend: std::sync::Arc<dyn crate::memory::MemoryBackend> = std::sync::Arc::new(
-        crate::memory::SqliteBackend::new(memory_store, embedding_table),
-    );
+    let backend: std::sync::Arc<dyn crate::memory::MemoryBackend> = {
+        #[cfg(feature = "surreal-memory")]
+        if matches!(
+            agent_config.memory_backend,
+            crate::config::MemoryBackendKind::Surreal
+        ) {
+            let dim = crate::memory::lance::EMBEDDING_DIM as usize;
+            let store = crate::memory::SurrealMemoryStore::open(
+                &agent_config.data_dir,
+                &agent_config.id,
+                dim,
+            )
+            .await
+            .map_err(|error| {
+                tracing::error!(%error, agent_id = %agent_id, "failed to init SurrealDB memory");
+                format!("failed to init SurrealDB memory: {error}")
+            })?;
+            store as std::sync::Arc<dyn crate::memory::MemoryBackend>
+        } else {
+            let memory_store = crate::memory::MemoryStore::new(db.sqlite.clone());
+            let embedding_table = crate::memory::EmbeddingTable::open_or_create(&db.lance)
+                .await
+                .map_err(|error| {
+                    tracing::error!(%error, agent_id = %agent_id, "failed to init embeddings");
+                    format!("failed to init embeddings: {error}")
+                })?;
+            if let Err(error) = embedding_table.ensure_fts_index().await {
+                tracing::warn!(%error, agent_id = %agent_id, "failed to create FTS index");
+            }
+            std::sync::Arc::new(crate::memory::SqliteBackend::new(
+                memory_store,
+                embedding_table,
+            ))
+        }
+        #[cfg(not(feature = "surreal-memory"))]
+        {
+            if matches!(
+                agent_config.memory_backend,
+                crate::config::MemoryBackendKind::Surreal
+            ) {
+                tracing::warn!(
+                    agent = %agent_config.id,
+                    "memory_backend=surreal but the `surreal-memory` feature is not compiled in; using SQLite"
+                );
+            }
+            let memory_store = crate::memory::MemoryStore::new(db.sqlite.clone());
+            let embedding_table = crate::memory::EmbeddingTable::open_or_create(&db.lance)
+                .await
+                .map_err(|error| {
+                    tracing::error!(%error, agent_id = %agent_id, "failed to init embeddings");
+                    format!("failed to init embeddings: {error}")
+                })?;
+            if let Err(error) = embedding_table.ensure_fts_index().await {
+                tracing::warn!(%error, agent_id = %agent_id, "failed to create FTS index");
+            }
+            std::sync::Arc::new(crate::memory::SqliteBackend::new(
+                memory_store,
+                embedding_table,
+            ))
+        }
+    };
     let memory_search =
         std::sync::Arc::new(crate::memory::MemorySearch::new(backend, embedding_model));
     let task_store = state
