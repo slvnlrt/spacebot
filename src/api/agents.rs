@@ -786,6 +786,7 @@ pub async fn create_agent_internal(
         cron_timezone: None,
         user_timezone: None,
         sandbox: None,
+        memory_backend: None,
         projects: None,
         cron: Vec::new(),
     };

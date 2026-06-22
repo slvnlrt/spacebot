@@ -15,11 +15,11 @@ use super::{
     CoalesceConfig, CompactionConfig, Config, CortexConfig, CronDef, DefaultsConfig, DiscordConfig,
     DiscordInstanceConfig, EmailConfig, EmailInstanceConfig, GroupDef, HumanDef, IngestionConfig,
     LinkDef, LlmConfig, MattermostConfig, MattermostInstanceConfig, McpServerConfig, McpTransport,
-    MemoryJanitorConfig, MemoryPersistenceConfig, MessagingConfig, MetricsConfig, OpenCodeConfig,
-    ParticipantContextConfig, ProjectsConfig, ProviderConfig, SignalConfig, SignalInstanceConfig,
-    SlackCommandConfig, SlackConfig, SlackInstanceConfig, TelegramConfig, TelegramInstanceConfig,
-    TelemetryConfig, TwitchConfig, TwitchInstanceConfig, WarmupConfig, WebhookConfig,
-    normalize_adapter, validate_named_messaging_adapters,
+    MemoryBackendKind, MemoryJanitorConfig, MemoryPersistenceConfig, MessagingConfig, MetricsConfig,
+    OpenCodeConfig, ParticipantContextConfig, ProjectsConfig, ProviderConfig, SignalConfig,
+    SignalInstanceConfig, SlackCommandConfig, SlackConfig, SlackInstanceConfig, TelegramConfig,
+    TelegramInstanceConfig, TelemetryConfig, TwitchConfig, TwitchInstanceConfig, WarmupConfig,
+    WebhookConfig, normalize_adapter, validate_named_messaging_adapters,
 };
 use crate::error::{ConfigError, Result};
 
@@ -949,6 +949,7 @@ impl Config {
             cron_timezone: None,
             user_timezone: None,
             sandbox: None,
+            memory_backend: None,
             projects: None,
             cron: Vec::new(),
         }];
@@ -1766,6 +1767,10 @@ impl Config {
                 .as_deref()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(base_defaults.worker_log_mode),
+            memory_backend: MemoryBackendKind::parse_opt(
+                toml.defaults.memory_backend.as_deref(),
+            )
+            .unwrap_or(base_defaults.memory_backend),
             projects: toml
                 .defaults
                 .projects
@@ -1936,6 +1941,7 @@ impl Config {
                     cron_timezone: a.cron_timezone.as_deref().and_then(resolve_env_value),
                     user_timezone: a.user_timezone.as_deref().and_then(resolve_env_value),
                     sandbox: a.sandbox,
+                    memory_backend: MemoryBackendKind::parse_opt(a.memory_backend.as_deref()),
                     projects: a.projects.map(|p| {
                         let base = &defaults.projects;
                         ProjectsConfig {
@@ -1991,6 +1997,7 @@ impl Config {
                 cron_timezone: None,
                 user_timezone: None,
                 sandbox: None,
+                memory_backend: None,
                 projects: None,
                 cron: Vec::new(),
             });

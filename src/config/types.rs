@@ -627,6 +627,26 @@ impl SystemSecrets for LlmConfig {
 // Defaults, agent configs, and resolution helpers
 // ---------------------------------------------------------------------------
 
+/// Which memory storage backend to use for an agent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MemoryBackendKind {
+    #[default]
+    Sqlite,
+    Surreal,
+}
+
+impl MemoryBackendKind {
+    /// Parse an optional string into `Some(MemoryBackendKind)`, returning
+    /// `None` for unknown values (caller falls back to default).
+    pub fn parse_opt(s: Option<&str>) -> Option<Self> {
+        match s?.trim().to_ascii_lowercase().as_str() {
+            "sqlite" => Some(Self::Sqlite),
+            "surreal" | "surrealdb" => Some(Self::Surreal),
+            _ => None,
+        }
+    }
+}
+
 /// Defaults inherited by all agents. Individual agents can override any field.
 #[derive(Clone)]
 pub struct DefaultsConfig {
@@ -662,6 +682,8 @@ pub struct DefaultsConfig {
     pub worker_log_mode: crate::settings::WorkerLogMode,
     /// Projects workspace management defaults.
     pub projects: ProjectsConfig,
+    /// Memory storage backend for agents: sqlite (default) or surreal.
+    pub memory_backend: MemoryBackendKind,
 }
 
 impl std::fmt::Debug for DefaultsConfig {
@@ -695,6 +717,7 @@ impl std::fmt::Debug for DefaultsConfig {
             .field("opencode", &self.opencode)
             .field("worker_log_mode", &self.worker_log_mode)
             .field("projects", &self.projects)
+            .field("memory_backend", &self.memory_backend)
             .finish()
     }
 }
@@ -1414,6 +1437,8 @@ pub struct AgentConfig {
     pub projects: Option<ProjectsConfig>,
     /// Cron job definitions for this agent.
     pub cron: Vec<CronDef>,
+    /// Memory storage backend override. None inherits from defaults.
+    pub memory_backend: Option<MemoryBackendKind>,
 }
 
 /// A cron job definition from config.
@@ -1477,6 +1502,8 @@ pub struct ResolvedAgentConfig {
     pub cron: Vec<CronDef>,
     /// Tool-use enforcement for preventing models from describing actions instead of calling tools.
     pub tool_use_enforcement: ToolUseEnforcement,
+    /// Resolved memory storage backend.
+    pub memory_backend: MemoryBackendKind,
 }
 
 impl Default for DefaultsConfig {
@@ -1507,6 +1534,7 @@ impl Default for DefaultsConfig {
             opencode: OpenCodeConfig::default(),
             worker_log_mode: crate::settings::WorkerLogMode::default(),
             projects: ProjectsConfig::default(),
+            memory_backend: MemoryBackendKind::default(),
         }
     }
 }
@@ -1584,6 +1612,7 @@ impl AgentConfig {
                 .tool_use_enforcement
                 .clone()
                 .unwrap_or_else(|| defaults.tool_use_enforcement.clone()),
+            memory_backend: self.memory_backend.unwrap_or(defaults.memory_backend),
         }
     }
 }
@@ -3209,5 +3238,74 @@ mod mattermost_url_tests {
     #[test]
     fn rejects_fragment() {
         assert!(validate_mattermost_url("https://mattermost.example.com/#section").is_err());
+    }
+}
+
+#[cfg(test)]
+mod memory_backend_tests {
+    use super::*;
+    use std::path::Path;
+
+    fn minimal_agent_config(id: &str, memory_backend: Option<MemoryBackendKind>) -> AgentConfig {
+        AgentConfig {
+            id: id.into(),
+            default: false,
+            display_name: None,
+            role: None,
+            gradient_start: None,
+            gradient_end: None,
+            workspace: None,
+            routing: None,
+            max_concurrent_branches: None,
+            max_concurrent_workers: None,
+            max_turns: None,
+            branch_max_turns: None,
+            context_window: None,
+            tool_use_enforcement: None,
+            compaction: None,
+            memory_persistence: None,
+            coalesce: None,
+            ingestion: None,
+            cortex: None,
+            warmup: None,
+            browser: None,
+            channel: None,
+            mcp: None,
+            brave_search_key: None,
+            cron_timezone: None,
+            user_timezone: None,
+            sandbox: None,
+            memory_backend,
+            projects: None,
+            cron: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn agent_memory_backend_falls_back_to_defaults() {
+        let mut defaults = DefaultsConfig::default();
+        defaults.memory_backend = MemoryBackendKind::Surreal;
+
+        let instance_dir = Path::new("/tmp/test-instance");
+
+        // Agent with no override inherits the default (Surreal)
+        let agent = minimal_agent_config("test-agent", None);
+        let resolved = agent.resolve(instance_dir, &defaults);
+        assert_eq!(resolved.memory_backend, MemoryBackendKind::Surreal);
+
+        // Agent with an explicit Sqlite override wins over the Surreal default
+        let agent2 = minimal_agent_config("test-agent2", Some(MemoryBackendKind::Sqlite));
+        let resolved2 = agent2.resolve(instance_dir, &defaults);
+        assert_eq!(resolved2.memory_backend, MemoryBackendKind::Sqlite);
+    }
+
+    #[test]
+    fn parse_opt_recognises_all_variants() {
+        assert_eq!(MemoryBackendKind::parse_opt(Some("sqlite")), Some(MemoryBackendKind::Sqlite));
+        assert_eq!(MemoryBackendKind::parse_opt(Some("surreal")), Some(MemoryBackendKind::Surreal));
+        assert_eq!(MemoryBackendKind::parse_opt(Some("surrealdb")), Some(MemoryBackendKind::Surreal));
+        assert_eq!(MemoryBackendKind::parse_opt(Some("SQLITE")), Some(MemoryBackendKind::Sqlite));
+        assert_eq!(MemoryBackendKind::parse_opt(Some("unknown")), None);
+        assert_eq!(MemoryBackendKind::parse_opt(None), None);
     }
 }
