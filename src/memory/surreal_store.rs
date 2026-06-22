@@ -286,7 +286,7 @@ impl SurrealMemoryStore {
     }
 
     /// Update only the embedding for a memory.
-    pub async fn set_embedding(&self, id: &str, embedding: &[f32]) -> Result<()> {
+    pub async fn set_embedding_by_id(&self, id: &str, embedding: &[f32]) -> Result<()> {
         self.db
             .query("UPDATE type::record('memory', $id) SET embedding = $emb")
             .bind(("id", id.to_string()))
@@ -368,6 +368,28 @@ impl SurrealMemoryStore {
                  WHERE in = type::record('memory', $m) OR out = type::record('memory', $m)",
             )
             .bind(("m", memory_id.to_string()))
+            .await
+            .map_err(err)?;
+        let rows: Vec<AssocRow> = r.take(0).map_err(err)?;
+        Ok(rows.into_iter().map(Association::from).collect())
+    }
+
+    /// Associations where both endpoints are within `ids` (internal edges only).
+    pub async fn get_associations_between(&self, ids: &[String]) -> Result<Vec<Association>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let recs: Vec<RecordId> = ids
+            .iter()
+            .map(|s| RecordId::new("memory", s.clone()))
+            .collect();
+        let mut r = self
+            .db
+            .query(
+                "SELECT meta::id(in) AS source, meta::id(out) AS target, relation_type, weight, \
+                 created_at FROM relates WHERE in IN $ids AND out IN $ids",
+            )
+            .bind(("ids", recs))
             .await
             .map_err(err)?;
         let rows: Vec<AssocRow> = r.take(0).map_err(err)?;
@@ -678,5 +700,160 @@ impl SurrealMemoryStore {
             }
         }
         Ok(out)
+    }
+}
+
+impl std::fmt::Debug for SurrealMemoryStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SurrealMemoryStore")
+            .field("agent_id", &self.agent_id)
+            .field("dim", &self.dim)
+            .finish_non_exhaustive()
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::memory::backend::MemoryBackend for SurrealMemoryStore {
+    fn agent_id(&self) -> &str {
+        self.agent_id()
+    }
+    async fn save(&self, m: &Memory, e: Option<&[f32]>) -> Result<()> {
+        self.save(m, e).await
+    }
+    async fn set_embedding(&self, memory: &Memory, e: &[f32]) -> Result<()> {
+        self.set_embedding_by_id(&memory.id, e).await
+    }
+    async fn delete(&self, id: &str) -> Result<()> {
+        self.delete(id).await
+    }
+    async fn load(&self, id: &str) -> Result<Option<Memory>> {
+        self.load(id).await
+    }
+    async fn update(&self, m: &Memory) -> Result<()> {
+        self.update(m).await
+    }
+    async fn forget(&self, id: &str) -> Result<bool> {
+        self.forget(id).await
+    }
+    async fn record_access(&self, id: &str) -> Result<()> {
+        self.record_access(id).await
+    }
+    async fn get_by_type(&self, t: MemoryType, l: i64) -> Result<Vec<Memory>> {
+        self.get_by_type(t, l).await
+    }
+    async fn get_high_importance(&self, th: f32, l: i64) -> Result<Vec<Memory>> {
+        self.get_high_importance(th, l).await
+    }
+    async fn get_sorted(
+        &self,
+        s: SearchSort,
+        l: i64,
+        t: Option<MemoryType>,
+    ) -> Result<Vec<Memory>> {
+        self.get_sorted(s, l, t).await
+    }
+    async fn create_association(&self, a: &Association) -> Result<()> {
+        self.create_association(a).await
+    }
+    async fn get_associations(&self, id: &str) -> Result<Vec<Association>> {
+        self.get_associations(id).await
+    }
+    async fn get_associations_between(&self, ids: &[String]) -> Result<Vec<Association>> {
+        self.get_associations_between(ids).await
+    }
+    async fn delete_associations_for_memory(&self, id: &str) -> Result<u64> {
+        self.delete_associations_for_memory(id).await
+    }
+    async fn get_neighbors(
+        &self,
+        id: &str,
+        d: u32,
+        ex: &[String],
+    ) -> Result<(Vec<Memory>, Vec<Association>)> {
+        self.get_neighbors(id, d, ex).await
+    }
+    async fn vector_search(&self, q: &[f32], l: usize) -> Result<Vec<(String, f32)>> {
+        self.vector_search(q, l).await
+    }
+    async fn text_search(&self, q: &str, l: usize) -> Result<Vec<(String, f32)>> {
+        self.text_search(q, l).await
+    }
+    async fn find_similar(&self, id: &str, th: f32, l: usize) -> Result<Vec<(String, f32)>> {
+        self.find_similar(id, th, l).await
+    }
+    async fn prune_below(
+        &self,
+        th: f32,
+        older: chrono::DateTime<chrono::Utc>,
+    ) -> Result<u64> {
+        self.prune_below(th, older).await
+    }
+    async fn merge(
+        &self,
+        s: &str,
+        l: &str,
+        c: &str,
+        e: Option<&[f32]>,
+    ) -> Result<()> {
+        self.merge(s, l, c, e).await
+    }
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use surrealdb::engine::local::Mem;
+    use surrealdb::Surreal;
+
+    const DIM: usize = 4;
+
+    async fn mem_store() -> Arc<SurrealMemoryStore> {
+        let db = Surreal::new::<Mem>(()).await.unwrap();
+        db.use_ns("test").use_db("test").await.unwrap();
+        SurrealMemoryStore::from_handle(db, "test-agent", DIM)
+            .await
+            .unwrap()
+    }
+
+    fn mem(id: &str) -> Memory {
+        Memory {
+            id: id.to_string(),
+            content: format!("content of {id}"),
+            memory_type: MemoryType::Fact,
+            importance: 0.5,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            last_accessed_at: chrono::Utc::now(),
+            access_count: 0,
+            source: None,
+            channel_id: None,
+            forgotten: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn associations_between_returns_only_internal_edges() {
+        let store = mem_store().await;
+        let a = mem("a");
+        let b = mem("b");
+        let c = mem("c");
+        for m in [&a, &b, &c] {
+            store.save(m, None).await.unwrap();
+        }
+        store
+            .create_association(&Association::new(&a.id, &b.id, RelationType::RelatedTo))
+            .await
+            .unwrap();
+        store
+            .create_association(&Association::new(&b.id, &c.id, RelationType::RelatedTo))
+            .await
+            .unwrap();
+        let within = store
+            .get_associations_between(&[a.id.clone(), b.id.clone()])
+            .await
+            .unwrap();
+        assert_eq!(within.len(), 1); // a->b only; b->c excluded (c not in set)
     }
 }
