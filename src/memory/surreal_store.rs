@@ -777,7 +777,11 @@ impl SurrealMemoryStore {
                 query_embedding.len()
             )));
         }
-        let ef = (limit * 4).max(40);
+        // EF≥80 required: benchmark (C5) shows EF=40 has a severe tail-latency
+        // pathology (~14s p99 vs ~9ms p50) at 10k-vector 384-dim corpus, even
+        // though recall@10 = 1.0. EF=80 eliminates the tail entirely (p95≈p50).
+        // Recommended formula: (limit*4).max(80).
+        let ef = (limit * 4).max(80);
         let sql = format!(
             "SELECT meta::id(id) AS id, vector::distance::knn() AS distance FROM memory \
              WHERE embedding <|{limit},{ef}|> $q AND forgotten = false ORDER BY distance"
@@ -820,7 +824,8 @@ impl SurrealMemoryStore {
         limit: usize,
     ) -> Result<Vec<(String, f32)>> {
         let fetch = limit + 1;
-        let ef = (fetch * 4).max(40);
+        // EF≥80 minimum — see vector_search comment (C5 benchmark result).
+        let ef = (fetch * 4).max(80);
         let sql = format!(
             "LET $vec = (SELECT VALUE embedding FROM ONLY type::record('memory', $id));\
              SELECT meta::id(id) AS id, vector::distance::knn() AS distance FROM memory \
