@@ -469,33 +469,228 @@ impl<C: Connection> MemoryStore<C> {
 
     /// Graph-view BFS neighbours up to `depth` (mirrors store.rs::get_neighbors).
     pub async fn get_neighbors(&self, id: &str, depth: usize) -> Result<Vec<Memory>> {
+        let (memories, _) = self.get_neighbors_with_edges(id, depth, &[]).await?;
+        Ok(memories)
+    }
+
+    /// Full parity BFS matching the production `get_neighbors` contract:
+    /// - Undirected traversal (both `in` and `out` of `relates`).
+    /// - `visited` seeded with `exclude_ids` + start id.
+    /// - **Edges**: all associations incident to EXPANDED nodes (nodes dequeued
+    ///   with `d < depth`). Deepest level (hop == `depth`) is COLLECTED but
+    ///   NOT expanded — their outgoing edges are NOT returned.
+    /// - **Memories**: first-seen, non-forgotten, excluding start + `exclude_ids`.
+    /// - Does NOT traverse through forgotten nodes (they stop BFS expansion).
+    /// - `depth == 0` → `([], [])` (nothing expanded).
+    pub async fn get_neighbors_with_edges(
+        &self,
+        id: &str,
+        depth: usize,
+        exclude_ids: &[&str],
+    ) -> Result<(Vec<Memory>, Vec<Association>)> {
+        if depth == 0 {
+            return Ok((vec![], vec![]));
+        }
         let mut visited: HashSet<String> = HashSet::new();
         let mut queue: VecDeque<(String, usize)> = VecDeque::new();
-        let mut out = Vec::new();
+        let mut memories = Vec::new();
+        let mut edges = Vec::new();
+
         visited.insert(id.to_string());
+        for eid in exclude_ids {
+            visited.insert(eid.to_string());
+        }
         queue.push_back((id.to_string(), 0));
+
         while let Some((cur, d)) = queue.pop_front() {
             if d >= depth {
+                // Collected but not expanded — do NOT push edges for this node.
                 continue;
             }
+            // This node is EXPANDED: push all its incident edges.
             for assoc in self.get_associations(&cur).await? {
+                edges.push(assoc.clone());
                 let other = if assoc.source_id == cur {
-                    assoc.target_id
+                    assoc.target_id.clone()
                 } else {
-                    assoc.source_id
+                    assoc.source_id.clone()
                 };
                 if !visited.insert(other.clone()) {
                     continue;
                 }
                 if let Some(m) = self.load(&other).await? {
                     if !m.forgotten {
-                        out.push(m);
+                        memories.push(m);
                         queue.push_back((other, d + 1));
                     }
+                    // Forgotten: record is noted in edges (already pushed above)
+                    // but never enqueued (no BFS expansion through forgotten).
                 }
             }
         }
-        Ok(out)
+        Ok((memories, edges))
+    }
+
+    /// Native 3-query plan for `get_neighbors` using SurrealDB `{..N+collect}`.
+    ///
+    /// Two distinct sets:
+    /// - `ids` (COLLECTED = returned memories): `{..depth+collect}` forward + backward, deduped.
+    /// - `expanded` (EXPANDED = edge sources): `[root] ∪ {..(depth-1)+collect}` for depth≥2,
+    ///   else just `[root]` for depth==1.
+    ///
+    /// Forgotten strategy (b): native traversal goes THROUGH forgotten nodes
+    /// (superset of BFS reachable set); the hydrate WHERE clause excludes forgotten
+    /// from returned memories. Edge set is NOT filtered on forgotten — BFS parity.
+    ///
+    /// `depth == 0` → `([], [])` immediately (do not clamp; `{..0}` is illegal).
+    pub async fn get_neighbors_native(
+        &self,
+        id: &str,
+        depth: usize,
+        exclude_ids: &[&str],
+    ) -> Result<(Vec<Memory>, Vec<Association>)> {
+        if depth == 0 {
+            return Ok((vec![], vec![]));
+        }
+        let depth_clamped = depth.min(256);
+
+        use surrealdb::types::RecordId;
+        use surrealdb::types::Value;
+
+        let root = RecordId::new("memory", id.to_string());
+
+        // ---- Step 1: collect candidate ids (COLLECTED set) ----
+        // Forward + backward, deduped. Returns raw RecordIDs.
+        let fwd_sql = format!(
+            "$root.{{..{depth_clamped}+collect}}->relates->memory"
+        );
+        let bwd_sql = format!(
+            "$root.{{..{depth_clamped}+collect}}<-relates<-memory"
+        );
+
+        let mut fwd_r = self.db.query(&fwd_sql).bind(("root", root.clone())).await?;
+        let fwd_ids: Value = fwd_r.take(0)?;
+
+        let mut bwd_r = self.db.query(&bwd_sql).bind(("root", root.clone())).await?;
+        let bwd_ids: Value = bwd_r.take(0)?;
+
+        // Collect raw RecordIds, dedup
+        let mut seen: HashSet<String> = HashSet::new();
+        seen.insert(id.to_string());
+        for eid in exclude_ids {
+            seen.insert(eid.to_string());
+        }
+        let mut collected_rids: Vec<RecordId> = Vec::new();
+
+        fn extract_rids(v: &Value, seen: &mut HashSet<String>, out: &mut Vec<RecordId>) {
+            match v {
+                Value::Array(arr) => {
+                    for item in arr.iter() {
+                        extract_rids(item, seen, out);
+                    }
+                }
+                Value::RecordId(rid) => {
+                    // Memory IDs are always UUID strings; match accordingly.
+                    if let surrealdb::types::RecordIdKey::String(ref key) = rid.key {
+                        if seen.insert(key.clone()) {
+                            out.push(RecordId::new(rid.table.as_str(), key.clone()));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        extract_rids(&fwd_ids, &mut seen, &mut collected_rids);
+        extract_rids(&bwd_ids, &mut seen, &mut collected_rids);
+
+        // ---- Step 2: hydrate memories (non-forgotten, excluding start + excludes) ----
+        let memories = if collected_rids.is_empty() {
+            vec![]
+        } else {
+            let mut r = self
+                .db
+                .query(
+                    "SELECT meta::id(id) AS id, content, memory_type, importance, \
+                     created_at, updated_at, last_accessed_at, access_count, source, \
+                     channel_id, forgotten FROM memory \
+                     WHERE id IN $ids AND forgotten = false",
+                )
+                .bind(("ids", collected_rids.clone()))
+                .await?;
+            let rows: Vec<MemoryRow> = r.take(0)?;
+            rows.into_iter().map(MemoryRow::into_memory).collect()
+        };
+
+        // ---- Step 3: compute EXPANDED set (edge sources) ----
+        // EXPANDED = {root} ∪ nodes within (depth-1) hops for depth >= 2.
+        // For depth == 1, EXPANDED = {root} only.
+        let mut expanded_rids: Vec<RecordId> = vec![root.clone()];
+
+        if depth_clamped >= 2 {
+            let exp_depth = depth_clamped - 1;
+            let exp_fwd_sql = format!(
+                "$root.{{..{exp_depth}+collect}}->relates->memory"
+            );
+            let exp_bwd_sql = format!(
+                "$root.{{..{exp_depth}+collect}}<-relates<-memory"
+            );
+
+            let mut ef_r = self.db.query(&exp_fwd_sql).bind(("root", root.clone())).await?;
+            let ef_ids: Value = ef_r.take(0)?;
+
+            let mut eb_r = self.db.query(&exp_bwd_sql).bind(("root", root.clone())).await?;
+            let eb_ids: Value = eb_r.take(0)?;
+
+            let mut exp_seen: HashSet<String> = HashSet::new();
+            exp_seen.insert(id.to_string());
+            fn collect_exp(v: &Value, seen: &mut HashSet<String>, out: &mut Vec<RecordId>) {
+                match v {
+                    Value::Array(arr) => {
+                        for item in arr.iter() {
+                            collect_exp(item, seen, out);
+                        }
+                    }
+                    Value::RecordId(rid) => {
+                        if let surrealdb::types::RecordIdKey::String(ref key) = rid.key {
+                            if seen.insert(key.clone()) {
+                                out.push(RecordId::new(rid.table.as_str(), key.clone()));
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            collect_exp(&ef_ids, &mut exp_seen, &mut expanded_rids);
+            collect_exp(&eb_ids, &mut exp_seen, &mut expanded_rids);
+        }
+
+        // ---- Step 4: collect edges from EXPANDED set ----
+        let edges = if expanded_rids.is_empty() {
+            vec![]
+        } else {
+            let mut r = self
+                .db
+                .query(
+                    "SELECT meta::id(in) AS source, meta::id(out) AS target, relation_type, weight \
+                     FROM relates WHERE in IN $expanded OR out IN $expanded",
+                )
+                .bind(("expanded", expanded_rids))
+                .await?;
+            let rows: Vec<AssocRow> = r.take(0)?;
+            rows.into_iter()
+                .filter_map(|a| {
+                    RelationType::from_str(&a.relation_type).map(|rt| Association {
+                        source_id: a.source,
+                        target_id: a.target,
+                        relation_type: rt,
+                        weight: a.weight as f32,
+                    })
+                })
+                .collect()
+        };
+
+        Ok((memories, edges))
     }
 
     /// Server-side prune: delete non-identity memories below `threshold` and

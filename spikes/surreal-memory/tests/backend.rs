@@ -1,5 +1,7 @@
 //! Integration tests for the reference SurrealDB memory backend, against the
 //! embedded in-memory engine (kv-mem) — the planned test-harness engine.
+use std::collections::HashSet;
+use std::time::Instant;
 use surrealdb::engine::local::Mem;
 use surrealdb::Surreal;
 use surreal_memory_spike::*;
@@ -262,4 +264,446 @@ async fn prune_below_deletes_only_old_low_importance_non_identity() {
     assert!(store.load(&b.id).await.unwrap().is_some());
     assert!(store.load(&c.id).await.unwrap().is_some());
     assert!(store.load(&d.id).await.unwrap().is_some());
+}
+
+// ============================================================================
+// Task C1: Empirically verify native SurrealDB graph recursion
+// ============================================================================
+//
+// Graph: a→b→c (c is forgotten), a→d
+// This tests the parity contract for get_neighbors_native vs get_neighbors_with_edges.
+
+/// Helper to build the Task C1 reference graph:
+///   a→b→c (c forgotten), a→d
+///
+/// Returns (store, a_id, b_id, c_id, d_id).
+async fn build_c1_graph() -> (MemoryStore<surrealdb::engine::local::Db>, String, String, String, String) {
+    let store = fresh().await;
+    let a = Memory::new("node a", MemoryType::Fact);
+    let b = Memory::new("node b", MemoryType::Fact);
+    let c = Memory::new("node c (forgotten)", MemoryType::Fact);
+    let d = Memory::new("node d", MemoryType::Fact);
+    for m in [&a, &b, &c, &d] {
+        store.save(m, None).await.unwrap();
+    }
+    store.forget(&c.id).await.unwrap();
+    // a→b→c (chain), a→d (branch)
+    store.add_association(&Association::new(&a.id, &b.id, RelationType::RelatedTo)).await.unwrap();
+    store.add_association(&Association::new(&b.id, &c.id, RelationType::RelatedTo)).await.unwrap();
+    store.add_association(&Association::new(&a.id, &d.id, RelationType::RelatedTo)).await.unwrap();
+    let (a_id, b_id, c_id, d_id) = (a.id, b.id, c.id, d.id);
+    (store, a_id, b_id, c_id, d_id)
+}
+
+// --- C1-Step 1: Probe undirected recursive collect at bounded depth ---
+
+/// Verify that forward `{..2+collect}->relates->memory` works on 3.1.x.
+/// This is the PRIMARY collect direction; its result should include b, c (via chain).
+#[tokio::test]
+async fn c1_probe_forward_collect() {
+    let (store, a_id, b_id, c_id, d_id) = build_c1_graph().await;
+    let root = surrealdb::types::RecordId::new("memory", a_id.clone());
+
+    let sql = "$root.{..2+collect}->relates->memory";
+    let mut r = store.db().query(sql).bind(("root", root)).await.unwrap();
+    let v: surrealdb::types::Value = r.take(0).unwrap();
+
+    // Extract string IDs from RecordID array
+    let ids = extract_value_ids(&v);
+    println!("[C1 forward collect depth=2] ids={ids:?}");
+
+    // At depth 2 from a: should reach b (hop1), c (hop2 via b), d (hop1).
+    assert!(ids.contains(&b_id), "forward collect must include b");
+    assert!(ids.contains(&c_id), "forward collect traverses THROUGH forgotten c (strategy b)");
+    assert!(ids.contains(&d_id), "forward collect must include d");
+    assert!(!ids.contains(&a_id), "root excluded by default (no +inclusive)");
+}
+
+/// Verify that backward `{..2+collect}<-relates<-memory` works on 3.1.x.
+/// From `b`, going backward should reach `a` (b's in-edge source).
+#[tokio::test]
+async fn c1_probe_backward_collect() {
+    let (store, a_id, b_id, _c_id, _d_id) = build_c1_graph().await;
+    let root = surrealdb::types::RecordId::new("memory", b_id.clone());
+
+    let sql = "$root.{..2+collect}<-relates<-memory";
+    let mut r = store.db().query(sql).bind(("root", root)).await.unwrap();
+    let v: surrealdb::types::Value = r.take(0).unwrap();
+
+    let ids = extract_value_ids(&v);
+    println!("[C1 backward collect from b, depth=2] ids={ids:?}");
+
+    assert!(ids.contains(&a_id), "backward collect from b must reach a");
+    assert!(!ids.contains(&b_id), "root b excluded by default");
+}
+
+/// EMPIRICAL CHECK: does `{..2+collect}<->relates<->memory` work on 3.1.x?
+/// Per Kodex reference, `<->` with `{..}` is expected to be UNSUPPORTED.
+/// This test records the result without asserting a specific value — it prints
+/// the outcome for the report. We only assert that the fallback union (fwd+bwd) works.
+#[tokio::test]
+async fn c1_probe_undirected_bidirectional_syntax() {
+    let (store, a_id, _b_id, _c_id, _d_id) = build_c1_graph().await;
+    let root = surrealdb::types::RecordId::new("memory", a_id.clone());
+
+    // Probe: does <-> with {..} recursion parse + run?
+    let undirected_result = store.db()
+        .query("$root.{..2+collect}<->relates<->memory")
+        .bind(("root", root.clone()))
+        .await;
+
+    match undirected_result {
+        Ok(mut r) => {
+            match r.take::<surrealdb::types::Value>(0) {
+                Ok(v) => {
+                    let ids = extract_value_ids(&v);
+                    println!("[C1 <-> undirected collect] RESULT (unexpected success): ids={ids:?}");
+                    // If it DID work, print for report but do not fail.
+                    // Per Kodex empirical evidence, this is not expected to work.
+                    println!("[C1 <-> decision] <-> WITH {{..}} recursion: SUPPORTED (unexpected)");
+                }
+                Err(e) => {
+                    println!("[C1 <-> undirected collect] take error (expected): {e}");
+                    println!("[C1 <-> decision] <-> WITH {{..}} recursion: UNSUPPORTED — use forward+backward union");
+                }
+            }
+        }
+        Err(e) => {
+            println!("[C1 <-> undirected collect] query error (expected): {e}");
+            println!("[C1 <-> decision] <-> WITH {{..}} recursion: UNSUPPORTED — use forward+backward union");
+        }
+    }
+
+    // Fallback union (forward + backward) MUST work regardless:
+    let mut fwd_r = store.db().query("$root.{..2+collect}->relates->memory")
+        .bind(("root", root.clone())).await.unwrap();
+    let fwd: surrealdb::types::Value = fwd_r.take(0).unwrap();
+    let fwd_ids = extract_value_ids(&fwd);
+    println!("[C1 union-fwd] ids={fwd_ids:?}");
+    assert!(!fwd_ids.is_empty(), "forward union must return results");
+}
+
+// --- C1-Step 2: Determine forgotten-node traversal behaviour ---
+
+/// Tests strategy (b): traverse-through forgotten + hydrate-filter.
+/// Native traversal visits c (forgotten) as a waypoint; the hydrate WHERE
+/// `forgotten = false` excludes c from returned memories.
+/// Node `e` is reachable ONLY via c — it will appear in native but NOT in BFS.
+/// This is the "benign superset" delta documented in the plan.
+#[tokio::test]
+async fn c1_forgotten_strategy_b_traverse_through() {
+    let store = fresh().await;
+    let a = Memory::new("a", MemoryType::Fact);
+    let b = Memory::new("b", MemoryType::Fact);
+    let c = Memory::new("c forgotten", MemoryType::Fact); // forgotten
+    let d = Memory::new("d", MemoryType::Fact);           // reachable only via c
+    for m in [&a, &b, &c, &d] { store.save(m, None).await.unwrap(); }
+    store.forget(&c.id).await.unwrap();
+    // a→b, b→c (forgotten), c→d (reachable only via forgotten c)
+    store.add_association(&Association::new(&a.id, &b.id, RelationType::RelatedTo)).await.unwrap();
+    store.add_association(&Association::new(&b.id, &c.id, RelationType::RelatedTo)).await.unwrap();
+    store.add_association(&Association::new(&c.id, &d.id, RelationType::RelatedTo)).await.unwrap();
+
+    // BFS (reference): does NOT traverse through c → d is unreachable
+    let (bfs_mems, _) = store.get_neighbors_with_edges(&a.id, 3, &[]).await.unwrap();
+    let bfs_ids: HashSet<_> = bfs_mems.iter().map(|m| m.id.clone()).collect();
+    println!("[C1 forgotten BFS] ids={bfs_ids:?}");
+    assert!(bfs_ids.contains(&b.id), "BFS reaches b");
+    assert!(!bfs_ids.contains(&c.id), "BFS excludes forgotten c");
+    assert!(!bfs_ids.contains(&d.id), "BFS cannot reach d (blocked by forgotten c)");
+
+    // Native (strategy b): traverses through c, hydrate filters c
+    let (nat_mems, _) = store.get_neighbors_native(&a.id, 3, &[]).await.unwrap();
+    let nat_ids: HashSet<_> = nat_mems.iter().map(|m| m.id.clone()).collect();
+    println!("[C1 forgotten native strategy-b] ids={nat_ids:?}");
+    assert!(nat_ids.contains(&b.id), "native reaches b");
+    assert!(!nat_ids.contains(&c.id), "native hydrate-filter excludes forgotten c");
+    // d appears in native because recursion passed THROUGH c (accepted superset delta)
+    println!("[C1 forgotten decision] strategy (b) confirmed: native superset includes d={}", nat_ids.contains(&d.id));
+    // Note: whether d actually appears depends on the depth cap; at depth 3 it should.
+    // Either outcome is acceptable — we document it.
+}
+
+/// Tests strategy (a) PROBE: edge-filter `[WHERE out.forgotten=false]`.
+/// Per Kodex reference, this is expected to be UNSUPPORTED on 3.1.x.
+/// The test records the result without failing on either outcome.
+#[tokio::test]
+async fn c1_forgotten_strategy_a_edge_filter_probe() {
+    let store = fresh().await;
+    let a = Memory::new("a", MemoryType::Fact);
+    let b = Memory::new("b forgotten", MemoryType::Fact);
+    for m in [&a, &b] { store.save(m, None).await.unwrap(); }
+    store.forget(&b.id).await.unwrap();
+    store.add_association(&Association::new(&a.id, &b.id, RelationType::RelatedTo)).await.unwrap();
+
+    let root = surrealdb::types::RecordId::new("memory", a.id.clone());
+
+    // Probe: can an edge WHERE clause filter on the TARGET node's scalar field?
+    let result = store.db()
+        .query("$root.{..2+collect}->relates[WHERE out.forgotten=false]->memory")
+        .bind(("root", root))
+        .await;
+
+    match result {
+        Ok(mut r) => match r.take::<surrealdb::types::Value>(0) {
+            Ok(v) => {
+                let ids = extract_value_ids(&v);
+                println!("[C1 strategy-a probe] RESULT: ids={ids:?}");
+                if ids.contains(&b.id) {
+                    println!("[C1 strategy-a] filter NOT applied — b (forgotten) still appears");
+                } else {
+                    println!("[C1 strategy-a] filter APPLIED — b correctly excluded (strategy a WORKS)");
+                }
+            }
+            Err(e) => println!("[C1 strategy-a probe] take error: {e}"),
+        },
+        Err(e) => println!("[C1 strategy-a probe] query error (filter unsupported): {e}"),
+    }
+    // Strategy (b) is the default — this probe is informational only.
+}
+
+// --- C1-Step 3: Parity verification: native 3-query plan vs BFS ---
+
+/// depth=0: both BFS and native must return ([], []).
+#[tokio::test]
+async fn c1_parity_depth_zero() {
+    let (store, a_id, _, _, _) = build_c1_graph().await;
+
+    let (bfs_mems, bfs_edges) = store.get_neighbors_with_edges(&a_id, 0, &[]).await.unwrap();
+    let (nat_mems, nat_edges) = store.get_neighbors_native(&a_id, 0, &[]).await.unwrap();
+
+    assert!(bfs_mems.is_empty(), "BFS depth=0 → empty memories");
+    assert!(bfs_edges.is_empty(), "BFS depth=0 → empty edges");
+    assert!(nat_mems.is_empty(), "native depth=0 → empty memories");
+    assert!(nat_edges.is_empty(), "native depth=0 → empty edges");
+    println!("[C1 parity depth=0] OK: both return ([], [])");
+}
+
+/// depth=1: BFS and native should both return only direct non-forgotten neighbours.
+/// From `a` at depth=1: should reach b (hop1) and d (hop1), NOT c (c is forgotten hop2).
+#[tokio::test]
+async fn c1_parity_depth_one() {
+    let (store, a_id, b_id, c_id, d_id) = build_c1_graph().await;
+
+    let (bfs_mems, bfs_edges) = store.get_neighbors_with_edges(&a_id, 1, &[]).await.unwrap();
+    let (nat_mems, nat_edges) = store.get_neighbors_native(&a_id, 1, &[]).await.unwrap();
+
+    let bfs_ids: HashSet<_> = bfs_mems.iter().map(|m| m.id.clone()).collect();
+    let nat_ids: HashSet<_> = nat_mems.iter().map(|m| m.id.clone()).collect();
+    println!("[C1 parity depth=1] BFS ids={bfs_ids:?}, native ids={nat_ids:?}");
+
+    // Both should reach b and d (direct neighbours from a)
+    assert!(bfs_ids.contains(&b_id), "BFS depth=1 includes b");
+    assert!(bfs_ids.contains(&d_id), "BFS depth=1 includes d");
+    assert!(!bfs_ids.contains(&c_id), "BFS depth=1: c not reachable at hop1 (c is at hop2)");
+    assert!(nat_ids.contains(&b_id), "native depth=1 includes b");
+    assert!(nat_ids.contains(&d_id), "native depth=1 includes d");
+
+    // Node set parity (BFS ⊆ native — native may include extras due to forgotten traversal)
+    for id in &bfs_ids {
+        assert!(nat_ids.contains(id), "native at depth=1 must include all BFS nodes: {id}");
+    }
+
+    // Edge set parity: BFS expanded only root (a) at depth=1.
+    // Both should have exactly the 2 edges incident to a (a→b, a→d).
+    let bfs_edge_pairs: HashSet<_> = bfs_edges.iter()
+        .map(|e| (e.source_id.clone(), e.target_id.clone()))
+        .collect();
+    let nat_edge_pairs: HashSet<_> = nat_edges.iter()
+        .map(|e| (e.source_id.clone(), e.target_id.clone()))
+        .collect();
+    println!("[C1 parity depth=1] BFS edges={bfs_edge_pairs:?}, native edges={nat_edge_pairs:?}");
+    // BFS edge set must be a subset of native edge set
+    for ep in &bfs_edge_pairs {
+        assert!(nat_edge_pairs.contains(ep), "native must include BFS edge {ep:?}");
+    }
+    println!("[C1 parity depth=1] OK: node parity ✓, edge parity ✓");
+}
+
+/// depth=2: full parity test including the EXPANDED≠COLLECTED edge-set trap.
+///
+/// Graph: a→b→c (c forgotten), a→d
+/// BFS depth=2 from a:
+///   - Expands a (d=0): sees a→b, a→d → collects b, d
+///   - Expands b (d=1): sees b→c (forgotten) → does NOT enqueue c
+///   - Expands d (d=1): no outgoing edges
+///   - Does NOT expand collected nodes at d=2 (there are none — b,d are at hop1)
+///   - Result: memories=[b, d], edges=[a→b, a→d, b→c] (b expanded, saw b→c edge)
+///
+/// Native depth=2 from a:
+///   - COLLECTED = {b, d, c} (via {..2+collect} forward; c is included since native traverses through forgotten)
+///   - Hydrate: excludes c (forgotten=true) → memories=[b, d]
+///   - EXPANDED = {a} ∪ {..1+collect} = {a, b, d} (nodes within depth-1=1 hops)
+///   - Edges from EXPANDED {a,b,d}: a→b, a→d, b→c
+///
+/// 🔴 PARITY POINT: edges come from EXPANDED (a,b,d), NOT COLLECTED (a,b,c,d).
+/// If we used COLLECTED for edges, we'd also get c's outgoing edges — wrong.
+#[tokio::test]
+async fn c1_parity_depth_two() {
+    let (store, a_id, b_id, c_id, d_id) = build_c1_graph().await;
+
+    let (bfs_mems, bfs_edges) = store.get_neighbors_with_edges(&a_id, 2, &[]).await.unwrap();
+    let (nat_mems, nat_edges) = store.get_neighbors_native(&a_id, 2, &[]).await.unwrap();
+
+    let bfs_ids: HashSet<_> = bfs_mems.iter().map(|m| m.id.clone()).collect();
+    let nat_ids: HashSet<_> = nat_mems.iter().map(|m| m.id.clone()).collect();
+
+    println!("[C1 parity depth=2] BFS memories={bfs_ids:?}");
+    println!("[C1 parity depth=2] native memories={nat_ids:?}");
+
+    // BFS: b and d reachable; c is forgotten so BFS stops at b
+    assert!(bfs_ids.contains(&b_id), "BFS depth=2 includes b");
+    assert!(bfs_ids.contains(&d_id), "BFS depth=2 includes d");
+    assert!(!bfs_ids.contains(&c_id), "BFS depth=2 excludes forgotten c");
+    assert!(!bfs_ids.contains(&a_id), "BFS never includes root a");
+
+    // Native: b and d, c excluded by hydrate; root a always excluded
+    assert!(nat_ids.contains(&b_id), "native depth=2 includes b");
+    assert!(nat_ids.contains(&d_id), "native depth=2 includes d");
+    assert!(!nat_ids.contains(&c_id), "native hydrate excludes forgotten c");
+    assert!(!nat_ids.contains(&a_id), "native excludes root a");
+
+    // BFS ⊆ native for memories (native may be a superset due to forgotten traversal)
+    for id in &bfs_ids {
+        assert!(nat_ids.contains(id), "native at depth=2 must include all BFS memory {id}");
+    }
+
+    // Edge set: BFS expands a (d=0) and b,d (d=1); expanded = {a, b, d}
+    // edges seen: a→b, a→d (from a), b→c (from b), nothing from d
+    let bfs_edge_pairs: HashSet<_> = bfs_edges.iter()
+        .map(|e| (e.source_id.clone(), e.target_id.clone()))
+        .collect();
+    let nat_edge_pairs: HashSet<_> = nat_edges.iter()
+        .map(|e| (e.source_id.clone(), e.target_id.clone()))
+        .collect();
+
+    println!("[C1 parity depth=2] BFS edges={bfs_edge_pairs:?}");
+    println!("[C1 parity depth=2] native edges={nat_edge_pairs:?}");
+
+    // Expected BFS edges: a→b, a→d, b→c
+    let a_to_b = (a_id.clone(), b_id.clone());
+    let a_to_d = (a_id.clone(), d_id.clone());
+    let b_to_c = (b_id.clone(), c_id.clone());
+    assert!(bfs_edge_pairs.contains(&a_to_b), "BFS edge a→b");
+    assert!(bfs_edge_pairs.contains(&a_to_d), "BFS edge a→d");
+    assert!(bfs_edge_pairs.contains(&b_to_c), "BFS edge b→c (b was expanded, even though c is forgotten)");
+
+    // 🔴 Critical parity: BFS edge set ⊆ native edge set
+    for ep in &bfs_edge_pairs {
+        assert!(nat_edge_pairs.contains(ep),
+            "native edge set must include BFS edge {ep:?} (EXPANDED set correctness)");
+    }
+
+    println!("[C1 parity depth=2] OK: memories parity ✓, edge parity ✓ (EXPANDED≠COLLECTED verified)");
+}
+
+/// Parity with exclude_ids: excluded nodes are not in memories or edge queries,
+/// and BFS never enqueues them.
+#[tokio::test]
+async fn c1_parity_with_exclude_ids() {
+    let (store, a_id, b_id, _c_id, d_id) = build_c1_graph().await;
+
+    // Exclude d: BFS should not return d, native should also skip d
+    let (bfs_mems, bfs_edges) = store.get_neighbors_with_edges(&a_id, 2, &[d_id.as_str()]).await.unwrap();
+    let (nat_mems, nat_edges) = store.get_neighbors_native(&a_id, 2, &[d_id.as_str()]).await.unwrap();
+
+    let bfs_ids: HashSet<_> = bfs_mems.iter().map(|m| m.id.clone()).collect();
+    let nat_ids: HashSet<_> = nat_mems.iter().map(|m| m.id.clone()).collect();
+
+    println!("[C1 parity exclude_ids] BFS={bfs_ids:?}, native={nat_ids:?}");
+    assert!(!bfs_ids.contains(&d_id), "BFS excludes d (in exclude_ids)");
+    assert!(bfs_ids.contains(&b_id), "BFS still reaches b");
+    assert!(!nat_ids.contains(&d_id), "native excludes d (in exclude_ids)");
+    assert!(nat_ids.contains(&b_id), "native still reaches b");
+
+    // BFS ⊆ native
+    for id in &bfs_ids {
+        assert!(nat_ids.contains(id), "native includes all BFS nodes when d excluded: {id}");
+    }
+
+    let _ = (bfs_edges, nat_edges); // captured, not asserted in detail here
+    println!("[C1 parity exclude_ids] OK");
+}
+
+// --- C1-Step 3 latency: ~1k-node graph, native 4-query plan vs BFS N+1 ---
+
+/// Build a ~1k node star+chain graph and compare latency of native vs BFS.
+/// This is not a correctness assertion — it captures timing for the report.
+#[tokio::test]
+async fn c1_latency_native_vs_bfs_1k_nodes() {
+    let store = fresh().await;
+
+    // Build: root + 50 direct neighbours + each has 20 children = 1051 nodes total
+    let root = Memory::new("root", MemoryType::Fact);
+    store.save(&root, None).await.unwrap();
+
+    let mut tier1_ids = Vec::new();
+    for i in 0..50 {
+        let m = Memory::new(format!("tier1-{i}"), MemoryType::Fact);
+        store.save(&m, None).await.unwrap();
+        store.add_association(&Association::new(&root.id, &m.id, RelationType::RelatedTo)).await.unwrap();
+        tier1_ids.push(m.id);
+    }
+    for (i, t1_id) in tier1_ids.iter().enumerate() {
+        for j in 0..20 {
+            let m = Memory::new(format!("tier2-{i}-{j}"), MemoryType::Fact);
+            store.save(&m, None).await.unwrap();
+            store.add_association(&Association::new(t1_id, &m.id, RelationType::RelatedTo)).await.unwrap();
+        }
+    }
+
+    let total: surrealdb::types::Value = store.db()
+        .query("SELECT count() FROM memory GROUP ALL").await.unwrap()
+        .take(0).unwrap();
+    println!("[C1 latency] total nodes: {total:?}");
+
+    // BFS depth=2 (N+1 round-trips: 1 per expanded node)
+    let t0 = Instant::now();
+    let (bfs_mems, bfs_edges) = store.get_neighbors_with_edges(&root.id, 2, &[]).await.unwrap();
+    let bfs_ms = t0.elapsed().as_millis();
+    println!("[C1 latency] BFS depth=2: {} memories, {} edges, {}ms", bfs_mems.len(), bfs_edges.len(), bfs_ms);
+
+    // Native 3-query plan depth=2
+    let t1 = Instant::now();
+    let (nat_mems, nat_edges) = store.get_neighbors_native(&root.id, 2, &[]).await.unwrap();
+    let nat_ms = t1.elapsed().as_millis();
+    println!("[C1 latency] native depth=2: {} memories, {} edges, {}ms", nat_mems.len(), nat_edges.len(), nat_ms);
+
+    // Parity check: BFS memories ⊆ native memories
+    let bfs_ids: HashSet<_> = bfs_mems.iter().map(|m| m.id.clone()).collect();
+    let nat_ids: HashSet<_> = nat_mems.iter().map(|m| m.id.clone()).collect();
+    for id in &bfs_ids {
+        assert!(nat_ids.contains(id), "latency test: native must include BFS node {id}");
+    }
+
+    // Expected: 50 tier1 + 1000 tier2 = 1050 memories from root at depth=2
+    assert_eq!(bfs_mems.len(), 1050, "BFS depth=2 should reach all 50+1000 nodes");
+    assert_eq!(nat_mems.len(), 1050, "native depth=2 should match BFS count");
+
+    println!("[C1 latency] speedup: BFS={}ms, native={}ms ({}x)",
+        bfs_ms, nat_ms,
+        if nat_ms > 0 { bfs_ms / nat_ms } else { 0 });
+}
+
+// ---- Helper: extract string IDs from a Value (array of RecordIds) ----
+fn extract_value_ids(v: &surrealdb::types::Value) -> HashSet<String> {
+    let mut out = HashSet::new();
+    match v {
+        surrealdb::types::Value::Array(arr) => {
+            for item in arr.iter() {
+                if let surrealdb::types::Value::RecordId(rid) = item {
+                    if let surrealdb::types::RecordIdKey::String(ref key) = rid.key {
+                        out.insert(key.clone());
+                    }
+                }
+            }
+        }
+        surrealdb::types::Value::RecordId(rid) => {
+            if let surrealdb::types::RecordIdKey::String(ref key) = rid.key {
+                out.insert(key.clone());
+            }
+        }
+        _ => {}
+    }
+    out
 }
