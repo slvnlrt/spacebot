@@ -1,8 +1,9 @@
 //! Memory search: hybrid (vector + FTS + RRF + graph), temporal, importance, and typed queries.
 
 use crate::error::Result;
+use crate::memory::backend::MemoryBackend;
 use crate::memory::types::{Memory, MemorySearchResult, MemoryType, RelationType};
-use crate::memory::{EmbeddingModel, EmbeddingTable, MemoryStore};
+use crate::memory::EmbeddingModel;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -35,16 +36,14 @@ pub enum SearchSort {
 
 /// Bundles all memory search dependencies.
 pub struct MemorySearch {
-    store: Arc<MemoryStore>,
-    embedding_table: EmbeddingTable,
+    backend: Arc<dyn MemoryBackend>,
     embedding_model: Arc<EmbeddingModel>,
 }
 
 impl Clone for MemorySearch {
     fn clone(&self) -> Self {
         Self {
-            store: Arc::clone(&self.store),
-            embedding_table: self.embedding_table.clone(),
+            backend: Arc::clone(&self.backend),
             embedding_model: Arc::clone(&self.embedding_model),
         }
     }
@@ -53,43 +52,33 @@ impl Clone for MemorySearch {
 impl std::fmt::Debug for MemorySearch {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("MemorySearch")
-            .field("store", &self.store)
+            .field("backend", &self.backend)
             .finish_non_exhaustive()
     }
 }
 
 impl MemorySearch {
     /// Create a new MemorySearch instance.
-    pub fn new(
-        store: Arc<MemoryStore>,
-        embedding_table: EmbeddingTable,
-        embedding_model: Arc<EmbeddingModel>,
-    ) -> Self {
+    pub fn new(backend: Arc<dyn MemoryBackend>, embedding_model: Arc<EmbeddingModel>) -> Self {
         Self {
-            store,
-            embedding_table,
+            backend,
             embedding_model,
         }
     }
 
-    /// Get a reference to the memory store.
-    pub fn store(&self) -> &MemoryStore {
-        &self.store
-    }
-
-    /// Get a reference to the embedding table.
-    pub fn embedding_table(&self) -> &EmbeddingTable {
-        &self.embedding_table
-    }
-
-    /// Get a reference to the embedding model.
-    pub fn embedding_model(&self) -> &EmbeddingModel {
-        &self.embedding_model
+    /// Get a reference to the backend.
+    pub fn backend(&self) -> &Arc<dyn MemoryBackend> {
+        &self.backend
     }
 
     /// Get a shared handle to the embedding model (for async embed_one).
     pub fn embedding_model_arc(&self) -> &Arc<EmbeddingModel> {
         &self.embedding_model
+    }
+
+    /// Get the agent ID this search instance is scoped to.
+    pub fn agent_id(&self) -> &str {
+        self.backend.agent_id()
     }
 
     /// Unified search entry point. Dispatches to the appropriate strategy
@@ -108,7 +97,7 @@ impl MemorySearch {
 
         #[cfg(feature = "metrics")]
         {
-            let agent_id = self.store.agent_id();
+            let agent_id = self.backend.agent_id();
             let agent_label = if agent_id.is_empty() {
                 "unknown"
             } else {
@@ -131,7 +120,7 @@ impl MemorySearch {
         config: &SearchConfig,
     ) -> Result<Vec<MemorySearchResult>> {
         let memories = self
-            .store
+            .backend
             .get_sorted(sort, config.max_results as i64, config.memory_type)
             .await?;
 
@@ -173,13 +162,13 @@ impl MemorySearch {
         // FTS requires an inverted index. If the index doesn't exist yet (empty
         // table, first run) this will fail — fall back to vector + graph search.
         match self
-            .embedding_table
+            .backend
             .text_search(query, config.max_results_per_source)
             .await
         {
             Ok(fts_matches) => {
                 for (memory_id, score) in fts_matches {
-                    if let Some(memory) = self.store.load(&memory_id).await?
+                    if let Some(memory) = self.backend.load(&memory_id).await?
                         && !memory.forgotten
                     {
                         fts_results.push(ScoredMemory {
@@ -197,14 +186,14 @@ impl MemorySearch {
         // 2. Vector similarity search via LanceDB
         let query_embedding = self.embedding_model.embed_one(query).await?;
         match self
-            .embedding_table
+            .backend
             .vector_search(&query_embedding, config.max_results_per_source)
             .await
         {
             Ok(vector_matches) => {
                 for (memory_id, distance) in vector_matches {
                     let similarity = 1.0 - distance;
-                    if let Some(memory) = self.store.load(&memory_id).await?
+                    if let Some(memory) = self.backend.load(&memory_id).await?
                         && !memory.forgotten
                     {
                         vector_results.push(ScoredMemory {
@@ -221,7 +210,7 @@ impl MemorySearch {
 
         // 3. Graph traversal from high-importance memories
         // Get identity and high-importance memories as starting points
-        let seed_memories = self.store.get_high_importance(0.8, 20).await?;
+        let seed_memories = self.backend.get_high_importance(0.8, 20).await?;
 
         for seed in seed_memories {
             // Check if seed is semantically related to query via simple keyword matching
@@ -287,7 +276,7 @@ impl MemorySearch {
                 continue;
             }
 
-            let associations = self.store.get_associations(&current_id).await?;
+            let associations = self.backend.get_associations(&current_id).await?;
 
             for assoc in associations {
                 // Get the related memory
@@ -302,7 +291,7 @@ impl MemorySearch {
                 }
                 visited.insert(related_id.clone());
 
-                if let Some(memory) = self.store.load(related_id).await? {
+                if let Some(memory) = self.backend.load(related_id).await? {
                     if memory.forgotten {
                         continue;
                     }
@@ -442,6 +431,9 @@ pub fn curate_results(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::memory::backend::SqliteBackend;
+    use crate::memory::lance::EmbeddingTable;
+    use crate::memory::store::MemoryStore;
     use crate::memory::types::MemoryType;
     use chrono::{Duration, Utc};
 
@@ -581,7 +573,8 @@ mod tests {
             .unwrap();
         let embedding_table = EmbeddingTable::open_or_create(&lance_conn).await.unwrap();
         let embedding_model = Arc::new(EmbeddingModel::new(lance_dir.path()).unwrap());
-        let search = MemorySearch::new(store, embedding_table, embedding_model);
+        let backend = Arc::new(SqliteBackend::new(store, embedding_table));
+        let search = MemorySearch::new(backend, embedding_model);
 
         let config = SearchConfig {
             mode: SearchMode::Recent,
@@ -609,7 +602,8 @@ mod tests {
             .unwrap();
         let embedding_table = EmbeddingTable::open_or_create(&lance_conn).await.unwrap();
         let embedding_model = Arc::new(EmbeddingModel::new(lance_dir.path()).unwrap());
-        let search = MemorySearch::new(store, embedding_table, embedding_model);
+        let backend = Arc::new(SqliteBackend::new(store, embedding_table));
+        let search = MemorySearch::new(backend, embedding_model);
 
         let config = SearchConfig {
             mode: SearchMode::Important,
@@ -634,7 +628,8 @@ mod tests {
             .unwrap();
         let embedding_table = EmbeddingTable::open_or_create(&lance_conn).await.unwrap();
         let embedding_model = Arc::new(EmbeddingModel::new(lance_dir.path()).unwrap());
-        let search = MemorySearch::new(store, embedding_table, embedding_model);
+        let backend = Arc::new(SqliteBackend::new(store, embedding_table));
+        let search = MemorySearch::new(backend, embedding_model);
 
         let config = SearchConfig {
             mode: SearchMode::Typed,
@@ -659,7 +654,8 @@ mod tests {
             .unwrap();
         let embedding_table = EmbeddingTable::open_or_create(&lance_conn).await.unwrap();
         let embedding_model = Arc::new(EmbeddingModel::new(lance_dir.path()).unwrap());
-        let search = MemorySearch::new(store, embedding_table, embedding_model);
+        let backend = Arc::new(SqliteBackend::new(store, embedding_table));
+        let search = MemorySearch::new(backend, embedding_model);
 
         let config = SearchConfig {
             mode: SearchMode::Typed,

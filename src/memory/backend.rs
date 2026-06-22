@@ -14,7 +14,7 @@ use crate::memory::types::{Association, Memory, MemoryType};
 /// etc.) and vector/FTS search (LanceDB, etc.) behind a single async interface.
 /// All provided methods delegate to the underlying stores.
 #[async_trait]
-pub trait MemoryBackend: Send + Sync {
+pub trait MemoryBackend: Send + Sync + std::fmt::Debug {
     /// The agent ID this backend is scoped to (empty string if none).
     fn agent_id(&self) -> &str;
 
