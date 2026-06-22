@@ -482,7 +482,10 @@ mod tests {
         be.forget(&a.id).await.unwrap();
         let got = be.load_many(&[a.id.clone()]).await.unwrap();
         assert_eq!(got.len(), 1, "load_many must return forgotten rows");
-        assert!(got[0].forgotten, "the returned row must be marked forgotten");
+        assert!(
+            got[0].forgotten,
+            "the returned row must be marked forgotten"
+        );
     }
 
     #[tokio::test]

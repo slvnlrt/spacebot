@@ -480,12 +480,7 @@ impl SurrealMemoryStore {
         // NOTE: No `AND forgotten = false` — must return forgotten rows.
         // The caller (traverse_graph) marks visited then skips forgotten in Rust.
         let sql = format!("SELECT {MEMORY_COLS} FROM memory WHERE id IN $ids");
-        let mut r = self
-            .db
-            .query(sql)
-            .bind(("ids", recs))
-            .await
-            .map_err(err)?;
+        let mut r = self.db.query(sql).bind(("ids", recs)).await.map_err(err)?;
         let rows: Vec<MemoryRow> = r.take(0).map_err(err)?;
         Ok(rows.into_iter().map(Memory::from).collect())
     }
@@ -1415,10 +1410,7 @@ mod tests {
             .await
             .unwrap();
         // incident to {a}: only a→b
-        let e = store
-            .get_associations_for(&[a.id.clone()])
-            .await
-            .unwrap();
+        let e = store.get_associations_for(&[a.id.clone()]).await.unwrap();
         assert_eq!(e.len(), 1);
         assert_eq!(e[0].source_id, a.id);
         // incident to {a, c}: a→b (a is source) and b→c (c is target)

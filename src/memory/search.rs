@@ -760,8 +760,7 @@ mod tests {
     //
     // Expected BFS push order: [A, D, B, C, E]
 
-    async fn build_traverse_graph_fixture(
-    ) -> (MemorySearch, String, tempfile::TempDir) {
+    async fn build_traverse_graph_fixture() -> (MemorySearch, String, tempfile::TempDir) {
         use crate::memory::types::Association;
 
         let store = crate::memory::MemoryStore::connect_in_memory().await;
@@ -834,11 +833,12 @@ mod tests {
             results.len(),
             expected.len(),
             "result count mismatch: got {:?}",
-            results.iter().map(|r| &r.memory.content).collect::<Vec<_>>()
+            results
+                .iter()
+                .map(|r| &r.memory.content)
+                .collect::<Vec<_>>()
         );
-        for (i, (r, (exp_content, exp_score))) in
-            results.iter().zip(expected.iter()).enumerate()
-        {
+        for (i, (r, (exp_content, exp_score))) in results.iter().zip(expected.iter()).enumerate() {
             assert_eq!(
                 r.memory.content, *exp_content,
                 "position {i}: expected content {exp_content:?}, got {:?}",
@@ -851,11 +851,15 @@ mod tests {
             );
         }
         assert!(
-            results.iter().all(|r| r.memory.content != "node F forgotten"),
+            results
+                .iter()
+                .all(|r| r.memory.content != "node F forgotten"),
             "forgotten node F must not appear in results"
         );
         assert!(
-            results.iter().all(|r| r.memory.content != "node G (unreachable)"),
+            results
+                .iter()
+                .all(|r| r.memory.content != "node G (unreachable)"),
             "depth-bounded node G must not appear in results"
         );
     }
