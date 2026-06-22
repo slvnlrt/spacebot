@@ -44,6 +44,9 @@ ORT_LIB_LOCATION=/tmp/ortlib ORT_PREFER_DYNAMIC_LINK=1 \
 cargo test --features surreal-memory --test surreal_memory   # 7 store-primitive tests
 cargo test --features surreal-memory --lib memory::surreal_store  # get_associations_between
 
+# Cut an existing agent's memory over to SurrealDB (daemon must be STOPPED):
+#   spacebot migrate-memory [--agent <id>]   (feature-gated; refuses if the daemon runs)
+
 # RAM/disk safety: wrap heavy cargo in `systemd-run --scope -p MemoryMax=40G -p MemorySwapMax=0 …`;
 # CARGO_BUILD_JOBS is capped (8) globally. Do NOT use the ORT_LIB_LOCATION bypass when you
 # want to RUN tests — it only satisfies compile-check; real ort is available here.
@@ -71,15 +74,27 @@ level-by-level — O(depth)×2 queries instead of O(nodes). Behaviour-preserving
 (golden characterization test; the generic scoring/selective-expansion logic
 stays in `search.rs`, no per-backend duplication).
 
+## Plan E — DONE (2026-06-22)
+
+`docs/superpowers/plans/2026-06-22-plan-e-migration-cli-dedup.md`.
+- **Migration CLI (#15)** — `spacebot migrate-memory [--agent <id>]` (feature-gated):
+  refuses if the daemon is running, iterates `resolve_agents()`, builds the SQLite
+  source + SurrealKV target per agent, runs `migrate_from_sqlite`. Run it stopped to
+  cut an existing agent over to SurrealDB.
+- **Construction dedup (#14)** — `crate::memory::sqlite_backend_arc` helper.
+
 ## What's still NOT done
 
-1. **Migration wiring** (#15) — `surreal_migrate` has no runtime caller; needs a
-   CLI/tool entry before an existing agent can be switched to `surreal` with its data.
-2. **CI buildability (#8)** — add a feature-on build/clippy job so the gated code can't rot.
-3. **Dependency-weight / slim build (#9)** — deferred per owner. Measured: +50 MiB (+18%)
-   for embedding both backends; the slim path is dropping Lance (memory-only), not SQLite.
-4. Cosmetic: SQLite construction branch duplicated 4× (#14). (#10/#11/#12 triaged as
-   accept/won't-fix — see followups.md.)
+1. **Dependency-weight / slim build (#9)** — DEFERRED per owner. Measured: +50 MiB
+   (+18%) for embedding both backends; the slim path is dropping Lance (memory-only),
+   not SQLite (the app DB). Needs compile-time-exclusive backend selection.
+2. Accepted / won't-fix: `Association.id` synthesized (#10), schema re-applied per
+   open (#11), `migrate` not transactional (#12, idempotent), C5 bench p99 sampling
+   (#17). See `followups.md` for rationale.
+
+**Everything else is DONE.** The branch is feature-complete and merge-ready (default
+build unaffected; both configs gate-green; SurrealDB runtime-validated; backup story
+verified; CI covers the feature; migration cutover available).
 
 ## Decisions
 
