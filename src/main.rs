@@ -52,6 +52,14 @@ enum Command {
     /// Manage secrets stored in the running instance
     #[command(subcommand)]
     Secrets(SecretsCommand),
+    /// Migrate an agent's SQLite+LanceDB memory into the embedded SurrealDB store.
+    /// Run with the daemon STOPPED. Requires the `surreal-memory` feature.
+    #[cfg(feature = "surreal-memory")]
+    MigrateMemory {
+        /// Agent id to migrate (default: all configured agents).
+        #[arg(long)]
+        agent: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -380,6 +388,8 @@ fn main() -> anyhow::Result<()> {
         Command::Skill(skill_cmd) => cmd_skill(cli.config, skill_cmd),
         Command::Auth(auth_cmd) => cmd_auth(cli.config, auth_cmd),
         Command::Secrets(secrets_cmd) => cmd_secrets(cli.config, secrets_cmd),
+        #[cfg(feature = "surreal-memory")]
+        Command::MigrateMemory { agent } => cmd_migrate_memory(cli.config, agent),
     }
 }
 
@@ -1124,6 +1134,73 @@ async fn secrets_api_delete(
         .await
         .context("failed to connect to spacebot API — is the daemon running?")?;
     Ok(response)
+}
+
+#[cfg(feature = "surreal-memory")]
+fn cmd_migrate_memory(
+    config_path: Option<std::path::PathBuf>,
+    agent: Option<String>,
+) -> anyhow::Result<()> {
+    let config = load_config(&config_path)?;
+
+    // Daemon-running guard — use the LOADED config's instance_dir (not from_default()),
+    // so --config is respected and we probe the correct instance.
+    let paths = spacebot::daemon::DaemonPaths::new(&config.instance_dir);
+    if spacebot::daemon::is_running(&paths).is_some() {
+        anyhow::bail!(
+            "the spacebot daemon is running — stop it before migrating memory \
+             (concurrent writes would corrupt the migration)"
+        );
+    }
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("failed to build tokio runtime")?;
+
+    runtime.block_on(async move {
+        // Select agents from resolved configs (ResolvedAgentConfig has .id and .data_dir).
+        let resolved = config.resolve_agents();
+        let targets: Vec<_> = match &agent {
+            Some(id) => resolved.into_iter().filter(|a| &a.id == id).collect(),
+            None => resolved,
+        };
+        if let Some(id) = &agent
+            && targets.is_empty()
+        {
+            anyhow::bail!("no agent '{id}' in config");
+        }
+
+        // Shared EmbeddingModel (Arc — migrate_from_sqlite wants &Arc<EmbeddingModel>).
+        let embedding_model = std::sync::Arc::new(
+            spacebot::memory::EmbeddingModel::new(
+                &config.instance_dir.join("embedding_cache"),
+            )?,
+        );
+
+        for a in &targets {
+            let db = spacebot::db::Db::connect(&a.data_dir).await?;
+            let source =
+                spacebot::memory::MemoryStore::with_agent_id(db.sqlite.clone(), &a.id);
+            let target = spacebot::memory::SurrealMemoryStore::open(
+                &a.data_dir,
+                &a.id,
+                spacebot::memory::lance::EMBEDDING_DIM as usize,
+            )
+            .await?;
+            let report = spacebot::memory::surreal_migrate::migrate_from_sqlite(
+                &source,
+                &embedding_model,
+                &target,
+            )
+            .await?;
+            println!(
+                "agent {}: migrated {} memories, {} associations",
+                a.id, report.memories, report.associations
+            );
+        }
+        anyhow::Ok(())
+    })
 }
 
 fn cmd_skill(
