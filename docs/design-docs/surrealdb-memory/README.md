@@ -42,6 +42,7 @@ SurrealDB to it + wired the per-agent config selector.
 | [`followups.md`](./followups.md) | Self-review of the **implementation**: fixed items, open items, deferred items, and verified non-issues. The to-do backlog. |
 | [`handoff.md`](./handoff.md) | Current state, what landed where, how to build/run/test, and the concrete next steps + open decisions for the next session. |
 | [`PR.md`](./PR.md) | Draft PR description for the branch (title, summary, safety, verification, review path). Not opened — copy into the PR body when ready. |
+| [`research-llm-memory-feasibility.md`](./research-llm-memory-feasibility.md) | **Foundational research** (imported from Kodex). State-of-the-art survey of LLM memory systems (Mem0, Zep/Graphiti, Cognee, Letta/MemGPT, MemOS, Neo4j/SurrealDB agent memory), convergent architectural patterns, and the target SurrealDB memory architecture. The "why" behind this branch. |
 
 ## Code map (current)
 
