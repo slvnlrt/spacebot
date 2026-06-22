@@ -60,3 +60,24 @@ jobs:
 
       - name: cargo test (lib)
         run: cargo test --lib
+
+  check-surreal:
+    name: Check & Clippy (surreal-memory feature)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Compile-checks the `surreal-memory`-gated code (off by default) so it
+      # can't rot. `-Dwarnings` (global env) catches lints like clippy::useless_vec.
+      # ort downloads onnxruntime at build time (same as the default jobs).
+      - name: cargo clippy (surreal-memory)
+        run: cargo clippy --all-targets --features surreal-memory
