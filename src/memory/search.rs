@@ -285,10 +285,12 @@ impl MemorySearch {
             // One query for all edges incident to this level's frontier.
             let all_edges = self.backend.get_associations_for(&frontier).await?;
 
-            // Group edges by the frontier node they are incident to.
-            // If an edge connects two frontier nodes, assign it to the one that
-            // appears first in `frontier` — the inline `visited` update in the
-            // pass below ensures the correct first-seen winner regardless.
+            // Group edges by the frontier node they are incident to (preferring
+            // the source endpoint when both are in the frontier). An edge whose
+            // BOTH endpoints are in the frontier is inert: every node enters the
+            // frontier only after being inserted into `visited`, so neither
+            // endpoint can be a new neighbour. Single-incident edges are the only
+            // ones that produce neighbours.
             let mut by_node: std::collections::HashMap<
                 &str,
                 Vec<&crate::memory::types::Association>,
