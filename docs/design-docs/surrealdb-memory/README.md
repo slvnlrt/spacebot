@@ -41,6 +41,7 @@ SurrealDB to it + wired the per-agent config selector.
 | [`gotchas.md`](./gotchas.md) | SurrealDB v3.1.5 / Rust-SDK landmines learned the hard way (function renames, operator quirks, RELATE endpoints, transactions, the ONNX build workaround). Read before touching the code. |
 | [`followups.md`](./followups.md) | Self-review of the **implementation**: fixed items, open items, deferred items, and verified non-issues. The to-do backlog. |
 | [`handoff.md`](./handoff.md) | Current state, what landed where, how to build/run/test, and the concrete next steps + open decisions for the next session. |
+| [`PR.md`](./PR.md) | Draft PR description for the branch (title, summary, safety, verification, review path). Not opened — copy into the PR body when ready. |
 
 ## Code map (current)
 
