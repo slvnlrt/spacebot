@@ -165,6 +165,9 @@ impl MemoryBackend for SqliteBackend {
     }
 
     async fn set_embedding(&self, memory: &Memory, embedding: &[f32]) -> Result<()> {
+        // EmbeddingTable::store is an append, not an upsert — delete any
+        // existing vector first so "set" replaces rather than duplicates.
+        self.embeddings.delete(&memory.id).await?;
         self.embeddings
             .store(&memory.id, &memory.content, embedding)
             .await
@@ -420,5 +423,20 @@ mod tests {
         assert_eq!(n, 1);
         assert!(be.load(&low.id).await.unwrap().is_none());
         assert!(be.load(&ident.id).await.unwrap().is_some()); // identity preserved
+    }
+
+    #[tokio::test]
+    async fn set_embedding_replaces_does_not_duplicate() {
+        let (be, _dir) = sqlite_backend().await;
+        let m = Memory::new("the sky is blue", MemoryType::Fact);
+        be.save(&m, Some(&vec![0.1_f32; DIM])).await.unwrap();
+
+        // Re-embed the same memory; store is an append, so set_embedding must
+        // delete the old vector first or KNN would surface two rows for one id.
+        be.set_embedding(&m, &vec![0.9_f32; DIM]).await.unwrap();
+
+        let hits = be.vector_search(&vec![0.9_f32; DIM], 10).await.unwrap();
+        let occurrences = hits.iter().filter(|(id, _)| id == &m.id).count();
+        assert_eq!(occurrences, 1, "set_embedding must replace, not duplicate");
     }
 }
