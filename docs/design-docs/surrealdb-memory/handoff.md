@@ -49,22 +49,30 @@ cargo test --features surreal-memory --lib memory::surreal_store  # get_associat
 # want to RUN tests — it only satisfies compile-check; real ort is available here.
 ```
 
-## What's NOT done — this is **Plan C**
+## Plan C — DONE (2026-06-22)
 
-(`docs/superpowers/plans/` — Plan C not yet written.)
+`docs/superpowers/plans/2026-06-22-surreal-plan-c-native-recursion.md`. Tasks C1–C6:
+- **Native graph recursion** — `SurrealMemoryStore::get_neighbors` now uses
+  `{..N+collect}` (forward+backward union) + hydrate + incident-edge query (3–4
+  fixed queries vs N+1 BFS; ~1.8× faster in-mem, more on disk). De-risked in the
+  spike first, ported with parity tests (the EXPANDED≠COLLECTED edge-set trap +
+  depth==0 guard handled; forgotten-traversal = documented benign superset).
+- **FTS stemming** (#5) — `snowball(english)` on `memory_an`.
+- **EF tuning + recall** (#6, #7) — benchmarked at 384-dim (recall@10=1.0; EF floor
+  40→80 to kill a tail-latency pathology).
+- **Landmine** (#13) — dead `build_channel_context` removed.
 
-1. **Native graph recursion** — `SurrealMemoryStore::get_neighbors` + the hybrid
-   search seed-traversal still use a **hand-rolled BFS** (N+1 round-trips). Replace
-   with SurrealDB `$root.{..N+collect}->relates->memory` + a single hydrate, and
-   `{..N+shortest}` for paths. This was the original motivation (`README.md`). See
-   `/opt/Kodex/docs/references/surrealdb-v3/graph-traversal.md` (empirical reference).
-2. **FTS parity (`followups.md` #5)** — add `snowball(english)` to the `memory_an`
-   analyzer to approach Tantivy stemming.
-3. **EF tuning + 384-dim recall benchmark (#6, #7)** — store primitives now run at
-   384-dim, but HNSW recall/latency on a realistic corpus is unmeasured; `EF=(limit*4).max(40)` is a guess.
-4. **CI buildability of the feature (#8)** and **dependency-weight measurement (#9)**.
-5. **Migration wiring** — `surreal_migrate` has no runtime caller; needs a CLI/tool
-   entry if migrating existing SQLite+Lance data into SurrealDB is wanted.
+## What's still NOT done (post–Plan C)
+
+1. **`MemorySearch::traverse_graph` N+1** (`followups.md` #16) — the hybrid-search
+   seed traversal still does per-node `get_associations`+`load`. Native recursion
+   only replaced the API graph-view path (`get_neighbors`). Needs a trait method or
+   backend fast-path with scoring hooks.
+2. **Migration wiring** (#15) — `surreal_migrate` has no runtime caller; needs a
+   CLI/tool entry before an existing agent can be switched to `surreal` with its data.
+3. **CI buildability (#8), dependency-weight / Lance removal (#9)** — open.
+4. **Decision (C) SurrealKV backup/restore** — still required before enabling
+   `surreal` by default in production.
 
 ## Decisions
 
