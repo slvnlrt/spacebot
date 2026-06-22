@@ -534,9 +534,8 @@ impl SurrealMemoryStore {
         let memories = if collected_rids.is_empty() {
             vec![]
         } else {
-            let sql = format!(
-                "SELECT {MEMORY_COLS} FROM memory WHERE id IN $ids AND forgotten = false"
-            );
+            let sql =
+                format!("SELECT {MEMORY_COLS} FROM memory WHERE id IN $ids AND forgotten = false");
             let mut r = self
                 .db
                 .query(sql)
@@ -977,7 +976,10 @@ mod tests {
     }
 
     fn mem_forgotten(id: &str) -> Memory {
-        Memory { forgotten: true, ..mem(id) }
+        Memory {
+            forgotten: true,
+            ..mem(id)
+        }
     }
 
     /// Collect memory ids from the result, sorted for deterministic comparison.
@@ -1071,16 +1073,27 @@ mod tests {
 
         let (mems, edges) = store.get_neighbors(&a.id, 1, &[]).await.unwrap();
         let returned_ids = mem_ids(&mems);
-        assert_eq!(returned_ids, vec!["gn-d1-b", "gn-d1-c"],
-            "depth=1 must collect exactly b and c (direct neighbours of a)");
-        assert!(!returned_ids.contains(&"gn-d1-a".to_string()),
-            "start node must not appear in returned memories");
-        assert!(!returned_ids.contains(&"gn-d1-d".to_string()),
-            "d is 2 hops away; must not appear at depth=1");
+        assert_eq!(
+            returned_ids,
+            vec!["gn-d1-b", "gn-d1-c"],
+            "depth=1 must collect exactly b and c (direct neighbours of a)"
+        );
+        assert!(
+            !returned_ids.contains(&"gn-d1-a".to_string()),
+            "start node must not appear in returned memories"
+        );
+        assert!(
+            !returned_ids.contains(&"gn-d1-d".to_string()),
+            "d is 2 hops away; must not appear at depth=1"
+        );
 
         // Edges from EXPANDED = {a}: a→b and a→c.
         let ep = edge_pairs(&edges);
-        assert_eq!(ep.len(), 2, "depth=1 edges: only the 2 edges incident to root");
+        assert_eq!(
+            ep.len(),
+            2,
+            "depth=1 edges: only the 2 edges incident to root"
+        );
         assert!(ep.contains(&("gn-d1-a".to_string(), "gn-d1-b".to_string())));
         assert!(ep.contains(&("gn-d1-a".to_string(), "gn-d1-c".to_string())));
     }
@@ -1115,15 +1128,24 @@ mod tests {
 
         let (mems, edges) = store.get_neighbors(&a.id, 2, &[]).await.unwrap();
         let returned_ids = mem_ids(&mems);
-        assert_eq!(returned_ids, vec!["gn-d2-b", "gn-d2-c", "gn-d2-d"],
-            "depth=2 must collect b (forward-1), c (forward-2), d (backward-1)");
-        assert!(!returned_ids.contains(&"gn-d2-a".to_string()),
-            "start node must be excluded from memories");
+        assert_eq!(
+            returned_ids,
+            vec!["gn-d2-b", "gn-d2-c", "gn-d2-d"],
+            "depth=2 must collect b (forward-1), c (forward-2), d (backward-1)"
+        );
+        assert!(
+            !returned_ids.contains(&"gn-d2-a".to_string()),
+            "start node must be excluded from memories"
+        );
 
         let ep = edge_pairs(&edges);
         // Expanded = {a, b, d}: edges incident to those nodes.
         // a→b (a expanded), b→c (b expanded), d→a (d expanded).
-        assert_eq!(ep.len(), 3, "3 distinct edges incident to expanded set {{a,b,d}}");
+        assert_eq!(
+            ep.len(),
+            3,
+            "3 distinct edges incident to expanded set {{a,b,d}}"
+        );
         assert!(ep.contains(&("gn-d2-a".to_string(), "gn-d2-b".to_string())));
         assert!(ep.contains(&("gn-d2-b".to_string(), "gn-d2-c".to_string())));
         assert!(ep.contains(&("gn-d2-d".to_string(), "gn-d2-a".to_string())));
@@ -1180,8 +1202,14 @@ mod tests {
             "start node must never appear in returned memories"
         );
         // b and c are reachable without going through excl.
-        assert!(returned_ids.contains(&b.id), "b must be returned (not excluded)");
-        assert!(returned_ids.contains(&c.id), "c must be returned (not excluded)");
+        assert!(
+            returned_ids.contains(&b.id),
+            "b must be returned (not excluded)"
+        );
+        assert!(
+            returned_ids.contains(&c.id),
+            "c must be returned (not excluded)"
+        );
     }
 
     /// Forgotten node — strategy (b) documented delta.
