@@ -65,11 +65,9 @@ async fn bootstrap_deps() -> anyhow::Result<(spacebot::AgentDeps, spacebot::conf
         eprintln!("warning: FTS index creation failed: {error}");
     }
 
-    let memory_search = Arc::new(spacebot::memory::MemorySearch::new(
-        memory_store,
-        embedding_table,
-        embedding_model,
-    ));
+    let backend: std::sync::Arc<dyn spacebot::memory::MemoryBackend> =
+        std::sync::Arc::new(spacebot::memory::SqliteBackend::new(memory_store, embedding_table));
+    let memory_search = Arc::new(spacebot::memory::MemorySearch::new(backend, embedding_model));
     let task_store = Arc::new(spacebot::tasks::TaskStore::new(db.sqlite.clone()));
 
     let identity = spacebot::identity::Identity::load(&agent_config.workspace).await;

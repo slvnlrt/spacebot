@@ -433,7 +433,6 @@ mod tests {
     use super::*;
     use crate::memory::backend::SqliteBackend;
     use crate::memory::lance::EmbeddingTable;
-    use crate::memory::store::MemoryStore;
     use crate::memory::types::MemoryType;
     use chrono::{Duration, Utc};
 

@@ -1,7 +1,7 @@
 //! Memory maintenance integration coverage.
 
 use spacebot::memory::maintenance::{run_maintenance, run_maintenance_with_cancel};
-use spacebot::memory::{MemoryStore, RelationType, maintenance::MaintenanceConfig};
+use spacebot::memory::{MemoryBackend, MemoryStore, RelationType, SqliteBackend, maintenance::MaintenanceConfig};
 use std::sync::{Arc, OnceLock};
 use tempfile::tempdir;
 use tokio::sync::watch;
@@ -123,10 +123,11 @@ async fn maintenance_run_merges_duplicate_memory_and_links_updates_edge() {
         .await
         .expect("failed to create part-of association");
 
+    let backend: std::sync::Arc<dyn MemoryBackend> =
+        std::sync::Arc::new(SqliteBackend::new(store.clone(), embedding_table.clone()));
     let report = run_maintenance(
-        &store,
-        &embedding_table,
-        &embedding_model,
+        backend,
+        embedding_model.clone(),
         &MaintenanceConfig {
             prune_threshold: 0.2,
             decay_rate: 0.05,
@@ -184,11 +185,12 @@ async fn maintenance_run_can_be_cancelled() {
     let (cancel_tx, cancel_rx) = watch::channel(false);
     cancel_tx.send_replace(true);
 
+    let backend: std::sync::Arc<dyn MemoryBackend> =
+        std::sync::Arc::new(SqliteBackend::new(store.clone(), embedding_table.clone()));
     let maintenance_task = tokio::spawn(async move {
         run_maintenance_with_cancel(
-            &store,
-            &embedding_table,
-            &embedding_model,
+            backend,
+            embedding_model.clone(),
             &maintenance_config,
             cancel_rx,
         )
@@ -216,10 +218,11 @@ async fn maintenance_config_validation_rejects_negative_min_age() {
     let (store, embedding_table, embedding_model, _dir_guard) =
         make_memory_maintenance_fixture().await;
 
+    let backend: std::sync::Arc<dyn MemoryBackend> =
+        std::sync::Arc::new(SqliteBackend::new(store.clone(), embedding_table.clone()));
     let result = run_maintenance(
-        &store,
-        &embedding_table,
-        &embedding_model,
+        backend,
+        embedding_model.clone(),
         &MaintenanceConfig {
             prune_threshold: 0.2,
             decay_rate: 0.05,
