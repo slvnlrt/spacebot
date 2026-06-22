@@ -1,7 +1,9 @@
 //! Memory maintenance integration coverage.
 
 use spacebot::memory::maintenance::{run_maintenance, run_maintenance_with_cancel};
-use spacebot::memory::{MemoryBackend, MemoryStore, RelationType, SqliteBackend, maintenance::MaintenanceConfig};
+use spacebot::memory::{
+    MemoryBackend, MemoryStore, RelationType, SqliteBackend, maintenance::MaintenanceConfig,
+};
 use std::sync::{Arc, OnceLock};
 use tempfile::tempdir;
 use tokio::sync::watch;

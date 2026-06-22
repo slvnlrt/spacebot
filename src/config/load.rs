@@ -15,11 +15,11 @@ use super::{
     CoalesceConfig, CompactionConfig, Config, CortexConfig, CronDef, DefaultsConfig, DiscordConfig,
     DiscordInstanceConfig, EmailConfig, EmailInstanceConfig, GroupDef, HumanDef, IngestionConfig,
     LinkDef, LlmConfig, MattermostConfig, MattermostInstanceConfig, McpServerConfig, McpTransport,
-    MemoryBackendKind, MemoryJanitorConfig, MemoryPersistenceConfig, MessagingConfig, MetricsConfig,
-    OpenCodeConfig, ParticipantContextConfig, ProjectsConfig, ProviderConfig, SignalConfig,
-    SignalInstanceConfig, SlackCommandConfig, SlackConfig, SlackInstanceConfig, TelegramConfig,
-    TelegramInstanceConfig, TelemetryConfig, TwitchConfig, TwitchInstanceConfig, WarmupConfig,
-    WebhookConfig, normalize_adapter, validate_named_messaging_adapters,
+    MemoryBackendKind, MemoryJanitorConfig, MemoryPersistenceConfig, MessagingConfig,
+    MetricsConfig, OpenCodeConfig, ParticipantContextConfig, ProjectsConfig, ProviderConfig,
+    SignalConfig, SignalInstanceConfig, SlackCommandConfig, SlackConfig, SlackInstanceConfig,
+    TelegramConfig, TelegramInstanceConfig, TelemetryConfig, TwitchConfig, TwitchInstanceConfig,
+    WarmupConfig, WebhookConfig, normalize_adapter, validate_named_messaging_adapters,
 };
 use crate::error::{ConfigError, Result};
 

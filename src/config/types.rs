@@ -3302,10 +3302,22 @@ mod memory_backend_tests {
 
     #[test]
     fn parse_opt_recognises_all_variants() {
-        assert_eq!(MemoryBackendKind::parse_opt(Some("sqlite")), Some(MemoryBackendKind::Sqlite));
-        assert_eq!(MemoryBackendKind::parse_opt(Some("surreal")), Some(MemoryBackendKind::Surreal));
-        assert_eq!(MemoryBackendKind::parse_opt(Some("surrealdb")), Some(MemoryBackendKind::Surreal));
-        assert_eq!(MemoryBackendKind::parse_opt(Some("SQLITE")), Some(MemoryBackendKind::Sqlite));
+        assert_eq!(
+            MemoryBackendKind::parse_opt(Some("sqlite")),
+            Some(MemoryBackendKind::Sqlite)
+        );
+        assert_eq!(
+            MemoryBackendKind::parse_opt(Some("surreal")),
+            Some(MemoryBackendKind::Surreal)
+        );
+        assert_eq!(
+            MemoryBackendKind::parse_opt(Some("surrealdb")),
+            Some(MemoryBackendKind::Surreal)
+        );
+        assert_eq!(
+            MemoryBackendKind::parse_opt(Some("SQLITE")),
+            Some(MemoryBackendKind::Sqlite)
+        );
         assert_eq!(MemoryBackendKind::parse_opt(Some("unknown")), None);
         assert_eq!(MemoryBackendKind::parse_opt(None), None);
     }

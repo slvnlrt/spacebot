@@ -781,20 +781,10 @@ impl crate::memory::backend::MemoryBackend for SurrealMemoryStore {
     async fn find_similar(&self, id: &str, th: f32, l: usize) -> Result<Vec<(String, f32)>> {
         self.find_similar(id, th, l).await
     }
-    async fn prune_below(
-        &self,
-        th: f32,
-        older: chrono::DateTime<chrono::Utc>,
-    ) -> Result<u64> {
+    async fn prune_below(&self, th: f32, older: chrono::DateTime<chrono::Utc>) -> Result<u64> {
         self.prune_below(th, older).await
     }
-    async fn merge(
-        &self,
-        s: &str,
-        l: &str,
-        c: &str,
-        e: Option<&[f32]>,
-    ) -> Result<()> {
+    async fn merge(&self, s: &str, l: &str, c: &str, e: Option<&[f32]>) -> Result<()> {
         self.merge(s, l, c, e).await
     }
 }
@@ -804,8 +794,8 @@ impl crate::memory::backend::MemoryBackend for SurrealMemoryStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use surrealdb::engine::local::Mem;
     use surrealdb::Surreal;
+    use surrealdb::engine::local::Mem;
 
     const DIM: usize = 4;
 
