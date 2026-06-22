@@ -62,17 +62,24 @@ cargo test --features surreal-memory --lib memory::surreal_store  # get_associat
   40→80 to kill a tail-latency pathology).
 - **Landmine** (#13) — dead `build_channel_context` removed.
 
-## What's still NOT done (post–Plan C)
+## Plan D — DONE (2026-06-22)
 
-1. **`MemorySearch::traverse_graph` N+1** (`followups.md` #16) — the hybrid-search
-   seed traversal still does per-node `get_associations`+`load`. Native recursion
-   only replaced the API graph-view path (`get_neighbors`). Needs a trait method or
-   backend fast-path with scoring hooks.
-2. **Migration wiring** (#15) — `surreal_migrate` has no runtime caller; needs a
+`docs/superpowers/plans/2026-06-22-plan-d-batched-traversal.md`. Closed the LAST
+N+1 BFS: added batched `get_associations_for` + `load_many` to `MemoryBackend`
+and rewrote `MemorySearch::traverse_graph` (the hybrid-search seed traversal)
+level-by-level — O(depth)×2 queries instead of O(nodes). Behaviour-preserving
+(golden characterization test; the generic scoring/selective-expansion logic
+stays in `search.rs`, no per-backend duplication).
+
+## What's still NOT done
+
+1. **Migration wiring** (#15) — `surreal_migrate` has no runtime caller; needs a
    CLI/tool entry before an existing agent can be switched to `surreal` with its data.
-3. **CI buildability (#8), dependency-weight / Lance removal (#9)** — open.
-4. **Decision (C) SurrealKV backup/restore** — still required before enabling
+2. **CI buildability (#8), dependency-weight / Lance removal (#9)** — open.
+3. **Decision (C) SurrealKV backup/restore** — still required before enabling
    `surreal` by default in production.
+4. Cosmetic: SQLite construction branch duplicated 4× (#14); `Association.id`
+   synthesized (#10); schema re-applied per open (#11); `migrate` not transactional (#12).
 
 ## Decisions
 
