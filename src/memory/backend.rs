@@ -449,7 +449,10 @@ mod tests {
             .await
             .unwrap();
         // incident to {a}: only a→b
-        let e = be.get_associations_for(&[a.id.clone()]).await.unwrap();
+        let e = be
+            .get_associations_for(std::slice::from_ref(&a.id))
+            .await
+            .unwrap();
         assert_eq!(e.len(), 1);
         // incident to {a, c}: a→b (a is endpoint) and b→c (c is endpoint)
         let e2 = be
@@ -480,7 +483,7 @@ mod tests {
         let a = Memory::new("forgotten fact", MemoryType::Fact);
         be.save(&a, None).await.unwrap();
         be.forget(&a.id).await.unwrap();
-        let got = be.load_many(&[a.id.clone()]).await.unwrap();
+        let got = be.load_many(std::slice::from_ref(&a.id)).await.unwrap();
         assert_eq!(got.len(), 1, "load_many must return forgotten rows");
         assert!(
             got[0].forgotten,

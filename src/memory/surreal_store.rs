@@ -1410,7 +1410,10 @@ mod tests {
             .await
             .unwrap();
         // incident to {a}: only a→b
-        let e = store.get_associations_for(&[a.id.clone()]).await.unwrap();
+        let e = store
+            .get_associations_for(std::slice::from_ref(&a.id))
+            .await
+            .unwrap();
         assert_eq!(e.len(), 1);
         assert_eq!(e[0].source_id, a.id);
         // incident to {a, c}: a→b (a is source) and b→c (c is target)
@@ -1442,7 +1445,7 @@ mod tests {
         let store = mem_store().await;
         let a = mem_forgotten("lm-forgotten");
         store.save(&a, None).await.unwrap();
-        let got = store.load_many(&[a.id.clone()]).await.unwrap();
+        let got = store.load_many(std::slice::from_ref(&a.id)).await.unwrap();
         assert_eq!(got.len(), 1, "load_many must return forgotten rows");
         assert!(got[0].forgotten, "returned row must be marked forgotten");
     }
