@@ -2898,9 +2898,13 @@ async fn initialize_agents(
             tracing::warn!(%error, agent = %agent_config.id, "failed to create FTS index");
         }
 
+        let backend: Arc<dyn spacebot::memory::MemoryBackend> =
+            Arc::new(spacebot::memory::SqliteBackend::new(
+                memory_store,
+                embedding_table,
+            ));
         let memory_search = Arc::new(spacebot::memory::MemorySearch::new(
-            memory_store,
-            embedding_table,
+            backend,
             embedding_model.clone(),
         ));
 

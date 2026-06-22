@@ -146,7 +146,7 @@ pub(super) async fn list_memories(
 ) -> Result<Json<MemoriesListResponse>, StatusCode> {
     let searches = state.memory_searches.load();
     let memory_search = searches.get(&query.agent_id).ok_or(StatusCode::NOT_FOUND)?;
-    let store = memory_search.store();
+    let store = memory_search.backend();
 
     let limit = query.limit.min(200);
     let sort = parse_sort(&query.sort);
@@ -232,7 +232,7 @@ pub(super) async fn memory_graph(
 ) -> Result<Json<MemoryGraphResponse>, StatusCode> {
     let searches = state.memory_searches.load();
     let memory_search = searches.get(&query.agent_id).ok_or(StatusCode::NOT_FOUND)?;
-    let store = memory_search.store();
+    let store = memory_search.backend();
 
     let limit = query.limit.min(500);
     let sort = parse_sort(&query.sort);
@@ -290,7 +290,7 @@ pub(super) async fn memory_graph_neighbors(
 ) -> Result<Json<MemoryGraphNeighborsResponse>, StatusCode> {
     let searches = state.memory_searches.load();
     let memory_search = searches.get(&query.agent_id).ok_or(StatusCode::NOT_FOUND)?;
-    let store = memory_search.store();
+    let store = memory_search.backend();
 
     let depth = query.depth.min(3);
     let exclude_ids: Vec<String> = query

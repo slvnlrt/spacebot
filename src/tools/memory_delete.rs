@@ -85,7 +85,7 @@ impl Tool for MemoryDeleteTool {
     }
 
     async fn call(&self, args: Self::Args) -> std::result::Result<Self::Output, Self::Error> {
-        let store = self.memory_search.store();
+        let store = self.memory_search.backend();
 
         // Verify the memory exists first
         let memory = store
