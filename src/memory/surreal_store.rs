@@ -17,9 +17,9 @@ use std::collections::VecDeque;
 use std::path::Path;
 use std::sync::Arc;
 
+use surrealdb::Surreal;
 use surrealdb::engine::local::{Db, SurrealKv};
 use surrealdb::types::{Datetime, RecordId, SurrealValue};
-use surrealdb::Surreal;
 
 use crate::error::{DbError, Result};
 use crate::memory::search::SearchSort;
@@ -152,7 +152,10 @@ impl SurrealMemoryStore {
             .await
             .map_err(err)?;
         let agent_id = agent_id.into();
-        db.use_ns("spacebot").use_db(agent_id.as_str()).await.map_err(err)?;
+        db.use_ns("spacebot")
+            .use_db(agent_id.as_str())
+            .await
+            .map_err(err)?;
         let store = Self { db, agent_id, dim };
         store.define_schema().await?;
         Ok(Arc::new(store))
@@ -165,7 +168,11 @@ impl SurrealMemoryStore {
         agent_id: impl Into<String>,
         dim: usize,
     ) -> Result<Arc<Self>> {
-        let store = Self { db, agent_id: agent_id.into(), dim };
+        let store = Self {
+            db,
+            agent_id: agent_id.into(),
+            dim,
+        };
         store.define_schema().await?;
         Ok(Arc::new(store))
     }
@@ -202,7 +209,12 @@ impl SurrealMemoryStore {
              DEFINE FIELD IF NOT EXISTS created_at ON relates TYPE datetime DEFAULT time::now();\
              DEFINE INDEX IF NOT EXISTS relates_unique ON relates FIELDS in, out, relation_type UNIQUE;"
         );
-        self.db.query(sql).await.map_err(err)?.check().map_err(err)?;
+        self.db
+            .query(sql)
+            .await
+            .map_err(err)?
+            .check()
+            .map_err(err)?;
         Ok(())
     }
 
@@ -240,7 +252,12 @@ impl SurrealMemoryStore {
 
     pub async fn load(&self, id: &str) -> Result<Option<Memory>> {
         let sql = format!("SELECT {MEMORY_COLS} FROM type::record('memory', $id)");
-        let mut r = self.db.query(sql).bind(("id", id.to_string())).await.map_err(err)?;
+        let mut r = self
+            .db
+            .query(sql)
+            .bind(("id", id.to_string()))
+            .await
+            .map_err(err)?;
         let rows: Vec<MemoryRow> = r.take(0).map_err(err)?;
         Ok(rows.into_iter().next().map(Memory::from))
     }
@@ -381,8 +398,7 @@ impl SurrealMemoryStore {
         depth: u32,
         exclude_ids: &[String],
     ) -> Result<(Vec<Memory>, Vec<Association>)> {
-        let mut visited: std::collections::HashSet<String> =
-            exclude_ids.iter().cloned().collect();
+        let mut visited: std::collections::HashSet<String> = exclude_ids.iter().cloned().collect();
         visited.insert(memory_id.to_string());
 
         let mut memories = Vec::new();
@@ -418,7 +434,8 @@ impl SurrealMemoryStore {
     // ---- sorted / typed reads ----
 
     pub async fn get_by_type(&self, memory_type: MemoryType, limit: i64) -> Result<Vec<Memory>> {
-        self.get_sorted(SearchSort::Recent, limit, Some(memory_type)).await
+        self.get_sorted(SearchSort::Recent, limit, Some(memory_type))
+            .await
     }
 
     pub async fn get_high_importance(&self, threshold: f32, limit: i64) -> Result<Vec<Memory>> {
@@ -428,7 +445,12 @@ impl SurrealMemoryStore {
              ORDER BY importance DESC LIMIT {}",
             limit.max(0)
         );
-        let mut r = self.db.query(sql).bind(("th", threshold as f64)).await.map_err(err)?;
+        let mut r = self
+            .db
+            .query(sql)
+            .bind(("th", threshold as f64))
+            .await
+            .map_err(err)?;
         let rows: Vec<MemoryRow> = r.take(0).map_err(err)?;
         Ok(rows.into_iter().map(Memory::from).collect())
     }
@@ -590,9 +612,17 @@ impl SurrealMemoryStore {
             "SELECT meta::id(id) AS id, vector::distance::knn() AS distance FROM memory \
              WHERE embedding <|{limit},{ef}|> $q AND forgotten = false ORDER BY distance"
         );
-        let mut r = self.db.query(sql).bind(("q", query_embedding.to_vec())).await.map_err(err)?;
+        let mut r = self
+            .db
+            .query(sql)
+            .bind(("q", query_embedding.to_vec()))
+            .await
+            .map_err(err)?;
         let rows: Vec<IdDist> = r.take(0).map_err(err)?;
-        Ok(rows.into_iter().map(|x| (x.id, x.distance as f32)).collect())
+        Ok(rows
+            .into_iter()
+            .map(|x| (x.id, x.distance as f32))
+            .collect())
     }
 
     /// Full-text BM25 search on `content`. Returns (memory_id, score) desc.
@@ -601,7 +631,12 @@ impl SurrealMemoryStore {
             "SELECT meta::id(id) AS id, search::score(0) AS score FROM memory \
              WHERE content @0@ $q AND forgotten = false ORDER BY score DESC LIMIT {limit}"
         );
-        let mut r = self.db.query(sql).bind(("q", query.to_string())).await.map_err(err)?;
+        let mut r = self
+            .db
+            .query(sql)
+            .bind(("q", query.to_string()))
+            .await
+            .map_err(err)?;
         let rows: Vec<IdScore> = r.take(0).map_err(err)?;
         Ok(rows.into_iter().map(|x| (x.id, x.score as f32)).collect())
     }
@@ -621,7 +656,12 @@ impl SurrealMemoryStore {
              SELECT meta::id(id) AS id, vector::distance::knn() AS distance FROM memory \
              WHERE embedding <|{fetch},{ef}|> $vec AND forgotten = false ORDER BY distance"
         );
-        let mut r = self.db.query(sql).bind(("id", memory_id.to_string())).await.map_err(err)?;
+        let mut r = self
+            .db
+            .query(sql)
+            .bind(("id", memory_id.to_string()))
+            .await
+            .map_err(err)?;
         // Statement 0 is the LET; statement 1 is the SELECT.
         let rows: Vec<IdDist> = r.take(1).map_err(err)?;
         let mut out = Vec::new();

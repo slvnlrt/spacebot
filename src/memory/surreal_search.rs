@@ -94,7 +94,10 @@ impl SurrealMemorySearch {
                     if let Some(memory) = self.store.load(&id).await?
                         && !memory.forgotten
                     {
-                        fts_results.push(Scored { memory, score: score as f64 });
+                        fts_results.push(Scored {
+                            memory,
+                            score: score as f64,
+                        });
                     }
                 }
             }
@@ -110,7 +113,10 @@ impl SurrealMemorySearch {
                     if let Some(memory) = self.store.load(&id).await?
                         && !memory.forgotten
                     {
-                        vector_results.push(Scored { memory, score: (1.0 - distance) as f64 });
+                        vector_results.push(Scored {
+                            memory,
+                            score: (1.0 - distance) as f64,
+                        });
                     }
                 }
             }
@@ -127,7 +133,10 @@ impl SurrealMemorySearch {
                 .split_whitespace()
                 .any(|term| seed.content.to_lowercase().contains(term));
             if matches {
-                graph_results.push(Scored { memory: seed.clone(), score: seed.importance as f64 });
+                graph_results.push(Scored {
+                    memory: seed.clone(),
+                    score: seed.importance as f64,
+                });
                 self.traverse_graph(&seed.id, config.max_graph_depth, &mut graph_results)
                     .await?;
             }

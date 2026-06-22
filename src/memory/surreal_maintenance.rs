@@ -36,7 +36,11 @@ pub async fn run_maintenance(
     let pruned = prune_memories(store, config).await?;
     let merged =
         merge_similar_memories(store, embedding_model, config.merge_similarity_threshold).await?;
-    Ok(MaintenanceReport { decayed, pruned, merged })
+    Ok(MaintenanceReport {
+        decayed,
+        pruned,
+        merged,
+    })
 }
 
 /// Importance decay based on recency and access patterns (mirrors
@@ -51,7 +55,9 @@ pub async fn apply_decay(store: &SurrealMemoryStore, decay_rate: f32) -> Result<
         if mem_type == MemoryType::Identity {
             continue;
         }
-        let memories = store.get_by_type(mem_type, DECAY_SCAN_LIMIT_PER_TYPE).await?;
+        let memories = store
+            .get_by_type(mem_type, DECAY_SCAN_LIMIT_PER_TYPE)
+            .await?;
         for mut memory in memories {
             let days_old = (now - memory.updated_at).num_days();
             let days_since_access = (now - memory.last_accessed_at).num_days();
@@ -115,7 +121,11 @@ pub async fn merge_similar_memories(
         }
 
         let similar = store
-            .find_similar(&active_survivor.id, similarity_threshold, MAX_SIMILAR_CANDIDATES)
+            .find_similar(
+                &active_survivor.id,
+                similarity_threshold,
+                MAX_SIMILAR_CANDIDATES,
+            )
             .await?;
 
         for (candidate_id, _sim) in similar {
@@ -135,7 +145,9 @@ pub async fn merge_similar_memories(
             let (winner, loser) = choose_merge_pair(&active_survivor, &candidate);
             let content = merged_memory_content(winner.content.clone(), &loser.content);
             let embedding = embedding_model.embed_one(&content).await?;
-            store.merge(&winner.id, &loser.id, &content, Some(&embedding)).await?;
+            store
+                .merge(&winner.id, &loser.id, &content, Some(&embedding))
+                .await?;
             merged_ids.insert(loser.id.clone());
             merged_count += 1;
 
