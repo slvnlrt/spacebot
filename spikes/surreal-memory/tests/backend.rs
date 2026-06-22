@@ -707,3 +707,64 @@ fn extract_value_ids(v: &surrealdb::types::Value) -> HashSet<String> {
     }
     out
 }
+
+/// Decision (C) — backup/restore story for the per-agent embedded SurrealKV.
+///
+/// SurrealKV has no copyable single-file like SQLite, so the operational backup
+/// is a **filesystem copy of the store directory** (which lives under the
+/// agent's `data_dir/surreal` — already covered by any data-dir backup). This
+/// test proves a cold copy (store quiesced/closed) restores with data intact.
+/// For a LIVE copy, quiesce the agent first — the same constraint as SQLite WAL
+/// / LanceDB (a live copy without a checkpoint can be inconsistent).
+#[tokio::test]
+async fn surrealkv_cold_copy_backup_restores() {
+    use surrealdb::engine::local::SurrealKv;
+
+    let base = std::env::temp_dir().join(format!("surreal-backup-{}", uuid::Uuid::new_v4()));
+    let src = base.join("src");
+    let dst = base.join("dst");
+    std::fs::create_dir_all(&src).unwrap();
+
+    // 1. Write data into an on-disk store, then CLOSE it (drop the handle).
+    {
+        let db = Surreal::new::<SurrealKv>(src.to_str().unwrap()).await.unwrap();
+        db.use_ns("backup").use_db("agent1").await.unwrap();
+        db.query("CREATE type::record('memory', $id) SET content = $c")
+            .bind(("id", "m1".to_string()))
+            .bind(("c", "persisted before backup".to_string()))
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+    } // db dropped → store closed/flushed to disk
+
+    // 2. Cold filesystem copy of the quiesced store directory = the backup.
+    copy_dir_recursive(&src, &dst).unwrap();
+
+    // 3. Reopen the COPY and verify the data survived copy → restore.
+    let db2 = Surreal::new::<SurrealKv>(dst.to_str().unwrap()).await.unwrap();
+    db2.use_ns("backup").use_db("agent1").await.unwrap();
+    let mut r = db2
+        .query("SELECT VALUE content FROM type::record('memory', $id)")
+        .bind(("id", "m1".to_string()))
+        .await
+        .unwrap();
+    let got: Vec<String> = r.take(0).unwrap();
+    assert_eq!(got, vec!["persisted before backup".to_string()]);
+
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let target = dst.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir_recursive(&entry.path(), &target)?;
+        } else {
+            std::fs::copy(entry.path(), &target)?;
+        }
+    }
+    Ok(())
+}
