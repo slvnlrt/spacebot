@@ -2,8 +2,13 @@
 //!
 //! These run against the embedded in-memory engine (`kv-mem`) and pass explicit
 //! embeddings, so they do not need fastembed at runtime. They mirror the proven
-//! reference suite in `spikes/surreal-memory/tests/backend.rs`, but exercise the
-//! real in-crate `SurrealMemoryStore` / `SurrealMemorySearch`.
+//! reference suite in `spikes/surreal-memory/tests/backend.rs`, and exercise the
+//! store primitives (`SurrealMemoryStore`) directly with dim-4 hand-built vectors.
+//!
+//! The hybrid RRF/traversal search logic previously tested via `SurrealMemorySearch`
+//! is now the shared `MemorySearch`/`search.rs` implementation (Plan A), covered by
+//! its own unit tests. Full-pipeline Surreal validation (with a real EmbeddingModel)
+//! is deferred to an ONNX-capable environment (Task 5).
 //!
 //! NB: the test binary still links the spacebot lib (which pulls fastembed/ort),
 //! so running them needs a working ONNX Runtime; in environments where that is
@@ -13,8 +18,6 @@
 
 use std::sync::Arc;
 
-use spacebot::memory::search::{SearchConfig, SearchMode};
-use spacebot::memory::surreal_search::SurrealMemorySearch;
 use spacebot::memory::surreal_store::SurrealMemoryStore;
 use spacebot::memory::types::{Association, Memory, MemoryType, RelationType};
 use surrealdb::Surreal;
@@ -200,45 +203,6 @@ async fn merge_rewires_and_soft_deletes() {
             .iter()
             .any(|a| a.relation_type == RelationType::Updates && a.target_id == l.id)
     );
-}
-
-#[tokio::test]
-async fn hybrid_search_fuses_and_excludes_forgotten() {
-    let store = fresh().await;
-    let target = Memory::new("saturn rockets orbit mission", MemoryType::Fact);
-    store
-        .save(&target, Some(&emb(0.5, 0.5, 0.5, 0.5)))
-        .await
-        .unwrap();
-    for i in 0..15 {
-        let f = i as f32 / 15.0;
-        store
-            .save(
-                &Memory::new(format!("coffee note {i}"), MemoryType::Observation),
-                Some(&emb(f, 0.1, 0.9, f)),
-            )
-            .await
-            .unwrap();
-    }
-    let ghost = Memory::new("saturn rockets ghost", MemoryType::Fact);
-    store
-        .save(&ghost, Some(&emb(0.5, 0.5, 0.5, 0.5)))
-        .await
-        .unwrap();
-    store.forget(&ghost.id).await.unwrap();
-
-    let search = SurrealMemorySearch::new(store);
-    let cfg = SearchConfig {
-        mode: SearchMode::Hybrid,
-        ..Default::default()
-    };
-    let res = search
-        .search("saturn rockets", &emb(0.5, 0.5, 0.5, 0.5), &cfg)
-        .await
-        .unwrap();
-    assert!(res.iter().any(|r| r.memory.id == target.id));
-    assert!(res.iter().all(|r| r.memory.id != ghost.id));
-    assert_eq!(res[0].rank, 1);
 }
 
 #[tokio::test]

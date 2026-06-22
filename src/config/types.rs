@@ -3282,6 +3282,7 @@ mod memory_backend_tests {
     }
 
     #[test]
+    #[allow(clippy::field_reassign_with_default)]
     fn agent_memory_backend_falls_back_to_defaults() {
         let mut defaults = DefaultsConfig::default();
         defaults.memory_backend = MemoryBackendKind::Surreal;
