@@ -3,7 +3,9 @@
 > Date : 2026-06-22. Branche : `feat/surrealdb-memory`.
 > **Révisé 2026-06-23** après recherche web : MemOS scindé (gouvernance/permissions ≠ YAGNI), user-scoping remonté en
 > priorité haute (spacebot est multi-user *par conception*), sleep-time compute (Letta), bi-temporalité confirmée
-> convergente (Zep + Cognee + Mem0), et ajout des frontières émergentes 2026. Sources en §Sources.
+> convergente (Zep + Cognee + Mem0), frontières émergentes 2026. **2ᵉ passe (même jour)** : ajout de **Honcho** (§7,
+> peer model / theory-of-mind) et d'une **analyse des premières études empiriques** (§8, claimed-vs-observed : ne pas
+> faire confiance aux chiffres vendor ; ce qui marche/ne marche pas). Sources en §Sources.
 >
 > **Objet :** comparer, axe par axe, ce que la mémoire de spacebot fait *réellement aujourd'hui*
 > (intelligence, pas stockage) avec les mécanismes des systèmes de mémoire d'agents à l'état de l'art
@@ -280,6 +282,7 @@ sans scoping, un déploiement communauté/équipe mélange les mémoires de tous
 | I5. Inférence d'arêtes typées par la branch | 3 | Faible-moyen | Moyenne | — |
 | I6. Reranking LLM + MMR/diversité (top-N) | 5 | Moyen | Moyenne | I1 |
 | **I7. User-scoping (`user_id` + recall scopé) + gouvernance/permissions** | 8 | Moyen | **Élevée** | — (multi-user = besoin réel, pas hypothétique) |
+| I7+. *Per-peer representation* / theory-of-mind (forme aboutie, façon Honcho) | 8 | Élevé | Élevée | I7 + cortex sleep-time (§7) |
 | I8. Cortex Phase 4 = boucle de consolidation **sleep-time** (porte I2/I4/I5 en async) | 6 | Élevé | Moyenne | I2, I4 |
 | I9. Tiered memory explicite (colonne `tier`, TTL, boost) | 7 | Moyen | Faible | retrieval-boost redondant avec I1 ; le *bornage* du hot-set reste — **à mesurer avant** |
 | I10. Couche entités / résolution d'entités | 3 | Élevé | Variable | usage-dépendant — **YAGNI** par défaut |
@@ -346,6 +349,58 @@ réflexive**, contexte virtuel hiérarchique, **gestion par politique apprise**)
 Verdict : ces frontières confirment la direction (I1–I3 + sleep-time), mais les variantes *apprises/adaptatives* sont
 de la recherche — à surveiller, pas à intégrer dans le premier jet.
 
+## 7. Honcho (Plastic Labs) — modélisation par *peer* / theory-of-mind
+
+Système distinctif, **directement pertinent au multi-user**. Primitive = le **peer** (humain, agent, projet, *idée*),
+sessions **many-to-many** → on modélise « ce qu'Alice sait de Bob » ou « ce que l'agent-support pense que le client
+veut ». Mécanisme : (a) **ingest-time** — un petit modèle fine-tuné capture l'info latente (préférences, claims,
+observations) et met à jour une **Representation** du peer ; (b) **async « dreams »** — agents de fond qui *déduisent*
+sur messages + raisonnements antérieurs (= sleep-time compute) ; (c) requête = agent de recherche tool-calling ;
+representations = **snapshots statiques** optionnellement session-scopés. But : **modéliser la psychologie/identité par
+raisonnement**, pas régurgiter des faits. Chiffres *vendor-reported, vs modèles bruts (pas vs Mem0/Zep)* : LongMem-S
+90,4 %, LongMem-M(1M) 88,8 %, LOCOMO 89,9 %, BEAM-100K 0,630 ; ~11 % des tokens. Faiblesse : le temporel (~77 %).
+
+**Implication pour nous :** Honcho est la **forme aboutie de I7** — pas seulement « scoper les mémoires par `user_id` »,
+mais **construire une représentation par peer (user *ou* agent), mise à jour en async**. Ça colle exactement à
+l'archi spacebot (cortex sleep-time + multi-agent) : le cortex pourrait produire, par peer, un *modèle* (préférences,
+objectifs, ce que ce peer sait) en plus des mémoires brutes. → **I7 ambitieux = user-scoping + per-peer representation.**
+
+## 8. Ce que montrent les premières études empiriques (2026)
+
+> Ces études *indépendantes* sont plus instructives que les claims vendor — elles disent ce qui marche **vraiment**.
+
+**A. Les chiffres vendor ne valent rien à face value — LE constat.** Le même Mem0 affiche 66,9 % / 73,8 % / 92,5 % /
+93,4 % selon le harness. La **repro indépendante** du 93,4 % (LongMemEval) donne **73,8 % — 20 pts d'écart**, tracés à du
+*prompt-engineering benchmark-spécifique* (règles d'équivalence dans les prompts de réponse, CoT caché, jugement
+asymétrique), **pas** à la qualité mémoire : *« l'écart published↔observed suit la quantité de prompt-engineering
+benchmark-spécifique, pas la qualité du système »* (maximem.ai). → **Ignorer les headline numbers ; tester sur nos
+propres données.** (Pour le doc : ne jamais citer ces chiffres comme argument — d'où le tag *vendor-reported* partout.)
+
+**B. Ce qui marche empiriquement (conforte la roadmap) :**
+- **Retrieval multi-signal** (sémantique + BM25/keyword + **entity matching**, fusionnés) > tout signal seul. On a
+  vecteur+FTS+graphe — **ajouter l'appariement d'entités** complèterait (renforce I1/I6).
+- **Passe de reranking** (corrige les inversions de rang vectoriel) : shippée comme « feature de prod qui compte ». → I6.
+- **Extraction/filtrage LLM + représentations structurées** : ablation = **−4 à −8 pts** de QA si retirés. → I4 + structure.
+- **Écritures mémoire async par défaut** (sleep-time) : défaut de prod pour ne pas bloquer la latence. → cortex (I8).
+- **Primitives de scoping gérant *simultanément* partagé + isolation perso** = « le vrai problème de valeur » ; les
+  implémentations maison « réimplémentent les primitives évidentes sans atteindre les problèmes durs ». → **conforte I7**.
+- Vrai gain de la mémoire sélective = **~73 % de tokens en moins** (~6 900 vs ~26 000/req) + éviter le **context rot /
+  lost-in-the-middle** — **pas** battre le full-context en accuracy pure (souvent encore devant, mais à ~14× latence/coût
+  et avec dégradation d'attention). → **vendre la mémoire sur le coût/latence/fraîcheur, pas sur l'accuracy brute.**
+
+**C. Ce qui ne marche pas / reste ouvert (à ne pas sur-promettre) :**
+- **Le raisonnement temporel est le point faible universel** (~77–88 % partout, gros headroom même après gains ;
+  Honcho : « genuine weak point of all models »). → **I3 est nécessaire mais dur** : `valid_from/to` ne le « résout » pas.
+- **Évolution cross-session** : même le SOTA « traite le changement comme un *remplacement*, pas une *évolution* » (la
+  frontière au-delà du UPDATE de Mem0 = la note-evolution d'A-MEM).
+- **Résolution d'identité** : casse sur multi-device/anonyme (suppose un `user_id` stable) → I7 doit gérer ça (le design
+  `user_identifiers` + `user_platform_links` de spacebot l'adresse déjà).
+- **Falaises d'échelle** (BEAM 1M→10M : −25 %) et **staleness** des faits high-confidence après changement de contexte.
+
+**Verdict empirique :** la roadmap (I1 multi-signal+récence+reranking, I2 consolidation async, I3 temporel, I7
+scoping/representation) est **alignée avec ce qui marche**. Deux garde-fous : (1) **mesurer sur nos données**, pas sur
+les benchmarks publics ; (2) **ne pas sur-promettre le temporel** (I3) — c'est le mur de tout le monde.
+
 ## Sources
 
 Survey interne associé (systèmes, patterns convergents, schéma cible) :
@@ -359,8 +414,11 @@ Recherche web (consultée le 2026-06-23) :
 - MemOS / MemCube (Metadata Header permission/lifecycle, MemGovernance, MemScheduler) : https://arxiv.org/pdf/2507.03724 · https://arxiv.org/abs/2505.22101
 - Letta — sleep-time compute (agent de remodelage mémoire en arrière-plan) : https://www.letta.com/blog/sleep-time-compute · https://docs.letta.com/guides/agents/architectures/sleeptime/
 - Cognee — ECL + ontologie RDF + DataPoint versionné (« invalide sans supprimer ») : https://docs.cognee.ai/core-concepts/main-operations/cognify
-- État du domaine 2026 (Mem0/Zep/Letta/Cognee) : https://mem0.ai/blog/state-of-ai-agent-memory-2026
+- Honcho / Plastic Labs (peer model, theory-of-mind, async « dreams ») : https://github.com/plastic-labs/honcho · https://plasticlabs.ai/blog/research/Benchmarking-Honcho
+- **Études empiriques / claimed-vs-observed** : https://www.maximem.ai/blog/state-of-ai-memory-2026-claimed-vs-observed · https://mem0.ai/blog/state-of-ai-agent-memory-2026 · https://mem0.ai/blog/ai-memory-benchmarks-in-2026
+- Benchmarks : LOCOMO, LongMemEval (+ LongMemEval-V2 arXiv 2605.12493, BEAM jusqu'à 10M tokens)
 
 Systèmes également référencés : Generative Agents (reflection + score récence·importance·pertinence), A-MEM (notes
-Zettelkasten évolutives), HippoRAG (personalized PageRank multi-hop). Benchmarks (LOCOMO, LongMemEval) :
-**vendor-reported** — à valider indépendamment avant d'en faire un argument.
+Zettelkasten évolutives), HippoRAG (personalized PageRank multi-hop). **Tous les chiffres de benchmark sont
+*vendor-reported* et sensibles au prompt-engineering benchmark-spécifique (écarts repro ~20 pts) — à valider sur nos
+propres données avant d'en faire un argument** (cf. §8).
