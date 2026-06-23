@@ -99,6 +99,19 @@ fichier du disque → impossible d'arrêter la boucle depuis l'UI.
   `ingestion_files` + `ingestion_progress`.
 - Nettoyer les mémoires dupliquées accumulées (opération de données séparée).
 
+## Hypothèse écartée : « le fichier a contourné l'UI → mal créé en DB → tout bugue »
+
+**Faux (vérifié).** `upload_ingest_file` (chemin UI) ne fait qu'écrire le fichier sur disque (`tokio::fs::write`) et
+**ne crée aucune ligne** `ingestion_files`. C'est la **boucle de poll** (`process_file`) qui crée la ligne, de façon
+idempotente, **identiquement quel que soit le mode d'arrivée** du fichier. La ligne DB actuelle est bien formée
+(`total_chunks=1`, `status=failed`). Donc l'écriture directe par l'agent ≡ un upload UI : **les bugs B1/B2/B4/B5 se
+produiraient à l'identique via l'UI.** Le chemin d'arrivée n'est pas la cause.
+
+**Mais** cette observation révèle une **question de conception** : un agent peut écrire dans son propre
+`workspace/ingest/` et **auto-déclencher l'ingestion** (l'ingest dir est sous le workspace accessible en écriture par
+les outils de l'agent). À décider : faut-il qu'un fichier écrit par l'agent soit auto-ingéré, ou réserver l'ingestion
+aux uploads explicites ?
+
 ## Statut
 **Documenté. Causes identifiées. Non corrigé.** Bugs généraux (SQLite + SurrealDB). Ne bloquent pas le merge de la
 branche surreal (orthogonaux), mais B1+B2+B4 forment un trio à corriger avant tout usage réel de l'ingestion.
