@@ -1,0 +1,104 @@
+# Bug report — runaway ingestion & memory duplication (2026-06-23)
+
+> Découvert en test réel (déploiement SurrealDB, mais **ces bugs ne sont PAS spécifiques au backend** —
+> ils touchent aussi SQLite+Lance : ingestion, merge, UI delete, access_count sont communs).
+> Symptôme initial observé : des mémoires créées **en continu, sans interaction, toujours les mêmes sujets**,
+> beaucoup dupliquées/concaténées, certaines avec des `access_count` à plusieurs centaines.
+>
+> Chaîne complète vérifiée dans le code + les tables. À transformer en tickets + corrections.
+
+## Résumé de la chaîne causale
+
+Un agent LLM a écrit `knowledge-base.md` dans `workspace/ingest/`. La **boucle de polling d'ingestion**
+re-traite ce fichier **à chaque cycle** ; chaque passe **sauve des mémoires** (via `memory_save`) puis **marque le
+chunk `failed`** (signal de complétion manquant) → jamais enregistré comme complété → **re-traité indéfiniment** →
+**doublons quasi-identiques** que la **maintenance cortex concatène** ensuite. La **suppression UI** ne retire pas le
+fichier du disque → impossible d'arrêter la boucle depuis l'UI.
+
+---
+
+## Bugs (du plus prioritaire au moins)
+
+### B1 — 🔴 Ingestion : re-traitement infini d'un fichier `failed`
+- **Symptôme** : `knowledge-base.md` re-ingéré toutes les ~4 min de 09:28 à 16:16 (toute la journée), sans fin.
+- **Preuve** : `ingestion_files` → `status=failed`, `ingestion_progress` **vide** ; `started_at`/`completed_at` se
+  mettent à jour à chaque cycle.
+- **Cause** : `src/agent/ingestion.rs run_ingestion_loop` (`loop { scan_ingest_dir; process_file; sleep(poll_interval_secs) }`)
+  **ne filtre PAS** les fichiers déjà `failed` au scan, et `process_file` ne saute un chunk que s'il est dans
+  `ingestion_progress` (table vide ici car le chunk échoue toujours) → re-traitement complet à chaque poll.
+- **Manque** : pas de **max-retries**, pas de **backoff**, pas de **quarantaine** des fichiers `failed`.
+- **Fix** : sauter/quarantiner les fichiers `status=failed` (ou backoff exponentiel + cap), avec une voie de
+  ré-essai explicite.
+
+### B2 — 🔴 Un chunk **sauve des mémoires** puis est marqué `failed` (effets de bord sur échec)
+- **Symptôme** : à chaque retry échoué, de **nouvelles mémoires sont quand même créées**.
+- **Cause** : `ingestion.rs:~466` lance un **agent LLM par chunk** (outils `memory_recall` + `memory_save`). Le LLM
+  appelle `memory_save` (persistance **immédiate**), mais le chunk finit *« without memory_persistence_complete
+  signal »* (`ingestion.rs:537`) → `had_failure=true` → fichier `failed`, chunk **non** enregistré complété.
+  Le petit modèle (`deepseek-v4-flash`) n'émet pas fiablement le signal de fin attendu.
+- **Cause sous-jacente** : (a) **écritures mémoire non transactionnelles** avec la complétion du chunk (les effets
+  persistent même quand le chunk « échoue ») ; (b) dépendance à un **signal d'outil** qu'un modèle faible n'émet pas.
+- **Fix** : rendre la complétion idempotente/transactionnelle ; enregistrer le progrès **dès que** des mémoires ont
+  été écrites ; ne pas traiter « signal manquant » comme un échec re-essayable indéfiniment.
+
+### B3 — 🟠 UI « delete ingest file » ne supprime PAS le fichier disque (UI↔disque déconnectés)
+- **Symptôme** : fichier supprimé dans l'UI → **réapparaît** quelques minutes après.
+- **Cause** : `src/api/ingest.rs delete_ingest_file` fait **uniquement** `DELETE FROM ingestion_files WHERE
+  content_hash=?` — **aucun `fs::remove_file`**, et ne purge pas `ingestion_progress`. Le fichier reste sur le
+  disque → le poll le re-scanne → re-crée la ligne (« réapparition »). Asymétrie avec `upload_ingest_file` (qui, lui,
+  écrit le fichier).
+- **Fix** : le delete doit **supprimer le fichier disque** + purger `ingestion_files` **et** `ingestion_progress`.
+
+### B4 — 🟠 Aucune déduplication à l'écriture (`memory_save` = insert brut)
+- **Symptôme** : prolifération de quasi-doublons (« Format de réponse préféré… » reformulé à chaque passe).
+- **Cause** : `src/tools/memory_save.rs:258` = `store.save(&memory, None)` sans comparaison aux mémoires existantes.
+- **Cause sous-jacente** : c'est le **gap I2** du [gap analysis](./surrealdb-memory/gap-analysis-intelligence.md)
+  (pas de pipeline ADD/UPDATE/DELETE/NOOP façon Mem0). Combiné à B1/B2, ça explose.
+- **Fix** : dédup/consolidation à l'écriture (récupérer le top-k similaire → UPDATE/NOOP au lieu d'un nouvel insert).
+
+### B5 — 🟡 Le merge de maintenance **concatène** au lieu de réécrire (bloat)
+- **Symptôme** : une mémoire « unique » contenant 9 versions concaténées de la même préférence.
+- **Cause** : `src/memory/maintenance.rs:293 merged_memory_content` → `format!("{winner}\n\n{loser}")` ; seul dédup =
+  `winner.contains(loser)` (sous-chaîne **exacte**), inopérant sur des reformulations. Déclenché par la **maintenance
+  cortex** (`cortex.rs:2456 → run_maintenance_with_cancel`, seuil 0.95).
+- **Fix** : à la fusion, **garder/réécrire une version** (la plus importante/récente) au lieu de coller ; idéalement
+  consolidation LLM (lié à B4/I2).
+
+### B6 — 🟡 (cosmétique) `access_count` gonflé
+- **Symptôme** : certaines mémoires à plusieurs centaines d'« accessed », la plupart normales.
+- **Cause** : `access_count += 1` (`surreal_store.rs:374` / SQLite équivalent) appelé **par résultat** dans l'outil
+  `memory_recall` (`memory_recall.rs:236`). Les mémoires **importance 1.0** ressortent dans le top-k à **quasiment
+  chaque recall** → incrémentées en permanence. **Pas** le cortex (ses requêtes `get_by_type`/`get_sorted`
+  n'incrémentent pas). Pas de double-comptage (RRF dédoublonne).
+- **Impact réel** : **cosmétique** — la décroissance utilise la **récence** (`last_accessed_at`), pas la magnitude.
+- **Fix** (optionnel) : ne pas compter les hits de recalls automatiques/ambiants, ou afficher différemment.
+
+---
+
+## Causes sous-jacentes (transverses)
+
+1. **Aucune couche de consolidation/dédup mémoire** (gap I2) — la cause-mère de B4/B5, et l'amplificateur de B1/B2.
+2. **Effets de bord non transactionnels** — un chunk « échoué » a déjà écrit des mémoires (B2) ; un delete UI
+   désynchronisé du disque (B3). Pattern « état partiellement appliqué ».
+3. **Boucles de fond sans garde-fou** — l'ingestion re-tente sans limite (B1) ; la maintenance amplifie (B5).
+
+## À vérifier ailleurs (même pattern)
+
+- **Email ingestion** : a aussi un `poll_interval_secs` + boucle (`config/load.rs:2281`). Même retry-forever /
+  effets-de-bord-sur-échec ? À auditer.
+- **Autres handlers `delete` de l'API** : sont-ils DB-only vs disque (même asymétrie que B3) ? (ex. autres ressources
+  workspace.)
+- **Autres flux LLM par item** dépendant d'un **signal de complétion** (comme B2) : worker/branch qui persistent puis
+  signalent — mêmes effets de bord si le signal manque ?
+- **La boucle d'ingestion tourne pour CHAQUE agent** (`agents.rs:1121`, `main.rs:3860`) → le bug est par-agent, donc
+  reproductible sur tout agent ayant un fichier `failed` dans son `ingest/`.
+
+## Mitigation immédiate (en attendant les fixes)
+
+- Retirer le fichier **du disque** (pas seulement via l'UI) : `workspace/ingest/<file>` — puis purger
+  `ingestion_files` + `ingestion_progress`.
+- Nettoyer les mémoires dupliquées accumulées (opération de données séparée).
+
+## Statut
+**Documenté. Causes identifiées. Non corrigé.** Bugs généraux (SQLite + SurrealDB). Ne bloquent pas le merge de la
+branche surreal (orthogonaux), mais B1+B2+B4 forment un trio à corriger avant tout usage réel de l'ingestion.
