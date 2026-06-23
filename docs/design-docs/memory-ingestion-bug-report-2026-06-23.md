@@ -102,6 +102,25 @@ tool-call LLM sert de **signal de contrôle** que le harness connaît déjà.
    désynchronisé du disque (B3). Pattern « état partiellement appliqué ».
 3. **Boucles de fond sans garde-fou** — l'ingestion re-tente sans limite (B1) ; la maintenance amplifie (B5).
 
+## AUDIT à mener — « tool-call LLM utilisé comme signal de contrôle »
+
+> Anti-pattern : faire dépendre une décision de control-flow/lifecycle d'un appel d'outil que le LLM doit émettre,
+> alors que le harness connaît (ou pourrait connaître) la réponse de façon **déterministe**. B2 en est un cas confirmé.
+> Sites candidats trouvés par scan (chacun **à vérifier** — ne pas présumer que tous sont buggés) :
+
+| Site | Mécanisme | Statut |
+|---|---|---|
+| `ingestion.rs:535` (chunk) | `memory_persistence_complete` → `has_terminal_outcome()` ; sinon `Err` → retry infini | **CONFIRMÉ buggé (B2)** |
+| `channel_dispatch.rs:211-302` (memory persistence branch, côté canal) | **même** `MemoryPersistenceContractState` | **À vérifier en priorité** — même contrat ; que fait l'échec du signal (re-spawn ? retry ? no-op ? effets de bord ?) |
+| `branch.rs:37-71` (overlay générique de branch) | contrat de persistance optionnel sur les branches | À vérifier |
+| `task_update` (flag `completed` posé par le LLM) | le LLM déclare une tâche terminée | À vérifier — jugement légitime, ou seul signal autoritatif ? |
+| Lifecycle **branch/worker** en général | la complétion vient-elle du run qui retourne (déterministe) ou d'un signal LLM ? | À cartographier |
+
+**Questions à poser par site :** (a) le harness connaît-il déjà la réponse de façon déterministe ? (b) que se
+passe-t-il si le LLM **n'émet pas** le signal (no-op / retry / re-spawn / perte / boucle) ? (c) des **effets de bord
+sont-ils committés avant** le signal (état partiellement appliqué) ? **Règle cible :** le LLM produit le contenu/jugement ;
+le contrôle (« done ») reste déterministe dans le code.
+
 ## À vérifier ailleurs (même pattern)
 
 - **Email ingestion** : a aussi un `poll_interval_secs` + boucle (`config/load.rs:2281`). Même retry-forever /
