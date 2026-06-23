@@ -40,6 +40,13 @@ fichier du disque → impossible d'arrêter la boucle depuis l'UI.
   persistent même quand le chunk « échoue ») ; (b) dépendance à un **signal d'outil** qu'un modèle faible n'émet pas.
 - **Fix** : rendre la complétion idempotente/transactionnelle ; enregistrer le progrès **dès que** des mémoires ont
   été écrites ; ne pas traiter « signal manquant » comme un échec re-essayable indéfiniment.
+- **Le moment exact de la bascule** (`process_chunk`, `ingestion.rs:~533`) : l'agent LLM (modèle `deepseek-v4-flash`)
+  appelle `memory_save` (persistance immédiate) puis **termine sans appeler `memory_persistence_complete`** → le code
+  fait `if !contract_state.has_terminal_outcome() { return Err(...) }`. Donc « mémoires écrites » **ET** « chunk
+  failed » coexistent. **Pourquoi** : (1) les écritures ne sont pas conditionnées au contrat (découplées) ; (2) le
+  succès dépend d'un appel d'outil de fin qu'un petit modèle n'émet pas fiablement (cas « répond OK sans signaler » —
+  distinct de `MaxTurnsError` qui a sa propre branche) ; (3) l'échec est re-essayé sans fin (B1). Le contrat suppose un
+  modèle qui respecte le protocole complet, mais les effets de bord atterrissent même quand le protocole échoue.
 
 ### B3 — 🟠 UI « delete ingest file » ne supprime PAS le fichier disque (UI↔disque déconnectés)
 - **Symptôme** : fichier supprimé dans l'UI → **réapparaît** quelques minutes après.
@@ -48,6 +55,9 @@ fichier du disque → impossible d'arrêter la boucle depuis l'UI.
   disque → le poll le re-scanne → re-crée la ligne (« réapparition »). Asymétrie avec `upload_ingest_file` (qui, lui,
   écrit le fichier).
 - **Fix** : le delete doit **supprimer le fichier disque** + purger `ingestion_files` **et** `ingestion_progress`.
+- **Pourquoi** : le handler agit sur la **mauvaise abstraction** — il supprime l'*enregistrement de suivi* (« le job »)
+  au lieu de la **source de vérité de la boucle (le fichier disque)**. Asymétrie avec `upload_ingest_file` qui, lui,
+  écrit le fichier. Le delete agit une couche trop haut → le prochain poll re-découvre le fichier et re-crée la ligne.
 
 ### B4 — 🟠 Aucune déduplication à l'écriture (`memory_save` = insert brut)
 - **Symptôme** : prolifération de quasi-doublons (« Format de réponse préféré… » reformulé à chaque passe).
