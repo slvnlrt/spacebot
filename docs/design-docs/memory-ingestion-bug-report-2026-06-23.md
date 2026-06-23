@@ -102,24 +102,28 @@ tool-call LLM sert de **signal de contrôle** que le harness connaît déjà.
    désynchronisé du disque (B3). Pattern « état partiellement appliqué ».
 3. **Boucles de fond sans garde-fou** — l'ingestion re-tente sans limite (B1) ; la maintenance amplifie (B5).
 
-## AUDIT à mener — « tool-call LLM utilisé comme signal de contrôle »
+## AUDIT — « tool-call LLM utilisé comme signal de contrôle » — RÉALISÉ (2026-06-23)
 
 > Anti-pattern : faire dépendre une décision de control-flow/lifecycle d'un appel d'outil que le LLM doit émettre,
 > alors que le harness connaît (ou pourrait connaître) la réponse de façon **déterministe**. B2 en est un cas confirmé.
-> Sites candidats trouvés par scan (chacun **à vérifier** — ne pas présumer que tous sont buggés) :
+> Tous les sites candidats ont été **vérifiés dans le code** (verdicts ci-dessous).
 
-| Site | Mécanisme | Statut |
+| Site | Mécanisme | Verdict (vérifié) |
 |---|---|---|
-| `ingestion.rs:535` (chunk) | `memory_persistence_complete` → `has_terminal_outcome()` ; sinon `Err` → retry infini | **CONFIRMÉ buggé (B2)** |
-| `channel_dispatch.rs:211-302` (memory persistence branch, côté canal) | **même** `MemoryPersistenceContractState` | **À vérifier en priorité** — même contrat ; que fait l'échec du signal (re-spawn ? retry ? no-op ? effets de bord ?) |
-| `branch.rs:37-71` (overlay générique de branch) | contrat de persistance optionnel sur les branches | À vérifier |
-| `task_update` (flag `completed` posé par le LLM) | le LLM déclare une tâche terminée | À vérifier — jugement légitime, ou seul signal autoritatif ? |
-| Lifecycle **branch/worker** en général | la complétion vient-elle du run qui retourne (déterministe) ou d'un signal LLM ? | À cartographier |
+| `ingestion.rs:535` (chunk) | `memory_persistence_complete` → `has_terminal_outcome()` ; sinon `Err` → poll re-traite | **🔴 CONFIRMÉ buggé (B2).** Boucle de poll **non bornée** → re-exécution infinie + saves non-transactionnels. |
+| `channel_dispatch.rs:207-247` → `branch.rs:137-239` (persistance canal) | **même** `MemoryPersistenceContractState` | **🟢 PAS le même bug.** Même contrat, mais : retries **bornés à 2** (`MAX_MEMORY_CONTRACT_RETRIES`, `branch.rs:19`), re-prompt du **même** agent (history continue → pas de re-save complet), puis **abandon propre** (`break` + `Ok(conclusion)`, l.182-183). Event-driven (1 branche/tour) → **aucun re-spawn en boucle**. Résidu **bénin** : si abandon, perte des `events` du tool de complétion ; risque de doublon **borné** (≤2) si un modèle faible re-save pendant les nudges. **Priorité basse** (fixé incidemment par B4 dédup). |
+| `branch.rs:37-71` (overlay générique) | contrat optionnel porté par `BranchExecutionConfig` | **🟢 Idem ci-dessus** — c'est le même mécanisme borné ; l'enforcement vit dans `Branch::run` (l.137-239) et dans `should_reject_memory_persistence_completion` (`hooks/spacebot.rs:920`). Non buggé. |
+| `task_update` (`status=done` posé par le LLM) | le LLM déclare une tâche terminée (`task_update.rs:173-272`) | **🟢 PAS l'anti-pattern.** « Le *but* de la tâche est-il atteint ? » est un **jugement sémantique** que le harness ne peut **pas** connaître déterministiquement — autorité LLM légitime. Aucun effet de bord sur échec, aucune boucle : si non émis, la tâche reste `in_progress`. L'`update` **est** le signal (pas de side-effect committé « avant »). |
 
-**Questions à poser par site :** (a) le harness connaît-il déjà la réponse de façon déterministe ? (b) que se
+**Conclusion de l'audit :** le runaway est **spécifique à l'ingestion** (`ingestion.rs`). L'anti-pattern « tool-call =
+signal de contrôle » n'est nuisible que là où il se combine à une **boucle de relance non bornée** + des **effets de
+bord non transactionnels**. Côté canal, le **même contrat** est inoffensif parce que la relance est bornée et
+event-driven. La règle reste : *le LLM produit le contenu/jugement ; le contrôle (« done ») reste déterministe dans le
+code* — appliquée en priorité à B2.
+
+**Questions posées par site (méthode) :** (a) le harness connaît-il déjà la réponse de façon déterministe ? (b) que se
 passe-t-il si le LLM **n'émet pas** le signal (no-op / retry / re-spawn / perte / boucle) ? (c) des **effets de bord
-sont-ils committés avant** le signal (état partiellement appliqué) ? **Règle cible :** le LLM produit le contenu/jugement ;
-le contrôle (« done ») reste déterministe dans le code.
+sont-ils committés avant** le signal (état partiellement appliqué) ?
 
 ## À vérifier ailleurs (même pattern)
 
@@ -152,5 +156,18 @@ les outils de l'agent). À décider : faut-il qu'un fichier écrit par l'agent s
 aux uploads explicites ?
 
 ## Statut
-**Documenté. Causes identifiées. Non corrigé.** Bugs généraux (SQLite + SurrealDB). Ne bloquent pas le merge de la
-branche surreal (orthogonaux), mais B1+B2+B4 forment un trio à corriger avant tout usage réel de l'ingestion.
+**Documenté. Causes vérifiées au niveau code (2026-06-23). Audit anti-pattern réalisé. Non corrigé — plan en cours.**
+Bugs généraux (SQLite + SurrealDB). Ne bloquent pas le merge de la branche surreal (orthogonaux), mais le **trio
+B1+B2+B3** (Lot 1) arrête le runaway et doit être corrigé avant tout usage réel de l'ingestion.
+
+**Plan de correction (3 lots) :**
+- **Lot 1 — arrêt du runaway (déterministe, sans LLM, bas risque) :** B2 (retirer le gate `has_terminal_outcome` dans
+  `process_chunk` — un chunk est terminé quand `prompt_once` retourne `Ok` ; logguer `saved_memory_ids().len()` pour
+  l'observabilité), B1 (cap + backoff + quarantaine via colonnes `attempts`/`next_attempt_at` sur `ingestion_files`,
+  ré-armement explicite), B3 (delete = `fs::remove_file` + purge `ingestion_files` **et** `ingestion_progress`).
+- **Lot 2 — consolidation (= incrément intelligence I2) :** B4 (dédup-à-l'écriture : top-k similaire → UPDATE/NOOP ;
+  filet de sécurité contre re-saves sur retry transitoire), B5 (fusion = garder la version canonique au lieu de
+  concaténer).
+- **Lot 3 — cosmétique :** B6 (ne pas compter les recalls ambiants).
+
+Plan d'implémentation détaillé : voir `docs/superpowers/plans/2026-06-23-ingestion-runaway-fixes.md`.
