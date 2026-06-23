@@ -3,9 +3,10 @@
 Where the branch stands and what to do next. Read [`README.md`](./README.md) for
 the objective and [`gotchas.md`](./gotchas.md) before editing code.
 
-> Updated 2026-06-22 after Plans A–E landed (branch feature-complete). The table
-> below is the Plan A+B snapshot; Plans C/D/E and the current backlog are in the
-> dated sections further down — those govern where they overlap.
+> Updated 2026-06-23 after a **real deployment test** (see that section below). Plans A–E
+> landed 2026-06-22 (branch feature-complete). The table below is the Plan A+B snapshot;
+> Plans C/D/E, the deployment test, and the current backlog are in the dated sections
+> further down — those govern where they overlap.
 
 ## What's done (Plan A + Plan B)
 
@@ -94,8 +95,48 @@ stays in `search.rs`, no per-backend duplication).
    (#17). See `followups.md` for rationale.
 
 **Everything else is DONE.** The branch is feature-complete and merge-ready (default
-build unaffected; both configs gate-green; SurrealDB runtime-validated; backup story
-verified; CI covers the feature; migration cutover available).
+build unaffected; both configs gate-green; SurrealDB runtime-validated **including a
+real deployment test**; backup story verified; CI covers the feature; migration cutover
+available). The general memory/ingestion bugs found during the deployment test (below)
+are **cross-backend** (not surreal-specific) and orthogonal to this merge.
+
+## Real deployment test — 2026-06-23
+
+First end-to-end run on a live instance (feature-on binary, one embedded SurrealDB per
+agent, reached over an SSH tunnel with `api.bind = 127.0.0.1`). Outcome:
+
+- ✅ **SurrealDB validated in real conditions.** Chat → memories saved → recall/search
+  work; the graph populates. **Durability/recovery confirmed by a real daemon
+  stop/start**: the on-disk SurrealKV store reopens with all memories intact (a brief
+  in-session "data loss" scare was traced entirely to the binary footgun below — there
+  is **no** SurrealKV durability/recovery bug).
+- ⚠️ **Binary footgun (ops-critical).** `cargo build --release --features surreal-memory`
+  can land a **feature-OFF** binary (observed once: 305 MiB, `migrate-memory` absent).
+  A feature-off daemon **silently falls back to SQLite for every agent** (warn:
+  *"memory_backend=surreal but the surreal-memory feature is not compiled in"*) despite
+  `memory_backend=surreal` in config — so the surreal store looks "orphaned" while the
+  agent quietly writes SQLite. **Safeguard: after every build, verify
+  `./target/release/spacebot migrate-memory --help` responds** (= feature present)
+  before deploying. Also: build the frontend (`cd interface && bun run build`) **before**
+  the cargo build, or rust-embed ships an empty UI (`interface/dist` is embedded at
+  compile time → blank dashboard).
+- 🐛 **General memory/ingestion bugs found** (cross-backend — apply to SQLite too;
+  **not** blockers for the surreal merge): a stuck/`failed` ingestion file retried
+  forever → continuous duplicate memory creation; memory writes committed on a chunk that
+  is then marked `failed` (non-transactional side effects); no dedup-on-write; the
+  maintenance merge **concatenates** near-dups instead of rewriting → bloated memories;
+  UI "delete ingest file" removes the DB row but **not** the disk file → reappears;
+  `access_count` inflation (cosmetic). Full record, root causes & exact failure moments:
+  [`../memory-ingestion-bug-report-2026-06-23.md`](../memory-ingestion-bug-report-2026-06-23.md).
+- 🔍 **Audit flagged**: *LLM tool-call used as a deterministic-control signal* (the
+  ingestion "memory_persistence_complete" contract; ≥3 sites). Seeded in the bug report.
+- 🧹 **Memory reset to 0** on both agents for a clean test slate (reversible backup at
+  `/tmp/memory-reset-backup-2026-06-23`). The ingestion trigger (`knowledge-base.md` an
+  agent had dropped in `workspace/ingest/`) was removed from disk.
+
+> Research/next-steps docs added this cycle (indexed in [`README.md`](./README.md)):
+> `gap-analysis-intelligence.md`, `big-players-architecture-comparison.md`,
+> `emerging-research-notes.md`, `operating-surreal-backend.md`.
 
 ## Decisions
 

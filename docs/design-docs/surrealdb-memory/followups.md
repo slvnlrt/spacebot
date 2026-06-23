@@ -41,7 +41,7 @@ reflect this.
 | 5 | 🟡 | **FTS differs from Tantivy** (analyzer lacks stemming). | **RESOLVED (Plan C)** — added `snowball(english)` to `memory_an`; 2 gated stemming tests (query "run" matches "running", "database" matches "databases") that fail against the old analyzer. Caveat documented: `IF NOT EXISTS` means a live on-disk store needs `OVERWRITE` + FTS re-index to pick it up. |
 | 6 | 🟡 | **KNN `EF = (limit*4).max(40)` arbitrary.** | **RESOLVED (Plan C)** — benchmarked (spike `bench_hnsw`). recall@10 = 1.0 at all EF on planted 384-dim clusters; EF=40 showed a severe **tail-latency pathology** (p99 ≈ 15s on a pathological query). Floor raised `(limit*4).max(40)` → `.max(80)` in `vector_search`+`find_similar` (eliminates the tail, ~+1ms median). |
 | 7 | 🟡 | **Scale/recall unproven.** | **RESOLVED (Plan C)** — recall@10 measured at **384-dim** on planted near-dup clusters (10–20k-vector on-disk `kv-surrealkv` index, `TYPE F32`) = 1.0 across EF∈{40..640} vs exact-cosine ground truth; p50/p95 latency captured. (Bulk-random recall is meaningless in 384-dim — planted clusters are the signal.) |
-| 8 | 🔵 | **CI can't build the feature** without onnxruntime/bypass. | open — note: real ort IS available in this env (tests run); CI just needs onnxruntime installed or the bypass for compile-coverage. |
+| 8 | 🔵 | **CI can't build the feature** without onnxruntime/bypass. | **RESOLVED (2026-06-22)** — added a `check-surreal` job to `.github/workflows/ci.yml` (`cargo clippy --all-targets --features surreal-memory`); ort downloads onnxruntime at build time like the default jobs, so the gated code can't rot. |
 | 9 | 🔵 | **Dependency weight / slim surreal build.** | open (deferred, per owner). **MEASURED (2026-06-22, release `lto=thin strip=true`):** default binary (SQLite+Lance) = **270 MiB**; both backends (feature-on) = **321 MiB** → embedding SurrealDB alongside costs **+50 MiB (+18%)**. KEY FINDING: **Lance is memory-only** (sole use = `EmbeddingTable` embeddings; confirmed — only `memory/*`+`db.rs`+construction reference it). So the slim path is **dropping Lance, NOT SQLite**: make backend selection COMPILE-TIME-exclusive (feature on ⇒ SurrealDB sole memory path, `lancedb` made an optional dep gated off). Likely nets a binary **< 270 MiB** (Lance/arrow/datafusion removed > SurrealDB added). `fastembed`/`ort` stays either way (generates embeddings regardless of storage). **SQLite CANNOT be removed** — it is the app-wide relational DB (36 non-memory files: conversations/channels/tasks/projects/cron/attachments/usage/…); SurrealDB is memory-scoped by design. Removing SQLite = whole-app migration, out of scope. |
 | 10 | 🔵 | **`Association.id` synthesized** (`src:rt:tgt`) — edges lose the original UUID. | **ACCEPT / won't-fix** — SurrealDB `relates` edges have no separate UUID by design; the synthesized id is stable and unused by search/maintenance. No code change. |
 | 11 | 🔵 | **Schema re-applied on every `open`** — idempotent (`IF NOT EXISTS`). | **ACCEPT / won't-fix** — `IF NOT EXISTS` no-ops cheaply per-agent; not worth the complexity of a version gate. No code change. |
@@ -50,6 +50,27 @@ reflect this.
 | 16 | 🟠 | **`MemorySearch::traverse_graph` was N+1** — the hybrid-search seed traversal. | **RESOLVED (Plan D)** — added batched `get_associations_for`/`load_many` primitives to `MemoryBackend` and rewrote `traverse_graph` level-by-level: O(depth)×2 queries (≤4 at the default depth-2) instead of O(nodes) N+1. Behaviour-preserving — a golden characterization test asserts exact `ScoredMemory` scores across re-expansion, off-path scoring, forgotten-skip, cross-node first-seen, and depth-bound; Opus final-reviewed (scores hand-verified). The generic scoring/selective-expansion logic stays in `search.rs` (no per-backend duplication). |
 | 17 | 🔵 | Minor test gaps (final-review triage). | C2 exclude-edge gap **RESOLVED** — the final review found excluded nodes leaked into the EXPANDED edge-source set; fixed (seed `exp_seen` with `exclude_ids`) and the test now asserts `excl→*` edges are absent. C5 p99-from-80-samples / construction-based recall ground truth: accepted (spike tool; ε=0.04 clusters are unambiguous). |
 | 15 | 🟠 | **`surreal_migrate` not wired into runtime** (no callers). | **RESOLVED (Plan E)** — wired into a feature-gated CLI subcommand `spacebot migrate-memory [--agent <id>]` (run with the daemon stopped; refuses if running). Iterates `resolve_agents()`, builds SQLite source + SurrealKV target per agent, runs `migrate_from_sqlite`, prints per-agent counts. Migration logic itself is idempotent (#12). Full end-to-end run needs a live `~/.spacebot` (manual); `--help`/parse + dual-build are the automated gate. |
+
+## Cross-cutting bugs — found in the real deployment test (2026-06-23)
+
+These surfaced when testing memory live. They are **NOT surreal-specific** (apply to the SQLite+Lance backend too) and
+are **orthogonal to this branch's merge** — but B1/B2/B4 form a trio to fix before any real use of the ingestion path.
+Full record (symptoms, root causes, exact failure moments, audit): [`../memory-ingestion-bug-report-2026-06-23.md`](../memory-ingestion-bug-report-2026-06-23.md).
+
+| Bug | Sev | Summary |
+|---|---|---|
+| B1 | 🔴 | Ingestion **retries a `failed` file forever** (poll loop, no max-retries/backoff/quarantine) → continuous re-creation. |
+| B2 | 🔴 | A chunk **saves memories then is marked `failed`** (LLM didn't emit `memory_persistence_complete`). Non-transactional side effects + unbounded retry. **Root anti-pattern:** LLM tool-call used as a control/lifecycle signal the harness should determine deterministically. |
+| B3 | 🟠 | UI "delete ingest file" deletes the DB row **but not the disk file** → poll re-discovers it → "reappears". |
+| B4 | 🟠 | **No dedup-on-write** (`memory_save` = blind insert) → near-duplicate memories. (= the I2 gap.) |
+| B5 | 🟡 | Maintenance **merge concatenates** near-dups (`merged_memory_content`) instead of rewriting → bloated memories. |
+| B6 | 🟡 | `access_count` inflation (importance-1.0 memories always top-k → +1 every recall). Cosmetic (decay uses recency). |
+
+**Also (binary footgun, ops):** a `--features surreal-memory` build can land a feature-OFF binary that silently falls
+back to SQLite. Verify `migrate-memory --help` on the deployed binary. (See `handoff.md` → Real deployment test.)
+
+**Audit to run:** *LLM tool-call as a deterministic-control signal* — candidate sites (ingestion = confirmed;
+memory-persistence branch, generic branch overlay, `task_update` = to verify). Seeded in the bug report.
 
 ## Notes on fixes
 
