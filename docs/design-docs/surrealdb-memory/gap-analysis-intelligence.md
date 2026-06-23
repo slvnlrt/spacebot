@@ -1,6 +1,9 @@
 # Gap Analysis — La couche « intelligence » de la mémoire
 
 > Date : 2026-06-22. Branche : `feat/surrealdb-memory`.
+> **Révisé 2026-06-23** après recherche web : MemOS scindé (gouvernance/permissions ≠ YAGNI), user-scoping remonté en
+> priorité haute (spacebot est multi-user *par conception*), sleep-time compute (Letta), bi-temporalité confirmée
+> convergente (Zep + Cognee + Mem0), et ajout des frontières émergentes 2026. Sources en §Sources.
 >
 > **Objet :** comparer, axe par axe, ce que la mémoire de spacebot fait *réellement aujourd'hui*
 > (intelligence, pas stockage) avec les mécanismes des systèmes de mémoire d'agents à l'état de l'art
@@ -31,12 +34,13 @@ Maturité spacebot : ●●● mûr · ●●○ partiel · ●○○ embryonnai
 | 5 | Intelligence de retrieval | ●●○ | Hybride RRF+graphe OK, mais **ni importance/récence dans la fusion**, ni reranking, ni diversité | **Haute** (quick win) |
 | 6 | Réflexion / synthèse | ●●● | 4 boucles LLM (cortex) **livrées** ; manque la consolidation autonome (Phase 4) | Basse |
 | 7 | Oubli / décroissance / tiering | ●●○ | Décroissance+prune OK ; **tiered memory DESIGN-ONLY** (pas de colonne `tier`) | Moyenne |
-| 8 | Personnalisation / scoping | ●●○ | Scopé par agent ; `channel_id` non filtré ; **user-scoping absent** | Moyenne |
+| 8 | Personnalisation / scoping | ●●○ | Scopé par agent ; `channel_id` non filtré ; **user-scoping absent** (or spacebot est multi-user *par conception*) | **Haute** |
 
 **Lecture rapide :** spacebot n'est *pas* un débutant — il a déjà l'extraction automatique, un vrai pipeline de
 maintenance (décroissance/merge), un cortex qui synthétise, des relations typées et un retrieval hybride. Les
 écarts les plus rentables sont **(5) le scoring de retrieval** (quasi-gratuit, fort impact), **(2) la consolidation
-à l'écriture** façon Mem0, et **(4) la bi-temporalité** (que SurrealDB rend bon marché).
+à l'écriture** façon Mem0, **(4) la bi-temporalité** (que SurrealDB rend bon marché), et — spacebot étant **multi-user
+par conception** — **(8) le user-scoping** (sans lui, les mémoires de tous les utilisateurs d'un agent se mélangent).
 
 ---
 
@@ -139,9 +143,12 @@ seulement si l'usage multi-entités le justifie (YAGNI sinon).
 Grep `valid_from|valid_to|as_of|bitemporal|fact_time` dans `src/memory/` → **zéro**. Impossible de répondre « que
 savais-je de X *au* 12 mars ». `Updates`/`Contradicts` ne servent **pas** à filtrer/invalider au retrieval.
 
-**SOTA.** **Zep/Graphiti** est le référent : modèle **bi-temporel** — `t_valid`/`t_invalid` (temps du fait) **distincts**
-de `created_at` (temps d'ingestion). Un fait contredit voit son arête **invalidée** (datée), pas supprimée ; requêtes
-**point-in-time**. C'est ce qui leur donne le SOTA sur LongMemEval *(vendor-reported)*.
+**SOTA.** **Zep/Graphiti** est le référent : modèle **bi-temporel à 4 timestamps** — `t_valid`/`t_invalid` (intervalle
+où le *fait* a été vrai) **distincts** de `t_created`/`t_expired` (temps *système* de création/invalidation). Un fait
+contredit voit son arête **invalidée** (datée), **pas supprimée** ; requêtes **point-in-time**. Zep rapporte +18,5 % sur
+LongMemEval et −90 % de latence *(vendor-reported)*. **Pattern convergent, pas exotique :** **Cognee** (DataPoint
+versionné/horodaté qui « invalide sans supprimer ») et **Mem0** (opération DELETE sur contradiction) font la même chose
+— trois systèmes SOTA **invalident au lieu d'écraser**. C'est du *table-stakes*.
 
 **Écart.** Total. C'est le plus gros manque conceptuel : spacebot ne sait pas qu'un fait a **cessé d'être vrai**.
 
@@ -196,10 +203,19 @@ dit lui-même). C'est l'agent qui résoudrait les contradictions cross-canal et 
 synthèse descendante ; il lui manque la **boucle d'écriture autonome** (réinjecter des insights *comme nouvelles
 mémoires*, pas seulement comme bulletins).
 
-**À emprunter.** Implémenter la Phase 4 : laisser le cortex **écrire des mémoires de synthèse** (et invalider/merger via
-l'axe 2). Naturellement couplé aux axes 2 & 4.
+**Insight architectural — « sleep-time compute » (Letta).** L'état de l'art récent sépare le *memory shaping* de
+l'interaction : un **agent sleep-time** partage la mémoire de l'agent principal et la **remodèle en arrière-plan** (idle)
+via des appels type `rethink_memory()`, sortant le raisonnement lourd de la latence utilisateur (≈ −5× de calcul en
+fenêtre interactive *(vendor-reported)*). **Le cortex de spacebot EST déjà un agent sleep-time.** L'implication directe :
+la **consolidation (I2)** et l'**inférence d'arêtes (I5)** devraient tourner **dans le cortex en arrière-plan**, pas dans
+le tour de conversation — spacebot est idéalement placé pour ça.
 
-**Coût / valeur.** Élevé / moyen (l'essentiel de la valeur de synthèse est déjà capté par les bulletins).
+**À emprunter.** Implémenter la Phase 4 comme **boucle de consolidation sleep-time** : laisser le cortex **écrire des
+mémoires de synthèse**, **invalider/merger** (axe 2) et **horodater** (axe 4) en arrière-plan. Naturellement couplé aux
+axes 2 & 4.
+
+**Coût / valeur.** Élevé / moyen (l'essentiel de la valeur de synthèse est déjà capté par les bulletins ; le gain neuf
+est de faire tourner I2/I4 *là*, en async).
 
 ---
 
@@ -240,9 +256,13 @@ partagées ». C'est indispensable en multi-utilisateur (un bot communautaire/en
 Bob (le problème exact décrit dans `user-scoped-memories.md`).
 
 **À emprunter.** Le design existe déjà — implémenter `user_id` optionnel + recall scopé (mémoires du user + globales).
-Pré-requis : la résolution d'identité (table `user_identifiers`) déjà spécifiée.
+Pré-requis : la résolution d'identité (table `user_identifiers`) déjà spécifiée. **À compléter par une couche de
+gouvernance façon MemOS** : metadata de **permission/provenance par mémoire** (qui peut lire/écrire), `MemGovernance`
+abstrait — c'est la dimension « access-control across users » que MemOS formalise et qu'un système multi-user exige.
 
-**Coût / valeur.** Moyen / élevé **si** déploiement multi-user ; faible **si** bot perso (YAGNI).
+**Coût / valeur.** Moyen / **élevé** — **spacebot étant multi-utilisateur par conception, ce n'est PAS optionnel** :
+sans scoping, un déploiement communauté/équipe mélange les mémoires de tous les utilisateurs (le problème exact de
+`user-scoped-memories.md`). **Priorité haute, pas YAGNI.**
 
 ---
 
@@ -259,30 +279,41 @@ Pré-requis : la résolution d'identité (table `user_identifiers`) déjà spéc
 | I4. Score d'importance LLM à l'extraction | 1 | Faible-moyen | Moyenne | persistence branch (déjà là) |
 | I5. Inférence d'arêtes typées par la branch | 3 | Faible-moyen | Moyenne | — |
 | I6. Reranking LLM + MMR/diversité (top-N) | 5 | Moyen | Moyenne | I1 |
-| I7. User-scoping (`user_id` + recall scopé) | 8 | Moyen | Élevée* | *si multi-user |
-| I8. Cortex Phase 4 (consolidation autonome) | 6 | Élevé | Moyenne | I2, I4 |
-| I9. Tiered memory explicite (colonne `tier`, TTL, boost) | 7 | Moyen | Faible | redondant avec I1 — **YAGNI** |
+| **I7. User-scoping (`user_id` + recall scopé) + gouvernance/permissions** | 8 | Moyen | **Élevée** | — (multi-user = besoin réel, pas hypothétique) |
+| I8. Cortex Phase 4 = boucle de consolidation **sleep-time** (porte I2/I4/I5 en async) | 6 | Élevé | Moyenne | I2, I4 |
+| I9. Tiered memory explicite (colonne `tier`, TTL, boost) | 7 | Moyen | Faible | retrieval-boost redondant avec I1 ; le *bornage* du hot-set reste — **à mesurer avant** |
 | I10. Couche entités / résolution d'entités | 3 | Élevé | Variable | usage-dépendant — **YAGNI** par défaut |
 
-**Trio recommandé pour passer « state of the art » :** **I1 + I2 + I3.**
+**Cœur SOTA recommandé : I1 + I2 + I3, + I7 (gouvernance multi-user).**
 - I1 corrige le retrieval à coût quasi nul.
-- I2 transforme l'écriture-puis-nettoyage en **consolidation intelligente** (le cœur de Mem0).
-- I3 ajoute la **dimension temporelle** (le cœur de Zep) — et c'est précisément ce que le moteur SurrealDB qu'on
-  vient d'installer rend bon marché.
+- I2 transforme l'écriture-puis-nettoyage en **consolidation intelligente** (le cœur de Mem0) — à faire tourner en
+  **sleep-time** dans le cortex (cf. axe 6).
+- I3 ajoute la **dimension temporelle** (le cœur de Zep ; convergent avec Cognee/Mem0) — précisément ce que le moteur
+  SurrealDB qu'on vient d'installer rend bon marché.
+- **I7** n'est pas optionnel ici : spacebot étant **multi-user par conception**, le scoping + la gouvernance des
+  mémoires (permissions/provenance, façon MemOS) sont un **prérequis produit**, pas un raffinement.
 
-Ces trois adressent les trois écarts « Haute priorité » du scorecard et s'enchaînent logiquement (I2 produit les
-UPDATE que I3 horodate).
+I1–I3 s'enchaînent logiquement (I2 produit les UPDATE que I3 horodate) ; I7 est orthogonal et peut avancer en parallèle.
 
 ---
 
 ## 4. Ce qu'on N'EMPRUNTE PAS (anti-over-engineering)
 
-- **MemOS / MemCube governance, mémoire paramétrique/activation** : surdimensionné pour spacebot (orienté infra de
-  fournisseur de mémoire multi-tenant). YAGNI.
-- **Tiering explicite** tant que I1 (récence dans le score) suffit.
-- **Couche ontologie/entités complète** (Cognee) tant qu'aucun usage ne l'exige — la résolution d'entités est coûteuse
-  et fragile.
-- **Paging OS-like (MemGPT)** : non pertinent — le contexte est géré par le système de working-memory + cortex existant.
+> Distinction importante (corrigée après recherche) : **MemOS n'est pas YAGNI en bloc.** Il faut scinder.
+
+- **MemOS — substrats paramétrique & activation** (deltas de poids, KV-cache) : **YAGNI** — mécanismes d'une autre
+  classe (éditer le modèle / réutiliser le cache), sans rapport avec « stocker des faits dans une DB ».
+  ⚠️ **MAIS la couche gouvernance de MemOS n'est PAS YAGNI** : MemCube porte une *Metadata Header (lifecycle,
+  **permission**, storage policy)* et `MemGovernance` formalise l'**access-control across users** — c'est exactement
+  ce dont un spacebot multi-user a besoin. → **emprunté via I7**, pas écarté.
+- **Tiering explicite (colonne `tier`)** : le *boost retrieval* est redondant avec I1 ; le seul apport restant est le
+  **bornage du hot-set** (TTL/LRU) — bénéfice non démontré aujourd'hui. **À mesurer avant d'implémenter**, pas YAGNI
+  par principe.
+- **Couche ontologie / résolution d'entités complète** (Cognee) : coûteuse et fragile (entity-linking LLM corrompt le
+  graphe en cas d'erreur). YAGNI **par défaut** — mais l'**inférence d'arêtes typées** (I5), elle, est rentable et
+  retenue. Flip si des requêtes entité-centriques deviennent un besoin.
+- **Paging OS-like (MemGPT)** : non pertinent — le contexte est géré par working-memory + cortex. (Le *self-editing
+  memory* de Letta, lui, est déjà fait via `memory_save` et étendu par I2.)
 
 ## 5. En quoi l'infra SurrealDB (Plans A–E) sert cette couche
 
@@ -296,11 +327,40 @@ UPDATE que I3 horodate).
 
 ---
 
+## 6. Frontières émergentes 2026 (à connaître, pas à construire tout de suite)
+
+Le survey *« Memory for Autonomous LLM Agents: Mechanisms, Evaluation, and Emerging Frontiers »* (arXiv 2603.07670)
+classe les mécanismes en 5 familles (compression in-context, stores augmentés-retrieval, **auto-amélioration
+réflexive**, contexte virtuel hiérarchique, **gestion par politique apprise**) et liste 5 problèmes ouverts :
+
+- **Gestion par politique apprise / admission control adaptatif** (cf. *Adaptive Memory Admission Control*, arXiv
+  2603.04549 ; *Adaptive Memory Structures*, 2602.14038) : remplacer les **seuils fixes** par des politiques
+  **adaptatives/apprises**. spacebot est aujourd'hui 100 % seuils fixes (merge 0.95, prune 0.1, decay 0.05, seed 0.8) —
+  c'est la direction de recherche, mais **probablement YAGNI court-terme** (gain incertain vs complexité).
+- **Continual consolidation** : exactement ce que I2 + le sleep-time (I8) adressent.
+- **Causally-grounded retrieval** (« se souvenir du *pourquoi* ») : spacebot a déjà `CausedBy`/`ResultOf` mais ne les
+  exploite pas au retrieval — **opportunité quasi-gratuite** à brancher dans I1.
+- **Learned forgetting** : oubli adaptatif (vs décroissance à taux fixe). Émergent.
+- **Trustworthy reflection** : fiabilité de l'auto-synthèse (pertinent pour le cortex).
+
+Verdict : ces frontières confirment la direction (I1–I3 + sleep-time), mais les variantes *apprises/adaptatives* sont
+de la recherche — à surveiller, pas à intégrer dans le premier jet.
+
 ## Sources
 
-État de l'art détaillé (systèmes, patterns convergents, schéma cible) :
+Survey interne associé (systèmes, patterns convergents, schéma cible) :
 [`research-llm-memory-feasibility.md`](./research-llm-memory-feasibility.md) §1–2 et §6.
-Systèmes référencés : Mem0 (extract-update, mem0g), Zep/Graphiti (KG bi-temporel), Cognee (ECL), Letta/MemGPT
-(self-editing memory), MemOS (MemCube), Generative Agents (reflection + score récence·importance·pertinence), A-MEM
-(notes Zettelkasten évolutives), HippoRAG (personalized PageRank). Benchmarks cités (LOCOMO, LongMemEval) :
-**vendor-reported**, à valider indépendamment avant d'en faire un argument.
+
+Recherche web (consultée le 2026-06-23) :
+- Survey 2026 — *Memory for Autonomous LLM Agents* : https://arxiv.org/abs/2603.07670
+- *Adaptive Memory Admission Control for LLM Agents* : https://arxiv.org/pdf/2603.04549
+- Mem0 (extract → ADD/UPDATE/DELETE/NOOP ; mem0g graphe) : https://arxiv.org/html/2504.19413v1 · https://docs.mem0.ai/platform/advanced-memory-operations
+- Zep/Graphiti (KG bi-temporel à 4 timestamps, edge invalidation, LongMemEval +18,5 %) : https://arxiv.org/html/2501.13956v1 · https://neo4j.com/blog/developer/graphiti-knowledge-graph-memory/
+- MemOS / MemCube (Metadata Header permission/lifecycle, MemGovernance, MemScheduler) : https://arxiv.org/pdf/2507.03724 · https://arxiv.org/abs/2505.22101
+- Letta — sleep-time compute (agent de remodelage mémoire en arrière-plan) : https://www.letta.com/blog/sleep-time-compute · https://docs.letta.com/guides/agents/architectures/sleeptime/
+- Cognee — ECL + ontologie RDF + DataPoint versionné (« invalide sans supprimer ») : https://docs.cognee.ai/core-concepts/main-operations/cognify
+- État du domaine 2026 (Mem0/Zep/Letta/Cognee) : https://mem0.ai/blog/state-of-ai-agent-memory-2026
+
+Systèmes également référencés : Generative Agents (reflection + score récence·importance·pertinence), A-MEM (notes
+Zettelkasten évolutives), HippoRAG (personalized PageRank multi-hop). Benchmarks (LOCOMO, LongMemEval) :
+**vendor-reported** — à valider indépendamment avant d'en faire un argument.
