@@ -85,6 +85,16 @@ fichier du disque → impossible d'arrêter la boucle depuis l'UI.
 
 ---
 
+### Principe de fix B2 (anti-pattern à corriger en général)
+
+**Ne pas confier une décision de control-flow/cycle-de-vie à un LLM.** « Le chunk est-il terminé ? » est
+**déterministe** : le harness le sait quand `prompt_once()` retourne `Ok`. Exiger un tool-call
+`memory_persistence_complete` met une décision de lifecycle entre les mains d'un modèle (non-déterministe ; un petit
+modèle l'oublie). **Fix correct** : marquer le chunk *completed* **dès que le run retourne `Ok`** ; si on veut vérifier
+que du travail a eu lieu, **compter les appels `memory_save`** (fait observable) au lieu d'un « je déclare avoir fini ».
+Le LLM produit le *contenu/jugement* (quoi sauver) ; le *contrôle* (« done ») reste au code. À auditer partout où un
+tool-call LLM sert de **signal de contrôle** que le harness connaît déjà.
+
 ## Causes sous-jacentes (transverses)
 
 1. **Aucune couche de consolidation/dédup mémoire** (gap I2) — la cause-mère de B4/B5, et l'amplificateur de B1/B2.
