@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 /// Schema constants for the embeddings table.
 const TABLE_NAME: &str = "memory_embeddings";
-const EMBEDDING_DIM: i32 = 384; // all-MiniLM-L6-v2 dimension
+pub const EMBEDDING_DIM: i32 = 384; // all-MiniLM-L6-v2 dimension
 
 /// LanceDB table for memory embeddings with HNSW index and FTS.
 pub struct EmbeddingTable {

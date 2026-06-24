@@ -2468,9 +2468,8 @@ async fn run_cortex_loop(
                             tokio::sync::watch::channel(false);
                         maintenance_task = Some(tokio::spawn(async move {
                             memory_maintenance::run_maintenance_with_cancel(
-                                memory_search.store(),
-                                memory_search.embedding_table(),
-                                memory_search.embedding_model_arc(),
+                                memory_search.backend().clone(),
+                                memory_search.embedding_model_arc().clone(),
                                 &maintenance_config,
                                 maintenance_cancel_rx,
                             )
@@ -4530,8 +4529,7 @@ async fn run_association_pass(
     let max_per_pass = cortex_config.association_max_per_pass;
     let is_backfill = since.is_none();
 
-    let store = deps.memory_search.store();
-    let embedding_table = deps.memory_search.embedding_table();
+    let store = deps.memory_search.backend();
 
     // Get the memories to process
     let memories = match fetch_memories_for_association(&deps.sqlite_pool, since).await {
@@ -4555,7 +4553,7 @@ async fn run_association_pass(
         }
 
         // Find similar memories via embedding search
-        let similar = match embedding_table
+        let similar = match store
             .find_similar(memory_id, similarity_threshold, 10)
             .await
         {

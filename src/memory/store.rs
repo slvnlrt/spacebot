@@ -457,33 +457,117 @@ impl MemoryStore {
             return Ok(Vec::new());
         }
 
-        // Build a parameterized IN clause. SQLite handles this fine for
-        // the sizes we deal with (up to ~500 IDs).
-        let placeholders: String = memory_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-        let query_str = format!(
-            "SELECT id, source_id, target_id, relation_type, weight, created_at \
-             FROM associations \
-             WHERE source_id IN ({placeholders}) AND target_id IN ({placeholders})"
-        );
+        // Chunk the IN-list to stay under SQLite's bind-parameter limit on large
+        // sets. Query `source_id IN (chunk)` per chunk (one bind per id) and filter
+        // `target_id` against the full set in Rust, so cross-chunk pairs (source in
+        // one chunk, target in another) are not missed.
+        const CHUNK: usize = 400;
+        let id_set: std::collections::HashSet<&str> =
+            memory_ids.iter().map(String::as_str).collect();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut out = Vec::new();
 
-        let mut query = sqlx::query(&query_str);
-        // Bind once for source_id IN, once for target_id IN
-        for id in memory_ids {
-            query = query.bind(id);
+        for chunk in memory_ids.chunks(CHUNK) {
+            let placeholders: String = chunk.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+            let query_str = format!(
+                "SELECT id, source_id, target_id, relation_type, weight, created_at \
+                 FROM associations WHERE source_id IN ({placeholders})"
+            );
+            let mut query = sqlx::query(&query_str);
+            for id in chunk {
+                query = query.bind(id);
+            }
+            let rows = query
+                .fetch_all(&self.pool)
+                .await
+                .context("failed to get associations between memory set")?;
+            for row in rows {
+                let assoc = row_to_association(&row);
+                if id_set.contains(assoc.target_id.as_str()) && seen.insert(assoc.id.clone()) {
+                    out.push(assoc);
+                }
+            }
         }
-        for id in memory_ids {
-            query = query.bind(id);
+
+        Ok(out)
+    }
+
+    /// All associations incident to ANY of `ids` (either endpoint).
+    /// Returns only associations where `source_id IN ids OR target_id IN ids`.
+    /// Empty `ids` → empty result.
+    pub async fn get_associations_for(&self, ids: &[String]) -> Result<Vec<Association>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
         }
 
-        let rows = query
-            .fetch_all(&self.pool)
-            .await
-            .context("failed to get associations between memory set")?;
+        // Chunk the IN-list to stay under SQLite's bind-parameter limit. An edge
+        // incident to ids in two different chunks is matched twice, so dedup by
+        // association id.
+        const CHUNK: usize = 400;
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut out = Vec::new();
 
-        Ok(rows
-            .into_iter()
-            .map(|row| row_to_association(&row))
-            .collect())
+        for chunk in ids.chunks(CHUNK) {
+            let placeholders: String = chunk.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+            let query_str = format!(
+                "SELECT id, source_id, target_id, relation_type, weight, created_at \
+                 FROM associations \
+                 WHERE source_id IN ({placeholders}) OR target_id IN ({placeholders})"
+            );
+            let mut query = sqlx::query(&query_str);
+            for id in chunk {
+                query = query.bind(id);
+            }
+            for id in chunk {
+                query = query.bind(id);
+            }
+            let rows = query
+                .fetch_all(&self.pool)
+                .await
+                .context("failed to get associations for id set")?;
+            for row in rows {
+                let assoc = row_to_association(&row);
+                if seen.insert(assoc.id.clone()) {
+                    out.push(assoc);
+                }
+            }
+        }
+
+        Ok(out)
+    }
+
+    /// Batch-load memories by ID. Missing IDs are silently omitted.
+    /// Order is unspecified. Forgotten memories ARE included — callers must
+    /// check `memory.forgotten` themselves.
+    /// Empty `ids` → empty result.
+    pub async fn load_many(&self, ids: &[String]) -> Result<Vec<Memory>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Chunk the IN-list to stay under SQLite's bind-parameter limit.
+        const CHUNK: usize = 400;
+        let mut out = Vec::new();
+
+        for chunk in ids.chunks(CHUNK) {
+            let placeholders: String = chunk.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+            let query_str = format!(
+                "SELECT id, content, memory_type, importance, created_at, updated_at, \
+                 last_accessed_at, access_count, source, channel_id, forgotten \
+                 FROM memories WHERE id IN ({placeholders})"
+            );
+            let mut query = sqlx::query(&query_str);
+            for id in chunk {
+                query = query.bind(id);
+            }
+            let rows = query
+                .fetch_all(&self.pool)
+                .await
+                .context("failed to batch-load memories")?;
+            out.extend(rows.into_iter().map(|row| row_to_memory(&row)));
+        }
+
+        Ok(out)
     }
 
     /// Get neighbors of a memory: all associations plus the connected memories.

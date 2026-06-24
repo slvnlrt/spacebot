@@ -830,23 +830,14 @@ pub async fn create_agent_internal(
             .clone()
     };
 
-    let memory_store = crate::memory::MemoryStore::new(db.sqlite.clone());
-    let embedding_table = crate::memory::EmbeddingTable::open_or_create(&db.lance)
-        .await
-        .map_err(|error| {
-            tracing::error!(%error, agent_id = %agent_id, "failed to init embeddings");
-            format!("failed to init embeddings: {error}")
-        })?;
-
-    if let Err(error) = embedding_table.ensure_fts_index().await {
-        tracing::warn!(%error, agent_id = %agent_id, "failed to create FTS index");
-    }
-
-    let memory_search = std::sync::Arc::new(crate::memory::MemorySearch::new(
-        memory_store,
-        embedding_table,
-        embedding_model,
-    ));
+    let backend: std::sync::Arc<dyn crate::memory::MemoryBackend> = {
+        let memory_store = crate::memory::MemoryStore::with_agent_id(db.sqlite.clone(), &agent_id);
+        crate::memory::sqlite_backend_arc(memory_store, &db.lance, &agent_id)
+            .await
+            .map_err(|e| format!("failed to init memory backend: {e}"))?
+    };
+    let memory_search =
+        std::sync::Arc::new(crate::memory::MemorySearch::new(backend, embedding_model));
     let task_store = state
         .task_store
         .load()

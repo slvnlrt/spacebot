@@ -229,7 +229,7 @@ impl Tool for MemoryRecallTool {
 
         let curated = curate_results(&search_results, args.max_results);
 
-        let store = self.memory_search.store();
+        let store = self.memory_search.backend();
         let mut memories = Vec::new();
 
         for result in &curated {
@@ -256,7 +256,7 @@ impl Tool for MemoryRecallTool {
 
         #[cfg(feature = "metrics")]
         {
-            let agent_id = self.memory_search.store().agent_id();
+            let agent_id = self.memory_search.backend().agent_id();
             let agent_label = if agent_id.is_empty() {
                 "unknown"
             } else {
@@ -320,7 +320,7 @@ pub async fn memory_recall(
         .map_err(|e| crate::error::AgentError::Other(anyhow::anyhow!(e)))?;
 
     // Convert back to Memory type for backward compatibility
-    let store = memory_search.store();
+    let store = memory_search.backend();
     let mut memories = Vec::new();
 
     for mem_out in output.memories {
