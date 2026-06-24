@@ -1,11 +1,10 @@
 //! Memory maintenance: decay, prune, merge, reindex.
 
 use crate::error::Result;
-use crate::memory::{EmbeddingModel, EmbeddingTable, Memory, MemoryStore, MemoryType};
+use crate::memory::backend::MemoryBackend;
+use crate::memory::{EmbeddingModel, Memory, MemoryType};
 use anyhow::Context;
 
-use sqlx::Row;
-use sqlx::sqlite::SqliteRow;
 use tokio::sync::watch;
 
 use std::collections::HashSet;
@@ -43,29 +42,20 @@ impl Default for MaintenanceConfig {
 
 /// Run maintenance tasks on the memory store.
 pub async fn run_maintenance(
-    memory_store: &MemoryStore,
-    embedding_table: &EmbeddingTable,
-    embedding_model: &Arc<EmbeddingModel>,
+    backend: Arc<dyn MemoryBackend>,
+    embedding_model: Arc<EmbeddingModel>,
     config: &MaintenanceConfig,
 ) -> Result<MaintenanceReport> {
     let (_maintenance_cancel_tx, maintenance_cancel_rx) = watch::channel(false);
-    run_maintenance_with_cancel(
-        memory_store,
-        embedding_table,
-        embedding_model,
-        config,
-        maintenance_cancel_rx,
-    )
-    .await
+    run_maintenance_with_cancel(backend, embedding_model, config, maintenance_cancel_rx).await
 }
 
 /// Run maintenance tasks with a cancellation signal.
 ///
 /// The signal allows maintenance to exit quickly when the caller decides to stop it.
 pub async fn run_maintenance_with_cancel(
-    memory_store: &MemoryStore,
-    embedding_table: &EmbeddingTable,
-    embedding_model: &Arc<EmbeddingModel>,
+    backend: Arc<dyn MemoryBackend>,
+    embedding_model: Arc<EmbeddingModel>,
     config: &MaintenanceConfig,
     mut maintenance_cancel_rx: watch::Receiver<bool>,
 ) -> Result<MaintenanceReport> {
@@ -78,12 +68,11 @@ pub async fn run_maintenance_with_cancel(
     #[allow(clippy::field_reassign_with_default)]
     {
         report.decayed =
-            apply_decay(memory_store, config.decay_rate, &mut maintenance_cancel_rx).await?;
-        report.pruned = prune_memories(memory_store, config, &mut maintenance_cancel_rx).await?;
+            apply_decay(&backend, config.decay_rate, &mut maintenance_cancel_rx).await?;
+        report.pruned = prune_memories(&backend, config, &mut maintenance_cancel_rx).await?;
         report.merged = merge_similar_memories(
-            memory_store,
-            embedding_table,
-            embedding_model,
+            &backend,
+            &embedding_model,
             config.merge_similarity_threshold,
             &mut maintenance_cancel_rx,
         )
@@ -95,7 +84,7 @@ pub async fn run_maintenance_with_cancel(
 
 /// Apply importance decay based on recency and access patterns.
 async fn apply_decay(
-    memory_store: &MemoryStore,
+    backend: &Arc<dyn MemoryBackend>,
     decay_rate: f32,
     maintenance_cancel_rx: &mut watch::Receiver<bool>,
 ) -> Result<usize> {
@@ -111,11 +100,9 @@ async fn apply_decay(
     let mut decayed_count = 0;
 
     for mem_type in all_types {
-        let memories = maintenance_cancelable_op(
-            maintenance_cancel_rx,
-            memory_store.get_by_type(mem_type, 1000),
-        )
-        .await?;
+        let memories =
+            maintenance_cancelable_op(maintenance_cancel_rx, backend.get_by_type(mem_type, 1000))
+                .await?;
 
         for mut memory in memories {
             check_maintenance_cancellation(maintenance_cancel_rx).await?;
@@ -139,8 +126,7 @@ async fn apply_decay(
             if (new_importance - memory.importance).abs() > 0.01 {
                 memory.importance = new_importance.clamp(0.0, 1.0);
                 memory.updated_at = now;
-                maintenance_cancelable_op(maintenance_cancel_rx, memory_store.update(&memory))
-                    .await?;
+                maintenance_cancelable_op(maintenance_cancel_rx, backend.update(&memory)).await?;
                 decayed_count += 1;
             }
         }
@@ -151,7 +137,7 @@ async fn apply_decay(
 
 /// Prune memories that have fallen below the importance threshold.
 async fn prune_memories(
-    memory_store: &MemoryStore,
+    backend: &Arc<dyn MemoryBackend>,
     config: &MaintenanceConfig,
     maintenance_cancel_rx: &mut watch::Receiver<bool>,
 ) -> Result<usize> {
@@ -161,44 +147,23 @@ async fn prune_memories(
     let min_age = chrono::Duration::days(config.min_age_days);
     let cutoff_date = now - min_age;
 
-    // Get all memories below threshold that are old enough
-    let candidates: Vec<SqliteRow> = maintenance_cancelable_op(
+    let n = maintenance_cancelable_op(
         maintenance_cancel_rx,
-        sqlx::query(
-            r#"
-        SELECT id FROM memories
-        WHERE importance < ? 
-        AND memory_type != 'identity'
-        AND created_at < ?
-        "#,
-        )
-        .bind(config.prune_threshold)
-        .bind(cutoff_date)
-        .fetch_all(memory_store.pool()),
+        backend.prune_below(config.prune_threshold, cutoff_date),
     )
     .await?;
 
-    let mut pruned_count = 0;
-
-    for row in candidates {
-        let id: String = row.try_get("id")?;
-        check_maintenance_cancellation(maintenance_cancel_rx).await?;
-        maintenance_cancelable_op(maintenance_cancel_rx, memory_store.delete(&id)).await?;
-        pruned_count += 1;
-    }
-
-    Ok(pruned_count)
+    Ok(n as usize)
 }
 
 /// Merge near-duplicate memories.
 async fn merge_similar_memories(
-    memory_store: &MemoryStore,
-    embedding_table: &EmbeddingTable,
+    backend: &Arc<dyn MemoryBackend>,
     embedding_model: &Arc<EmbeddingModel>,
     similarity_threshold: f32,
     maintenance_cancel_rx: &mut watch::Receiver<bool>,
 ) -> Result<usize> {
-    let memory_ids = fetch_candidate_memory_ids(memory_store, maintenance_cancel_rx).await?;
+    let memory_ids = fetch_candidate_memory_ids(backend, maintenance_cancel_rx).await?;
     if memory_ids.is_empty() {
         return Ok(0);
     }
@@ -217,7 +182,7 @@ async fn merge_similar_memories(
         }
 
         let Some(source_memory) =
-            maintenance_cancelable_op(maintenance_cancel_rx, memory_store.load(&source_id)).await?
+            maintenance_cancelable_op(maintenance_cancel_rx, backend.load(&source_id)).await?
         else {
             continue;
         };
@@ -231,7 +196,7 @@ async fn merge_similar_memories(
 
         let similar = maintenance_cancelable_op(
             maintenance_cancel_rx,
-            embedding_table.find_similar(
+            backend.find_similar(
                 &source_memory.id,
                 similarity_threshold,
                 MAX_MAINTENANCE_SIMILAR_CANDIDATES,
@@ -262,7 +227,7 @@ async fn merge_similar_memories(
             }
 
             let Some(candidate_memory) =
-                maintenance_cancelable_op(maintenance_cancel_rx, memory_store.load(&candidate_id))
+                maintenance_cancelable_op(maintenance_cancel_rx, backend.load(&candidate_id))
                     .await?
             else {
                 continue;
@@ -273,8 +238,7 @@ async fn merge_similar_memories(
 
             let (winner, loser) = choose_merge_pair(&active_survivor, &candidate_memory);
             let merged_survivor = merge_pair(
-                memory_store,
-                embedding_table,
+                backend,
                 embedding_model,
                 &winner,
                 &loser,
@@ -300,7 +264,7 @@ async fn merge_similar_memories(
     Ok(merged_count)
 }
 
-fn choose_merge_pair(first: &Memory, second: &Memory) -> (Memory, Memory) {
+pub fn choose_merge_pair(first: &Memory, second: &Memory) -> (Memory, Memory) {
     let first_wins = first.importance > second.importance
         || (first.importance == second.importance && first.id < second.id);
 
@@ -311,7 +275,7 @@ fn choose_merge_pair(first: &Memory, second: &Memory) -> (Memory, Memory) {
     }
 }
 
-fn merged_memory_content(winner: String, loser: &str) -> String {
+pub fn merged_memory_content(winner: String, loser: &str) -> String {
     let winner_trimmed = winner.trim_end();
     let loser_trimmed = loser.trim_end();
 
@@ -334,8 +298,7 @@ fn merged_memory_content(winner: String, loser: &str) -> String {
 }
 
 async fn merge_pair(
-    memory_store: &MemoryStore,
-    embedding_table: &EmbeddingTable,
+    backend: &Arc<dyn MemoryBackend>,
     embedding_model: &Arc<EmbeddingModel>,
     survivor: &Memory,
     merged: &Memory,
@@ -343,62 +306,48 @@ async fn merge_pair(
 ) -> Result<Memory> {
     check_maintenance_cancellation(maintenance_cancel_rx).await?;
 
+    let content = merged_memory_content(survivor.content.clone(), &merged.content);
+
+    let embedding =
+        maintenance_cancelable_op(maintenance_cancel_rx, embedding_model.embed_one(&content))
+            .await?;
+
+    maintenance_cancelable_op(
+        maintenance_cancel_rx,
+        backend.merge(&survivor.id, &merged.id, &content, Some(&embedding)),
+    )
+    .await?;
+
+    // Return the updated survivor with the new content so the caller can
+    // chain additional merges against the right state.
     let mut updated_survivor = survivor.clone();
-    updated_survivor.content = merged_memory_content(updated_survivor.content, &merged.content);
+    updated_survivor.content = content;
     updated_survivor.updated_at = chrono::Utc::now();
-
-    maintenance_cancelable_op(
-        maintenance_cancel_rx,
-        memory_store.merge_memories_atomic(&updated_survivor, merged),
-    )
-    .await?;
-
-    let updated_survivor_embedding = maintenance_cancelable_op(
-        maintenance_cancel_rx,
-        embedding_model.embed_one(&updated_survivor.content),
-    )
-    .await?;
-    maintenance_cancelable_op(
-        maintenance_cancel_rx,
-        embedding_table.delete(&updated_survivor.id),
-    )
-    .await?;
-    maintenance_cancelable_op(
-        maintenance_cancel_rx,
-        embedding_table.store(
-            &updated_survivor.id,
-            &updated_survivor.content,
-            &updated_survivor_embedding,
-        ),
-    )
-    .await?;
-    maintenance_cancelable_op(maintenance_cancel_rx, embedding_table.delete(&merged.id)).await?;
     Ok(updated_survivor)
 }
 
 async fn fetch_candidate_memory_ids(
-    memory_store: &MemoryStore,
+    backend: &Arc<dyn MemoryBackend>,
     maintenance_cancel_rx: &mut watch::Receiver<bool>,
 ) -> Result<Vec<String>> {
     check_maintenance_cancellation(maintenance_cancel_rx).await?;
 
-    let rows: Vec<SqliteRow> = maintenance_cancelable_op(
+    use crate::memory::search::SearchSort;
+    let memories = maintenance_cancelable_op(
         maintenance_cancel_rx,
-        sqlx::query(
-            "SELECT id FROM memories WHERE forgotten = 0 ORDER BY importance DESC, created_at DESC, id ASC LIMIT ?",
-        )
-        .bind(MAX_MAINTENANCE_MERGE_SOURCE_MEMORIES)
-        .fetch_all(memory_store.pool()),
+        backend.get_sorted(
+            SearchSort::Importance,
+            MAX_MAINTENANCE_MERGE_SOURCE_MEMORIES,
+            None,
+        ),
     )
     .await
     .with_context(|| "failed to fetch candidate memories for maintenance")?;
 
-    let ids: Vec<String> = rows
+    let ids: Vec<String> = memories
         .into_iter()
-        .map(|row| {
-            let memory_id: String = row.get("id");
-            memory_id
-        })
+        .filter(|m| !m.forgotten)
+        .map(|m| m.id)
         .collect();
 
     Ok(ids)
@@ -483,7 +432,8 @@ pub struct MaintenanceReport {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::memory::{Association, RelationType};
+    use crate::memory::backend::{MemoryBackend, SqliteBackend};
+    use crate::memory::types::{Association, RelationType};
     use std::sync::{Arc, OnceLock};
     use tempfile::tempdir;
     use tokio::time::Duration;
@@ -500,41 +450,41 @@ mod tests {
         }))
     }
 
+    async fn sqlite_backend() -> (Arc<dyn MemoryBackend>, tempfile::TempDir) {
+        let store = crate::memory::MemoryStore::connect_in_memory().await;
+        let dir = tempdir().unwrap();
+        let conn = lancedb::connect(dir.path().to_str().unwrap())
+            .execute()
+            .await
+            .unwrap();
+        let embeddings = crate::memory::EmbeddingTable::open_or_create(&conn)
+            .await
+            .unwrap();
+        let backend: Arc<dyn MemoryBackend> = Arc::new(SqliteBackend::new(store, embeddings));
+        (backend, dir)
+    }
+
     async fn create_memory_with_embedding(
-        store: &MemoryStore,
-        embedding_table: &crate::memory::lance::EmbeddingTable,
+        backend: &Arc<dyn MemoryBackend>,
         content: &str,
         memory_type: MemoryType,
         importance: f32,
         embedding: Vec<f32>,
-    ) -> Memory {
-        let memory = Memory::new(content, memory_type).with_importance(importance);
-        store.save(&memory).await.expect("failed to save memory");
-
-        embedding_table
-            .store(&memory.id, &memory.content, &embedding)
+    ) -> crate::memory::Memory {
+        let memory = crate::memory::Memory::new(content, memory_type).with_importance(importance);
+        backend
+            .save(&memory, Some(&embedding))
             .await
-            .expect("failed to store embedding");
-
+            .expect("failed to save memory");
         memory
     }
 
     #[tokio::test]
     async fn merges_near_duplicate_memories_and_transfers_associations() {
-        let store = MemoryStore::connect_in_memory().await;
-
-        let dir = tempdir().expect("failed to create temp dir");
-        let lance_conn = lancedb::connect(dir.path().to_str().expect("temp path"))
-            .execute()
-            .await
-            .expect("failed to connect to lancedb");
-        let embedding_table = crate::memory::EmbeddingTable::open_or_create(&lance_conn)
-            .await
-            .expect("failed to create embedding table");
+        let (backend, _dir) = sqlite_backend().await;
 
         let survivor = create_memory_with_embedding(
-            &store,
-            &embedding_table,
+            &backend,
             "rust memory maintenance",
             MemoryType::Fact,
             0.9,
@@ -543,8 +493,7 @@ mod tests {
         .await;
 
         let duplicate = create_memory_with_embedding(
-            &store,
-            &embedding_table,
+            &backend,
             "rust memory maintenance updated",
             MemoryType::Fact,
             0.4,
@@ -553,8 +502,7 @@ mod tests {
         .await;
 
         let related = create_memory_with_embedding(
-            &store,
-            &embedding_table,
+            &backend,
             "related memory",
             MemoryType::Fact,
             0.7,
@@ -562,7 +510,7 @@ mod tests {
         )
         .await;
 
-        store
+        backend
             .create_association(&Association::new(
                 &duplicate.id,
                 &related.id,
@@ -571,7 +519,7 @@ mod tests {
             .await
             .expect("failed to create related-to association");
 
-        store
+        backend
             .create_association(&Association::new(
                 &related.id,
                 &duplicate.id,
@@ -588,13 +536,13 @@ mod tests {
         };
 
         let embedding_model = shared_embedding_model();
-        let report = run_maintenance(&store, &embedding_table, &embedding_model, &config)
+        let report = run_maintenance(Arc::clone(&backend), Arc::clone(&embedding_model), &config)
             .await
             .expect("maintenance should succeed");
 
         assert_eq!(report.merged, 1);
 
-        let updated_survivor = store
+        let updated_survivor = backend
             .load(&survivor.id)
             .await
             .expect("failed to load survivor")
@@ -604,20 +552,20 @@ mod tests {
         // The loser ("rust memory maintenance updated") is NOT appended.
         assert_eq!(updated_survivor.content, "rust memory maintenance");
 
-        let forgotten_duplicate = store
+        let forgotten_duplicate = backend
             .load(&duplicate.id)
             .await
             .expect("failed to load duplicate")
             .expect("duplicate should still exist");
         assert!(forgotten_duplicate.forgotten);
 
-        let duplicate_embeddings = embedding_table
+        let duplicate_embeddings = backend
             .find_similar(&duplicate.id, 0.0, 10)
             .await
             .expect("failed to search for missing duplicate embeddings");
         assert!(duplicate_embeddings.is_empty());
 
-        let survivor_associations = store
+        let survivor_associations = backend
             .get_associations(&survivor.id)
             .await
             .expect("failed to fetch survivor associations");
@@ -641,7 +589,7 @@ mod tests {
                 .any(|assoc| assoc.source_id == related.id && assoc.target_id == survivor.id)
         );
 
-        let duplicate_associations = store
+        let duplicate_associations = backend
             .get_associations(&duplicate.id)
             .await
             .expect("failed to load duplicate associations");
@@ -659,20 +607,10 @@ mod tests {
 
     #[tokio::test]
     async fn merges_multiple_duplicates_into_one_survivor_in_single_pass() {
-        let store = MemoryStore::connect_in_memory().await;
-
-        let dir = tempdir().expect("failed to create temp dir");
-        let lance_conn = lancedb::connect(dir.path().to_str().expect("temp path"))
-            .execute()
-            .await
-            .expect("failed to connect to lancedb");
-        let embedding_table = crate::memory::EmbeddingTable::open_or_create(&lance_conn)
-            .await
-            .expect("failed to create embedding table");
+        let (backend, _dir) = sqlite_backend().await;
 
         let survivor = create_memory_with_embedding(
-            &store,
-            &embedding_table,
+            &backend,
             "durable rust maintenance note",
             MemoryType::Fact,
             0.9,
@@ -681,8 +619,7 @@ mod tests {
         .await;
 
         let duplicate_a = create_memory_with_embedding(
-            &store,
-            &embedding_table,
+            &backend,
             "durable rust maintenance note update A",
             MemoryType::Fact,
             0.6,
@@ -690,8 +627,7 @@ mod tests {
         )
         .await;
         let duplicate_b = create_memory_with_embedding(
-            &store,
-            &embedding_table,
+            &backend,
             "durable rust maintenance note update B",
             MemoryType::Fact,
             0.5,
@@ -699,34 +635,22 @@ mod tests {
         )
         .await;
 
-        let related_a = create_memory_with_embedding(
-            &store,
-            &embedding_table,
-            "related A",
-            MemoryType::Fact,
-            0.7,
-            {
+        let related_a =
+            create_memory_with_embedding(&backend, "related A", MemoryType::Fact, 0.7, {
                 let mut embedding = vec![0.0; 384];
                 embedding[0] = 1.0;
                 embedding
-            },
-        )
-        .await;
-        let related_b = create_memory_with_embedding(
-            &store,
-            &embedding_table,
-            "related B",
-            MemoryType::Fact,
-            0.7,
-            {
+            })
+            .await;
+        let related_b =
+            create_memory_with_embedding(&backend, "related B", MemoryType::Fact, 0.7, {
                 let mut embedding = vec![0.0; 384];
                 embedding[1] = 1.0;
                 embedding
-            },
-        )
-        .await;
+            })
+            .await;
 
-        store
+        backend
             .create_association(&Association::new(
                 &duplicate_a.id,
                 &related_a.id,
@@ -734,7 +658,7 @@ mod tests {
             ))
             .await
             .expect("failed to create duplicate_a association");
-        store
+        backend
             .create_association(&Association::new(
                 &related_b.id,
                 &duplicate_b.id,
@@ -745,9 +669,8 @@ mod tests {
 
         let embedding_model = shared_embedding_model();
         let report = run_maintenance(
-            &store,
-            &embedding_table,
-            &embedding_model,
+            Arc::clone(&backend),
+            Arc::clone(&embedding_model),
             &MaintenanceConfig {
                 prune_threshold: 0.2,
                 decay_rate: 0.05,
@@ -760,7 +683,7 @@ mod tests {
 
         assert_eq!(report.merged, 2);
 
-        let refreshed_survivor = store
+        let refreshed_survivor = backend
             .load(&survivor.id)
             .await
             .expect("failed to load survivor")
@@ -770,21 +693,21 @@ mod tests {
         assert_eq!(refreshed_survivor.content, "durable rust maintenance note");
 
         for duplicate_id in [&duplicate_a.id, &duplicate_b.id] {
-            let duplicate = store
+            let duplicate = backend
                 .load(duplicate_id)
                 .await
                 .expect("failed to load duplicate")
                 .expect("duplicate should exist");
             assert!(duplicate.forgotten);
 
-            let duplicate_embeddings = embedding_table
+            let duplicate_embeddings = backend
                 .find_similar(duplicate_id, 0.0, 10)
                 .await
                 .expect("failed to search duplicate embeddings");
             assert!(duplicate_embeddings.is_empty());
         }
 
-        let survivor_associations = store
+        let survivor_associations = backend
             .get_associations(&survivor.id)
             .await
             .expect("failed to load survivor associations");
@@ -825,23 +748,13 @@ mod tests {
 
     #[tokio::test]
     async fn run_maintenance_with_cancel_stops_when_cancel_requested() {
-        let store = MemoryStore::connect_in_memory().await;
-
-        let dir = tempdir().expect("failed to create temp dir");
-        let lance_conn = lancedb::connect(dir.path().to_str().expect("temp path"))
-            .execute()
-            .await
-            .expect("failed to connect to lancedb");
-        let embedding_table = crate::memory::EmbeddingTable::open_or_create(&lance_conn)
-            .await
-            .expect("failed to create embedding table");
+        let (backend, _dir) = sqlite_backend().await;
 
         let (_cancel_tx, maintenance_cancel_rx) = tokio::sync::watch::channel(true);
         let embedding_model = shared_embedding_model();
         let result = run_maintenance_with_cancel(
-            &store,
-            &embedding_table,
-            &embedding_model,
+            Arc::clone(&backend),
+            Arc::clone(&embedding_model),
             &MaintenanceConfig::default(),
             maintenance_cancel_rx,
         )
@@ -865,15 +778,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_maintenance_rejects_invalid_configuration_ranges() {
-        let store = MemoryStore::connect_in_memory().await;
-        let dir = tempdir().expect("failed to create temp dir");
-        let lance_conn = lancedb::connect(dir.path().to_str().expect("temp path"))
-            .execute()
-            .await
-            .expect("failed to connect to lancedb");
-        let embedding_table = crate::memory::EmbeddingTable::open_or_create(&lance_conn)
-            .await
-            .expect("failed to create embedding table");
+        let (backend, _dir) = sqlite_backend().await;
 
         let invalid_config = MaintenanceConfig {
             prune_threshold: 0.2,
@@ -883,8 +788,12 @@ mod tests {
         };
 
         let embedding_model = shared_embedding_model();
-        let result =
-            run_maintenance(&store, &embedding_table, &embedding_model, &invalid_config).await;
+        let result = run_maintenance(
+            Arc::clone(&backend),
+            Arc::clone(&embedding_model),
+            &invalid_config,
+        )
+        .await;
         assert!(result.is_err(), "expected invalid config to fail");
         assert!(
             result

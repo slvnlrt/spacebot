@@ -87,9 +87,8 @@ async fn run_maintenance_for_agent(deps: &AgentDeps) -> anyhow::Result<()> {
     };
     let memory_search = &deps.memory_search;
     let report = crate::memory::maintenance::run_maintenance(
-        memory_search.store(),
-        memory_search.embedding_table(),
-        memory_search.embedding_model_arc(),
+        memory_search.backend().clone(),
+        memory_search.embedding_model_arc().clone(),
         &config,
     )
     .await

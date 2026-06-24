@@ -1,8 +1,9 @@
 //! Memory search: hybrid (vector + FTS + RRF + graph), temporal, importance, and typed queries.
 
 use crate::error::Result;
+use crate::memory::EmbeddingModel;
+use crate::memory::backend::MemoryBackend;
 use crate::memory::types::{Memory, MemorySearchResult, MemoryType, RelationType};
-use crate::memory::{EmbeddingModel, EmbeddingTable, MemoryStore};
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -35,16 +36,14 @@ pub enum SearchSort {
 
 /// Bundles all memory search dependencies.
 pub struct MemorySearch {
-    store: Arc<MemoryStore>,
-    embedding_table: EmbeddingTable,
+    backend: Arc<dyn MemoryBackend>,
     embedding_model: Arc<EmbeddingModel>,
 }
 
 impl Clone for MemorySearch {
     fn clone(&self) -> Self {
         Self {
-            store: Arc::clone(&self.store),
-            embedding_table: self.embedding_table.clone(),
+            backend: Arc::clone(&self.backend),
             embedding_model: Arc::clone(&self.embedding_model),
         }
     }
@@ -53,43 +52,33 @@ impl Clone for MemorySearch {
 impl std::fmt::Debug for MemorySearch {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("MemorySearch")
-            .field("store", &self.store)
+            .field("backend", &self.backend)
             .finish_non_exhaustive()
     }
 }
 
 impl MemorySearch {
     /// Create a new MemorySearch instance.
-    pub fn new(
-        store: Arc<MemoryStore>,
-        embedding_table: EmbeddingTable,
-        embedding_model: Arc<EmbeddingModel>,
-    ) -> Self {
+    pub fn new(backend: Arc<dyn MemoryBackend>, embedding_model: Arc<EmbeddingModel>) -> Self {
         Self {
-            store,
-            embedding_table,
+            backend,
             embedding_model,
         }
     }
 
-    /// Get a reference to the memory store.
-    pub fn store(&self) -> &MemoryStore {
-        &self.store
-    }
-
-    /// Get a reference to the embedding table.
-    pub fn embedding_table(&self) -> &EmbeddingTable {
-        &self.embedding_table
-    }
-
-    /// Get a reference to the embedding model.
-    pub fn embedding_model(&self) -> &EmbeddingModel {
-        &self.embedding_model
+    /// Get a reference to the backend.
+    pub fn backend(&self) -> &Arc<dyn MemoryBackend> {
+        &self.backend
     }
 
     /// Get a shared handle to the embedding model (for async embed_one).
     pub fn embedding_model_arc(&self) -> &Arc<EmbeddingModel> {
         &self.embedding_model
+    }
+
+    /// Get the agent ID this search instance is scoped to.
+    pub fn agent_id(&self) -> &str {
+        self.backend.agent_id()
     }
 
     /// Unified search entry point. Dispatches to the appropriate strategy
@@ -108,7 +97,7 @@ impl MemorySearch {
 
         #[cfg(feature = "metrics")]
         {
-            let agent_id = self.store.agent_id();
+            let agent_id = self.backend.agent_id();
             let agent_label = if agent_id.is_empty() {
                 "unknown"
             } else {
@@ -131,7 +120,7 @@ impl MemorySearch {
         config: &SearchConfig,
     ) -> Result<Vec<MemorySearchResult>> {
         let memories = self
-            .store
+            .backend
             .get_sorted(sort, config.max_results as i64, config.memory_type)
             .await?;
 
@@ -173,13 +162,13 @@ impl MemorySearch {
         // FTS requires an inverted index. If the index doesn't exist yet (empty
         // table, first run) this will fail — fall back to vector + graph search.
         match self
-            .embedding_table
+            .backend
             .text_search(query, config.max_results_per_source)
             .await
         {
             Ok(fts_matches) => {
                 for (memory_id, score) in fts_matches {
-                    if let Some(memory) = self.store.load(&memory_id).await?
+                    if let Some(memory) = self.backend.load(&memory_id).await?
                         && !memory.forgotten
                     {
                         fts_results.push(ScoredMemory {
@@ -197,14 +186,14 @@ impl MemorySearch {
         // 2. Vector similarity search via LanceDB
         let query_embedding = self.embedding_model.embed_one(query).await?;
         match self
-            .embedding_table
+            .backend
             .vector_search(&query_embedding, config.max_results_per_source)
             .await
         {
             Ok(vector_matches) => {
                 for (memory_id, distance) in vector_matches {
                     let similarity = 1.0 - distance;
-                    if let Some(memory) = self.store.load(&memory_id).await?
+                    if let Some(memory) = self.backend.load(&memory_id).await?
                         && !memory.forgotten
                     {
                         vector_results.push(ScoredMemory {
@@ -221,7 +210,7 @@ impl MemorySearch {
 
         // 3. Graph traversal from high-importance memories
         // Get identity and high-importance memories as starting points
-        let seed_memories = self.store.get_high_importance(0.8, 20).await?;
+        let seed_memories = self.backend.get_high_importance(0.8, 20).await?;
 
         for seed in seed_memories {
             // Check if seed is semantically related to query via simple keyword matching
@@ -266,71 +255,140 @@ impl MemorySearch {
         Ok(results)
     }
 
-    /// Traverse the memory graph to find related memories (iterative to avoid async recursion).
+    /// Traverse the memory graph to find related memories (level-batched BFS).
+    ///
+    /// Uses two queries per BFS level — `get_associations_for` (all edges incident
+    /// to the current frontier) and `load_many` (batch-load all new neighbours) —
+    /// instead of one query per node + one per neighbour (was O(nodes) N+1, now
+    /// O(depth)×2).
+    ///
+    /// **Ordering / determinism note.**
+    /// The single collection pass below iterates `frontier` in its current order
+    /// and updates `visited` inline, so the first frontier node that reaches a
+    /// given neighbour wins (cross-frontier-node first-seen is deterministic).
+    /// Intra-node edge order (multiple edges from the *same* frontier node) is made
+    /// deterministic by sorting the fetched edges by descending weight (tie-broken by
+    /// the stable association id) before grouping, so traversal and ranking do not
+    /// depend on the backend's incidental row order or our IN-list chunking.
     async fn traverse_graph(
         &self,
         start_id: &str,
         max_depth: usize,
         results: &mut Vec<ScoredMemory>,
     ) -> Result<()> {
-        use std::collections::VecDeque;
-
-        // Queue of (memory_id, current_depth)
-        let mut queue: VecDeque<(String, usize)> = VecDeque::new();
         let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
-
-        queue.push_back((start_id.to_string(), 0));
         visited.insert(start_id.to_string());
 
-        while let Some((current_id, depth)) = queue.pop_front() {
-            if depth > max_depth {
-                continue;
+        let mut frontier: Vec<String> = vec![start_id.to_string()];
+        let mut depth = 0usize;
+
+        while !frontier.is_empty() && depth <= max_depth {
+            // One query for all edges incident to this level's frontier. Sort by
+            // descending weight (stronger associations first), tie-broken by the
+            // stable association id, so grouping, first-seen neighbour selection and
+            // ranking are deterministic and independent of the backend's incidental
+            // row order or our IN-list chunking.
+            let mut all_edges = self.backend.get_associations_for(&frontier).await?;
+            all_edges.sort_by(|a, b| {
+                b.weight
+                    .partial_cmp(&a.weight)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| a.id.cmp(&b.id))
+            });
+
+            // Group edges by the frontier node they are incident to (preferring
+            // the source endpoint when both are in the frontier). An edge whose
+            // BOTH endpoints are in the frontier is inert: every node enters the
+            // frontier only after being inserted into `visited`, so neither
+            // endpoint can be a new neighbour. Single-incident edges are the only
+            // ones that produce neighbours.
+            let mut by_node: std::collections::HashMap<
+                &str,
+                Vec<&crate::memory::types::Association>,
+            > = std::collections::HashMap::new();
+            for edge in &all_edges {
+                let source_in = frontier.iter().any(|f| f == &edge.source_id);
+                let target_in = frontier.iter().any(|f| f == &edge.target_id);
+                if source_in {
+                    by_node.entry(&edge.source_id).or_default().push(edge);
+                } else if target_in {
+                    by_node.entry(&edge.target_id).or_default().push(edge);
+                }
             }
 
-            let associations = self.store.get_associations(&current_id).await?;
-
-            for assoc in associations {
-                // Get the related memory
-                let related_id = if assoc.source_id == current_id {
-                    &assoc.target_id
-                } else {
-                    &assoc.source_id
-                };
-
-                if visited.contains(related_id) {
-                    continue;
+            // SINGLE collection pass: consult AND update `visited` inline.
+            // Iterating `frontier` in order ensures the first frontier node
+            // that reaches a neighbour claims it (deterministic cross-node case).
+            let mut new: Vec<(String, RelationType, f32)> = Vec::new();
+            for fnode in &frontier {
+                if let Some(edges) = by_node.get(fnode.as_str()) {
+                    for edge in edges.iter() {
+                        // The neighbour is the endpoint that is NOT this frontier node.
+                        let neighbor_id = if edge.source_id == *fnode {
+                            &edge.target_id
+                        } else {
+                            &edge.source_id
+                        };
+                        if visited.contains(neighbor_id) {
+                            continue;
+                        }
+                        // Mark visited BEFORE load_many — mirrors the original
+                        // `visited.insert` before `store.load` in the old code.
+                        // Forgotten/missing neighbours are still marked visited
+                        // and never reconsidered even if load_many omits them.
+                        visited.insert(neighbor_id.clone());
+                        new.push((neighbor_id.clone(), edge.relation_type, edge.weight));
+                    }
                 }
-                visited.insert(related_id.clone());
+            }
 
-                if let Some(memory) = self.store.load(related_id).await? {
+            if new.is_empty() {
+                break;
+            }
+
+            // One query to batch-load all new neighbours.
+            // load_many returns forgotten rows — the `forgotten` check is done
+            // in Rust below, AFTER marking visited (exact parity with original).
+            let new_ids: Vec<String> = new.iter().map(|(id, _, _)| id.clone()).collect();
+            let loaded: std::collections::HashMap<String, crate::memory::types::Memory> = self
+                .backend
+                .load_many(&new_ids)
+                .await?
+                .into_iter()
+                .map(|m| (m.id.clone(), m))
+                .collect();
+
+            let mut next_frontier: Vec<String> = Vec::new();
+
+            for (nid, rel, weight) in new {
+                if let Some(memory) = loaded.get(&nid) {
                     if memory.forgotten {
+                        // Visited already inserted; skip scoring and expansion.
                         continue;
                     }
-                    // Score based on relation type and weight
-                    let type_multiplier = match assoc.relation_type {
+                    let type_multiplier = match rel {
                         RelationType::Updates => 1.5,
                         RelationType::CausedBy | RelationType::ResultOf => 1.3,
                         RelationType::RelatedTo => 1.0,
                         RelationType::Contradicts => 0.5,
                         RelationType::PartOf => 0.8,
                     };
-
-                    let score = memory.importance as f64 * assoc.weight as f64 * type_multiplier;
-
+                    let score = memory.importance as f64 * weight as f64 * type_multiplier;
                     results.push(ScoredMemory {
                         memory: memory.clone(),
                         score,
                     });
-
-                    // Add to queue for RelatedTo and PartOf relations
-                    if matches!(
-                        assoc.relation_type,
-                        RelationType::RelatedTo | RelationType::PartOf
-                    ) {
-                        queue.push_back((related_id.clone(), depth + 1));
+                    // Re-expand only RelatedTo / PartOf (same rule as original).
+                    if matches!(rel, RelationType::RelatedTo | RelationType::PartOf) {
+                        next_frontier.push(nid);
                     }
                 }
+                // Missing from load_many (not in DB): visited already inserted,
+                // score silently skipped — same as the original `load` returning None.
             }
+
+            frontier = next_frontier;
+            depth += 1;
         }
 
         Ok(())
@@ -442,6 +500,8 @@ pub fn curate_results(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::memory::backend::SqliteBackend;
+    use crate::memory::lance::EmbeddingTable;
     use crate::memory::types::MemoryType;
     use chrono::{Duration, Utc};
 
@@ -581,7 +641,8 @@ mod tests {
             .unwrap();
         let embedding_table = EmbeddingTable::open_or_create(&lance_conn).await.unwrap();
         let embedding_model = Arc::new(EmbeddingModel::new(lance_dir.path()).unwrap());
-        let search = MemorySearch::new(store, embedding_table, embedding_model);
+        let backend = Arc::new(SqliteBackend::new(store, embedding_table));
+        let search = MemorySearch::new(backend, embedding_model);
 
         let config = SearchConfig {
             mode: SearchMode::Recent,
@@ -609,7 +670,8 @@ mod tests {
             .unwrap();
         let embedding_table = EmbeddingTable::open_or_create(&lance_conn).await.unwrap();
         let embedding_model = Arc::new(EmbeddingModel::new(lance_dir.path()).unwrap());
-        let search = MemorySearch::new(store, embedding_table, embedding_model);
+        let backend = Arc::new(SqliteBackend::new(store, embedding_table));
+        let search = MemorySearch::new(backend, embedding_model);
 
         let config = SearchConfig {
             mode: SearchMode::Important,
@@ -634,7 +696,8 @@ mod tests {
             .unwrap();
         let embedding_table = EmbeddingTable::open_or_create(&lance_conn).await.unwrap();
         let embedding_model = Arc::new(EmbeddingModel::new(lance_dir.path()).unwrap());
-        let search = MemorySearch::new(store, embedding_table, embedding_model);
+        let backend = Arc::new(SqliteBackend::new(store, embedding_table));
+        let search = MemorySearch::new(backend, embedding_model);
 
         let config = SearchConfig {
             mode: SearchMode::Typed,
@@ -659,7 +722,8 @@ mod tests {
             .unwrap();
         let embedding_table = EmbeddingTable::open_or_create(&lance_conn).await.unwrap();
         let embedding_model = Arc::new(EmbeddingModel::new(lance_dir.path()).unwrap());
-        let search = MemorySearch::new(store, embedding_table, embedding_model);
+        let backend = Arc::new(SqliteBackend::new(store, embedding_table));
+        let search = MemorySearch::new(backend, embedding_model);
 
         let config = SearchConfig {
             mode: SearchMode::Typed,
@@ -670,5 +734,159 @@ mod tests {
 
         let results = search.search("", &config).await.unwrap();
         assert!(results.is_empty());
+    }
+
+    // ── Characterization test for traverse_graph (Task D2) ────────────────────
+    //
+    // Builds a deterministic graph and asserts the EXACT Vec<ScoredMemory>
+    // (ids + scores) that the original N+1 BFS produced, now verified against
+    // the new level-batched implementation.
+    //
+    // Graph topology (max_depth = 1):
+    //
+    //   start --RelatedTo, w=0.8--> A (importance=0.8)
+    //   start --RelatedTo, w=0.7--> D (importance=0.6)
+    //   start --RelatedTo, w=0.5--> F (importance=0.4, FORGOTTEN)
+    //
+    //   A --RelatedTo,  w=0.9 --> B (importance=0.7)   re-expands
+    //   A --Contradicts,w=0.6 --> C (importance=0.9)   scored, NOT re-expanded
+    //   A --RelatedTo,  w=0.75--> E (importance=0.5)   A reaches E first (frontier order)
+    //
+    //   D --Updates,    w=0.7 --> E (importance=0.5)   E already visited from A → skip
+    //
+    //   B --RelatedTo,  w=0.8 --> G (importance=0.3)   NOT reached: B is depth 2 > max_depth=1
+    //
+    // Cases covered:
+    //   ✓ RelatedTo chain re-expands (start→A→B)
+    //   ✓ Contradicts scored but NOT re-expanded (A→C)
+    //   ✓ Forgotten neighbour marked visited, not scored (start→F)
+    //   ✓ Two DIFFERENT frontier nodes (A, D) reach E at the same level;
+    //     A wins because it appears first in the frontier (deterministic cross-node)
+    //   ✓ max_depth bound: B (depth 2) is not expanded → G never scored
+    //
+    // Golden scores ((f32_importance as f64) × (f32_weight as f64) × type_multiplier):
+    //   A: 0.8f32 × 0.8f32 × 1.0  (RelatedTo)
+    //   D: 0.6f32 × 0.7f32 × 1.0  (RelatedTo)
+    //   B: 0.7f32 × 0.9f32 × 1.0  (RelatedTo)
+    //   C: 0.9f32 × 0.6f32 × 0.5  (Contradicts)
+    //   E: 0.5f32 × 0.75f32× 1.0  (RelatedTo — A reaches E first)
+    //
+    // Expected BFS push order: [A, D, B, C, E]
+
+    async fn build_traverse_graph_fixture() -> (MemorySearch, String, tempfile::TempDir) {
+        use crate::memory::types::Association;
+
+        let store = crate::memory::MemoryStore::connect_in_memory().await;
+
+        macro_rules! save_mem {
+            ($content:expr, $imp:expr) => {{
+                let m = Memory::new($content, MemoryType::Fact).with_importance($imp);
+                store.save(&m).await.unwrap();
+                m
+            }};
+        }
+
+        let start_mem = save_mem!("start node", 1.0_f32);
+        let a = save_mem!("node A", 0.8_f32);
+        let b = save_mem!("node B", 0.7_f32);
+        let c = save_mem!("node C", 0.9_f32);
+        let d = save_mem!("node D", 0.6_f32);
+        let e = save_mem!("node E", 0.5_f32);
+        let f = save_mem!("node F forgotten", 0.4_f32);
+        store.forget(&f.id).await.unwrap();
+        let _g = save_mem!("node G (unreachable)", 0.3_f32);
+
+        // Edge weights are distinct per source node, so the descending-weight sort in
+        // traverse_graph yields a deterministic order regardless of insertion/row order.
+        let edge_specs: &[(&str, &str, RelationType, f32)] = &[
+            (&start_mem.id, &a.id, RelationType::RelatedTo, 0.8),
+            (&start_mem.id, &d.id, RelationType::RelatedTo, 0.7),
+            (&start_mem.id, &f.id, RelationType::RelatedTo, 0.5),
+            (&a.id, &b.id, RelationType::RelatedTo, 0.9),
+            (&a.id, &c.id, RelationType::Contradicts, 0.6),
+            (&a.id, &e.id, RelationType::RelatedTo, 0.75),
+            (&d.id, &e.id, RelationType::Updates, 0.7),
+            (&b.id, &_g.id, RelationType::RelatedTo, 0.8),
+        ];
+        for (src, tgt, rel, weight) in edge_specs {
+            store
+                .create_association(&Association::new(*src, *tgt, *rel).with_weight(*weight))
+                .await
+                .unwrap();
+        }
+
+        let lance_dir = tempfile::tempdir().unwrap();
+        let lance_conn = lancedb::connect(lance_dir.path().to_str().unwrap())
+            .execute()
+            .await
+            .unwrap();
+        let embedding_table = EmbeddingTable::open_or_create(&lance_conn).await.unwrap();
+        let embedding_model = Arc::new(EmbeddingModel::new(lance_dir.path()).unwrap());
+        let backend = Arc::new(SqliteBackend::new(Arc::clone(&store), embedding_table));
+        let search = MemorySearch::new(backend, embedding_model);
+
+        (search, start_mem.id, lance_dir)
+    }
+
+    fn assert_traverse_golden(results: &[ScoredMemory]) {
+        // Scores are (f32_importance as f64) * (f32_weight as f64) * type_multiplier,
+        // using the same f32 intermediates as the production code to get exact values.
+        fn score(imp: f32, weight: f32, mul: f64) -> f64 {
+            (imp as f64) * (weight as f64) * mul
+        }
+        // Expected BFS push order: [A, D, B, E, C]. Within a frontier node, edges are
+        // processed by descending weight, so among A's neighbours B (0.9) precedes
+        // E (0.75) precedes C (0.6).
+        let expected: &[(&str, f64)] = &[
+            ("node A", score(0.8, 0.8, 1.0)),  // RelatedTo, edge weight 0.8
+            ("node D", score(0.6, 0.7, 1.0)),  // RelatedTo, edge weight 0.7
+            ("node B", score(0.7, 0.9, 1.0)),  // RelatedTo, edge weight 0.9
+            ("node E", score(0.5, 0.75, 1.0)), // RelatedTo, edge weight 0.75 (A reaches E first)
+            ("node C", score(0.9, 0.6, 0.5)),  // Contradicts, edge weight 0.6
+        ];
+        assert_eq!(
+            results.len(),
+            expected.len(),
+            "result count mismatch: got {:?}",
+            results
+                .iter()
+                .map(|r| &r.memory.content)
+                .collect::<Vec<_>>()
+        );
+        for (i, (r, (exp_content, exp_score))) in results.iter().zip(expected.iter()).enumerate() {
+            assert_eq!(
+                r.memory.content, *exp_content,
+                "position {i}: expected content {exp_content:?}, got {:?}",
+                r.memory.content
+            );
+            assert!(
+                (r.score - exp_score).abs() < 1e-9,
+                "position {i} ({exp_content}): expected score {exp_score}, got {}",
+                r.score
+            );
+        }
+        assert!(
+            results
+                .iter()
+                .all(|r| r.memory.content != "node F forgotten"),
+            "forgotten node F must not appear in results"
+        );
+        assert!(
+            results
+                .iter()
+                .all(|r| r.memory.content != "node G (unreachable)"),
+            "depth-bounded node G must not appear in results"
+        );
+    }
+
+    #[tokio::test]
+    async fn traverse_graph_batched_matches_golden() {
+        let (search, start_id, _dir) = build_traverse_graph_fixture().await;
+        let mut results: Vec<ScoredMemory> = Vec::new();
+        search
+            .traverse_graph(&start_id, 1, &mut results)
+            .await
+            .unwrap();
+        assert_traverse_golden(&results);
     }
 }

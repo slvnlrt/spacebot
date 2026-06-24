@@ -2884,23 +2884,15 @@ async fn initialize_agents(
             };
 
         // Per-agent memory system
-        let memory_store =
-            spacebot::memory::MemoryStore::with_agent_id(db.sqlite.clone(), &agent_config.id);
         let project_store = global_project_store.clone();
-        let embedding_table = spacebot::memory::EmbeddingTable::open_or_create(&db.lance)
-            .await
-            .with_context(|| {
-                format!("failed to init embeddings for agent '{}'", agent_config.id)
-            })?;
 
-        // Ensure FTS index exists for full-text search queries
-        if let Err(error) = embedding_table.ensure_fts_index().await {
-            tracing::warn!(%error, agent = %agent_config.id, "failed to create FTS index");
-        }
-
+        let backend: Arc<dyn spacebot::memory::MemoryBackend> = {
+            let memory_store =
+                spacebot::memory::MemoryStore::with_agent_id(db.sqlite.clone(), &agent_config.id);
+            spacebot::memory::sqlite_backend_arc(memory_store, &db.lance, &agent_config.id).await?
+        };
         let memory_search = Arc::new(spacebot::memory::MemorySearch::new(
-            memory_store,
-            embedding_table,
+            backend,
             embedding_model.clone(),
         ));
 

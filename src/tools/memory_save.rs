@@ -253,9 +253,9 @@ impl Tool for MemorySaveTool {
         }
 
         // Save to SQLite database
-        let store = self.memory_search.store();
+        let store = self.memory_search.backend();
         store
-            .save(&memory)
+            .save(&memory, None)
             .await
             .map_err(|e| MemorySaveError(format!("Failed to save memory: {e}")))?;
 
@@ -319,7 +319,7 @@ impl Tool for MemorySaveTool {
             Err(embed_err) => {
                 if let Err(assoc_err) = self
                     .memory_search
-                    .store()
+                    .backend()
                     .delete_associations_for_memory(&memory.id)
                     .await
                 {
@@ -329,7 +329,7 @@ impl Tool for MemorySaveTool {
                         "compensating association delete failed after embedding generation error"
                     );
                 }
-                if let Err(del_err) = self.memory_search.store().delete(&memory.id).await {
+                if let Err(del_err) = self.memory_search.backend().delete(&memory.id).await {
                     tracing::error!(
                         memory_id = %memory.id,
                         %del_err,
@@ -344,8 +344,8 @@ impl Tool for MemorySaveTool {
 
         match self
             .memory_search
-            .embedding_table()
-            .store(&memory.id, &args.content, &embedding)
+            .backend()
+            .set_embedding(&memory, &embedding)
             .await
         {
             Ok(()) => {
@@ -356,7 +356,7 @@ impl Tool for MemorySaveTool {
             Err(embed_err) => {
                 if let Err(assoc_err) = self
                     .memory_search
-                    .store()
+                    .backend()
                     .delete_associations_for_memory(&memory.id)
                     .await
                 {
@@ -366,7 +366,7 @@ impl Tool for MemorySaveTool {
                         "compensating association delete failed after embedding store error"
                     );
                 }
-                if let Err(del_err) = self.memory_search.store().delete(&memory.id).await {
+                if let Err(del_err) = self.memory_search.backend().delete(&memory.id).await {
                     tracing::error!(
                         memory_id = %memory.id,
                         %del_err,
@@ -377,17 +377,6 @@ impl Tool for MemorySaveTool {
                     "Failed to store embedding: {embed_err}"
                 )));
             }
-        }
-
-        // Ensure the FTS index exists so full_text_search queries work.
-        // Safe to call repeatedly — no-ops if the index already exists.
-        if let Err(error) = self
-            .memory_search
-            .embedding_table()
-            .ensure_fts_index()
-            .await
-        {
-            tracing::warn!(%error, "failed to ensure FTS index after memory save");
         }
 
         if let Some(event_context) = &self.event_context
@@ -429,7 +418,7 @@ impl Tool for MemorySaveTool {
 
         #[cfg(feature = "metrics")]
         {
-            let agent_id = self.memory_search.store().agent_id();
+            let agent_id = self.memory_search.backend().agent_id();
             let agent_label = if agent_id.is_empty() {
                 "unknown"
             } else {
