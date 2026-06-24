@@ -266,9 +266,10 @@ impl MemorySearch {
     /// The single collection pass below iterates `frontier` in its current order
     /// and updates `visited` inline, so the first frontier node that reaches a
     /// given neighbour wins (cross-frontier-node first-seen is deterministic).
-    /// Intra-node edge order (multiple edges from the *same* frontier node) was
-    /// already order-incidental in the original (`get_associations` has no ORDER BY),
-    /// so that sub-case remains best-effort in both old and new implementations.
+    /// Intra-node edge order (multiple edges from the *same* frontier node) is made
+    /// deterministic by sorting the fetched edges by descending weight (tie-broken by
+    /// the stable association id) before grouping, so traversal and ranking do not
+    /// depend on the backend's incidental row order or our IN-list chunking.
     async fn traverse_graph(
         &self,
         start_id: &str,
@@ -282,8 +283,18 @@ impl MemorySearch {
         let mut depth = 0usize;
 
         while !frontier.is_empty() && depth <= max_depth {
-            // One query for all edges incident to this level's frontier.
-            let all_edges = self.backend.get_associations_for(&frontier).await?;
+            // One query for all edges incident to this level's frontier. Sort by
+            // descending weight (stronger associations first), tie-broken by the
+            // stable association id, so grouping, first-seen neighbour selection and
+            // ranking are deterministic and independent of the backend's incidental
+            // row order or our IN-list chunking.
+            let mut all_edges = self.backend.get_associations_for(&frontier).await?;
+            all_edges.sort_by(|a, b| {
+                b.weight
+                    .partial_cmp(&a.weight)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| a.id.cmp(&b.id))
+            });
 
             // Group edges by the frontier node they are incident to (preferring
             // the source endpoint when both are in the frontier). An edge whose
@@ -785,8 +796,8 @@ mod tests {
         store.forget(&f.id).await.unwrap();
         let _g = save_mem!("node G (unreachable)", 0.3_f32);
 
-        // Insert edges in a fixed order — SQLite rowid == insertion order, so
-        // get_associations returns them in a stable sequence.
+        // Edge weights are distinct per source node, so the descending-weight sort in
+        // traverse_graph yields a deterministic order regardless of insertion/row order.
         let edge_specs: &[(&str, &str, RelationType, f32)] = &[
             (&start_mem.id, &a.id, RelationType::RelatedTo, 0.8),
             (&start_mem.id, &d.id, RelationType::RelatedTo, 0.7),
@@ -823,13 +834,15 @@ mod tests {
         fn score(imp: f32, weight: f32, mul: f64) -> f64 {
             (imp as f64) * (weight as f64) * mul
         }
-        // Expected order matches BFS push order: [A, D, B, C, E]
+        // Expected BFS push order: [A, D, B, E, C]. Within a frontier node, edges are
+        // processed by descending weight, so among A's neighbours B (0.9) precedes
+        // E (0.75) precedes C (0.6).
         let expected: &[(&str, f64)] = &[
-            ("node A", score(0.8, 0.8, 1.0)),  // RelatedTo
-            ("node D", score(0.6, 0.7, 1.0)),  // RelatedTo
-            ("node B", score(0.7, 0.9, 1.0)),  // RelatedTo
-            ("node C", score(0.9, 0.6, 0.5)),  // Contradicts
-            ("node E", score(0.5, 0.75, 1.0)), // RelatedTo (A reaches E first)
+            ("node A", score(0.8, 0.8, 1.0)),  // RelatedTo, edge weight 0.8
+            ("node D", score(0.6, 0.7, 1.0)),  // RelatedTo, edge weight 0.7
+            ("node B", score(0.7, 0.9, 1.0)),  // RelatedTo, edge weight 0.9
+            ("node E", score(0.5, 0.75, 1.0)), // RelatedTo, edge weight 0.75 (A reaches E first)
+            ("node C", score(0.9, 0.6, 0.5)),  // Contradicts, edge weight 0.6
         ];
         assert_eq!(
             results.len(),

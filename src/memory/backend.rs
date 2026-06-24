@@ -21,6 +21,11 @@ pub trait MemoryBackend: Send + Sync + std::fmt::Debug {
     // ── CRUD ─────────────────────────────────────────────────────────────────
 
     /// Persist a new memory and optionally its embedding.
+    ///
+    /// Not guaranteed atomic across the structured store and the embedding/vector
+    /// store: an implementation may commit the memory row and then fail to store
+    /// the embedding. Callers that need both-or-neither semantics must compensate
+    /// (e.g. delete the orphaned row) — see `tools::memory_save`.
     async fn save(&self, memory: &Memory, embedding: Option<&[f32]>) -> Result<()>;
 
     /// Store or replace the embedding for an existing memory.
@@ -185,7 +190,15 @@ impl MemoryBackend for SqliteBackend {
         self.embeddings.delete(&memory.id).await?;
         self.embeddings
             .store(&memory.id, &memory.content, embedding)
-            .await
+            .await?;
+        // Ensure the FTS index exists once content has been written. Callers that
+        // save with `embedding: None` and set it here (e.g. the memory_save tool)
+        // would otherwise never trigger index creation, leaving text_search
+        // permanently falling back to vector+graph. Idempotent; non-fatal on error.
+        if let Err(error) = self.embeddings.ensure_fts_index().await {
+            tracing::warn!(%error, "failed to ensure FTS index after set_embedding");
+        }
+        Ok(())
     }
 
     async fn delete(&self, id: &str) -> Result<()> {

@@ -850,7 +850,8 @@ pub async fn create_agent_internal(
             })?;
             store as std::sync::Arc<dyn crate::memory::MemoryBackend>
         } else {
-            let memory_store = crate::memory::MemoryStore::new(db.sqlite.clone());
+            let memory_store =
+                crate::memory::MemoryStore::with_agent_id(db.sqlite.clone(), &agent_id);
             crate::memory::sqlite_backend_arc(memory_store, &db.lance, &agent_id)
                 .await
                 .map_err(|e| format!("failed to init memory backend: {e}"))?
@@ -866,7 +867,8 @@ pub async fn create_agent_internal(
                     "memory_backend=surreal but the `surreal-memory` feature is not compiled in; using SQLite"
                 );
             }
-            let memory_store = crate::memory::MemoryStore::new(db.sqlite.clone());
+            let memory_store =
+                crate::memory::MemoryStore::with_agent_id(db.sqlite.clone(), &agent_id);
             crate::memory::sqlite_backend_arc(memory_store, &db.lance, &agent_id)
                 .await
                 .map_err(|e| format!("failed to init memory backend: {e}"))?
