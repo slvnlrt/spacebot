@@ -448,8 +448,8 @@ mod tests {
         .into_iter()
         .collect();
 
-        let result = extract_platform_meta("teams", &metadata)
-            .expect("teams metadata should produce Some");
+        let result =
+            extract_platform_meta("teams", &metadata).expect("teams metadata should produce Some");
 
         let parsed: serde_json::Value =
             serde_json::from_str(&result).expect("result should be valid JSON");
@@ -459,7 +459,9 @@ mod tests {
             Some("https://smba.trafficmanager.net/amer/")
         );
         assert_eq!(
-            parsed.get("teams_conversation_type").and_then(|v| v.as_str()),
+            parsed
+                .get("teams_conversation_type")
+                .and_then(|v| v.as_str()),
             Some("channel")
         );
         // teams_conversation_id is intentionally not stored — resolve_broadcast_target

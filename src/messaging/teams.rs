@@ -177,12 +177,13 @@ impl TeamsTokenProvider {
             "Azure AD Bot Connector token refreshed",
         );
 
+        let token = token_resp.access_token;
         *guard = Some(CachedToken {
-            token: token_resp.access_token.clone(),
+            token: token.clone(),
             expires_at,
         });
 
-        Ok(token_resp.access_token)
+        Ok(token)
     }
 }
 
@@ -202,8 +203,8 @@ impl TeamsTokenProvider {
 ///   stale (typically [`REFRESH_LEEWAY`]).
 #[inline]
 pub fn needs_refresh(expires_at: Instant, now: Instant, leeway: Duration) -> bool {
-    // If expires_at < leeway we clamp to Instant::ZERO to avoid panics on
-    // saturating subtraction.
+    // If expires_at < leeway, checked_sub returns None; fall back to expires_at
+    // so we trigger an immediate refresh rather than panicking on underflow.
     let refresh_after = expires_at.checked_sub(leeway).unwrap_or(expires_at);
     now >= refresh_after
 }
@@ -532,17 +533,45 @@ pub struct Activity {
 // Activity → InboundMessage normalization
 // ---------------------------------------------------------------------------
 
-/// Remove all `<at>...</at>` mention spans from `text` and collapse any
+/// Remove all `<at …>…</at>` mention spans from `text` and collapse any
 /// resulting runs of whitespace into single spaces.
+///
+/// Handles both plain `<at>` and attributed forms such as `<at id="0">`.
 fn strip_at_mentions(text: &str) -> String {
-    // Iteratively remove <at>...</at> tags (non-greedy inner match).
+    // Iteratively remove <at...>...</at> tags (non-greedy inner match).
+    // We match the open tag by finding the "<at" prefix and then scanning
+    // forward to the closing ">" so that attributes like id="0" are consumed.
     let mut result = String::with_capacity(text.len());
     let mut remaining = text;
-    while let Some(start) = remaining.find("<at>") {
+    while let Some(start) = remaining.find("<at") {
+        // Confirm the char after "<at" is either '>' or a space/tab (attribute),
+        // to avoid accidentally matching e.g. "<attempt>" etc.
+        let after_prefix = &remaining[start + "<at".len()..];
+        let next_ch = after_prefix.chars().next();
+        if !matches!(
+            next_ch,
+            Some('>') | Some(' ') | Some('\t') | Some('\r') | Some('\n')
+        ) {
+            // Not a real <at> tag — emit up to and including "<at" and continue.
+            result.push_str(&remaining[..start + "<at".len()]);
+            remaining = after_prefix;
+            continue;
+        }
         result.push_str(&remaining[..start]);
-        remaining = &remaining[start + "<at>".len()..];
-        if let Some(end) = remaining.find("</at>") {
-            remaining = &remaining[end + "</at>".len()..];
+        // Find the closing '>' of the open tag.
+        let open_tag_end = match after_prefix.find('>') {
+            Some(i) => i,
+            None => {
+                // Malformed — no closing '>'; keep the rest verbatim.
+                result.push_str(remaining);
+                remaining = "";
+                break;
+            }
+        };
+        // Skip past the entire open tag (e.g. `<at id="0">`).
+        let after_open = &after_prefix[open_tag_end + 1..];
+        if let Some(end) = after_open.find("</at>") {
+            remaining = &after_open[end + "</at>".len()..];
         } else {
             // Malformed — no closing tag; keep the rest verbatim.
             result.push_str(remaining);
@@ -586,11 +615,12 @@ fn bot_was_mentioned(activity: &Activity) -> bool {
         }
     }
 
-    // Fallback: presence of an <at> tag in text implies a mention.
+    // Fallback: presence of an <at …> tag (with or without attributes) in text
+    // implies a mention.
     activity
         .text
         .as_deref()
-        .map(|t| t.contains("<at>"))
+        .map(|t| t.contains("<at"))
         .unwrap_or(false)
 }
 
@@ -1946,6 +1976,92 @@ vIyJeH8/89a9IXZXlMIA9KH9
             .strip_prefix(&format!("{runtime_key}:"))
             .unwrap_or(conv_id);
         assert_eq!(bare, "conv:abc:def");
+    }
+
+    // -----------------------------------------------------------------------
+    // strip_at_mentions — attributed <at id="…"> variant (FIX 4)
+    // -----------------------------------------------------------------------
+
+    /// Teams sends `<at id="0">BotName</at>` when the mention has an id
+    /// attribute.  strip_at_mentions must strip those spans too.
+    #[test]
+    fn strip_at_mentions_attributed_tag() {
+        let raw = r#"<at id="0">Bot</at> hello"#;
+        let stripped = strip_at_mentions(raw);
+        assert_eq!(
+            stripped, "hello",
+            "attributed <at id=\"0\"> should be stripped"
+        );
+    }
+
+    /// bot_was_mentioned text-fallback must fire for `<at id="0">` when
+    /// entities are absent (exercises the `contains("<at")` path).
+    #[test]
+    fn bot_was_mentioned_attributed_fallback() {
+        // Build an activity with NO mention entities, only the attributed tag in text.
+        let raw = r#"{
+            "type": "message",
+            "id": "act-attr-001",
+            "text": "<at id=\"0\">Bot</at> hello",
+            "from": { "id": "user-x", "name": "X" },
+            "conversation": { "id": "conv-attr", "conversationType": "channel" },
+            "serviceUrl": "https://smba.trafficmanager.net/amer/",
+            "recipient": { "id": "bot-attr", "name": "Bot" },
+            "channelData": {}
+        }"#;
+        let activity: Activity = serde_json::from_str(raw).expect("parse activity");
+        assert!(
+            bot_was_mentioned(&activity),
+            "attributed <at id=\"0\"> tag should trigger mentioned=true via text fallback"
+        );
+        // Also verify the text is stripped correctly end-to-end.
+        let msg = activity_to_inbound(&activity, "teams").expect("should produce InboundMessage");
+        if let crate::MessageContent::Text(text) = &msg.content {
+            assert_eq!(text, "hello");
+        } else {
+            panic!("expected Text content");
+        }
+        assert_eq!(
+            msg.metadata.get("teams_mentioned").and_then(|v| v.as_str()),
+            Some("true")
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // SSRF guard — additional regression cases (FIX extra)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn ssrf_guard_rejects_userinfo() {
+        // Userinfo in URL can be used to bypass naive host checks.
+        assert!(
+            !is_allowed_service_url("https://botframework.com@evil.com/foo"),
+            "userinfo-based bypass must be rejected"
+        );
+    }
+
+    #[test]
+    fn ssrf_guard_rejects_metadata_ip() {
+        assert!(
+            !is_allowed_service_url("https://169.254.169.254/latest/meta-data/"),
+            "link-local metadata IP must be rejected"
+        );
+    }
+
+    #[test]
+    fn ssrf_guard_rejects_localhost() {
+        assert!(
+            !is_allowed_service_url("https://localhost/"),
+            "localhost must be rejected"
+        );
+    }
+
+    #[test]
+    fn ssrf_guard_accepts_real_trafficmanager() {
+        assert!(
+            is_allowed_service_url("https://smba.trafficmanager.net/amer/"),
+            "real trafficmanager.net URL must be accepted"
+        );
     }
 
     // -----------------------------------------------------------------------

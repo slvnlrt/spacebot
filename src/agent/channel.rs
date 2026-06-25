@@ -3886,11 +3886,13 @@ fn compute_listen_mode_invocation(message: &InboundMessage, raw_text: &str) -> (
             .get("twitch_mentions_or_replies_to_bot")
             .and_then(|v| v.as_bool())
             .unwrap_or(false),
-        "teams" => message
-            .metadata
-            .get("teams_mentioned")
-            .and_then(|v| v.as_str())
-            == Some("true"),
+        "teams" => {
+            message
+                .metadata
+                .get("teams_mentioned")
+                .and_then(|v| v.as_str())
+                == Some("true")
+        }
         _ => false,
     };
     let invoked_by_reply = match message.source.as_str() {

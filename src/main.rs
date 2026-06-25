@@ -3593,7 +3593,10 @@ async fn initialize_agents(
                 })?,
             ) {
                 Ok(adapter) => {
-                    new_messaging_manager.register(adapter).await;
+                    let sidecar = config.instance_dir.join("teams_service_urls.json");
+                    new_messaging_manager
+                        .register(adapter.with_sidecar_path(sidecar))
+                        .await;
                 }
                 Err(error) => {
                     tracing::error!(%error, "failed to build teams adapter");
@@ -3601,44 +3604,15 @@ async fn initialize_agents(
             }
         }
 
-        for instance in teams_config
-            .instances
-            .iter()
-            .filter(|instance| instance.enabled)
-        {
-            if instance.app_id.is_empty()
-                || instance.client_secret.is_empty()
-                || instance.tenant_id.is_empty()
-            {
-                tracing::warn!(adapter = %instance.name, "skipping enabled teams instance with missing credentials");
-                continue;
-            }
-            let runtime_key = spacebot::config::binding_runtime_adapter_key(
-                "teams",
-                Some(instance.name.as_str()),
+        // v1 supports a single Teams listener per port. Named [[messaging.teams.instances]]
+        // share the same port as the default instance and cannot each bind their own
+        // listener, so they are skipped with a clear warning rather than retried 12×
+        // and silently dropped by the manager. See docs/design-docs/teams-setup.md.
+        if teams_config.instances.iter().any(|i| i.enabled) {
+            tracing::warn!(
+                "Teams v1 supports a single listener per port; named [[messaging.teams.instances]] \
+                 are NOT started — see docs/design-docs/teams-setup.md"
             );
-            let perms = Arc::new(ArcSwap::from_pointee(
-                spacebot::config::TeamsPermissions::from_instance_config(
-                    instance,
-                    &config.bindings,
-                ),
-            ));
-            match spacebot::messaging::teams::TeamsAdapter::new(
-                runtime_key,
-                &instance.app_id,
-                &instance.client_secret,
-                &instance.tenant_id,
-                teams_config.port,
-                &teams_config.bind,
-                perms,
-            ) {
-                Ok(adapter) => {
-                    new_messaging_manager.register(adapter).await;
-                }
-                Err(error) => {
-                    tracing::warn!(%error, adapter = %instance.name, "failed to build named teams adapter");
-                }
-            }
         }
     }
 
