@@ -864,6 +864,33 @@ impl TeamsAdapter {
     }
 }
 
+/// Build a `TeamsAdapter` with the sidecar path set to
+/// `<instance_dir>/teams_service_urls.json`.
+///
+/// This is the canonical constructor used by both the daemon startup path and
+/// the config-watcher reload path so the two never drift apart.
+pub fn build_teams_adapter(
+    runtime_key: impl Into<String>,
+    app_id: impl Into<String>,
+    client_secret: impl Into<String>,
+    tenant_id: impl Into<String>,
+    port: u16,
+    bind: impl Into<String>,
+    permissions: std::sync::Arc<arc_swap::ArcSwap<crate::config::TeamsPermissions>>,
+    instance_dir: &std::path::Path,
+) -> anyhow::Result<TeamsAdapter> {
+    Ok(TeamsAdapter::new(
+        runtime_key,
+        app_id,
+        client_secret,
+        tenant_id,
+        port,
+        bind,
+        permissions,
+    )?
+    .with_sidecar_path(instance_dir.join("teams_service_urls.json")))
+}
+
 impl Messaging for TeamsAdapter {
     fn name(&self) -> &str {
         &self.runtime_key

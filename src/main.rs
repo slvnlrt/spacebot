@@ -3581,7 +3581,7 @@ async fn initialize_agents(
             && !teams_config.client_secret.is_empty()
             && !teams_config.tenant_id.is_empty()
         {
-            match spacebot::messaging::teams::TeamsAdapter::new(
+            match spacebot::messaging::teams::build_teams_adapter(
                 "teams",
                 &teams_config.app_id,
                 &teams_config.client_secret,
@@ -3591,12 +3591,10 @@ async fn initialize_agents(
                 teams_permissions.clone().ok_or_else(|| {
                     anyhow::anyhow!("teams permissions not initialized when teams is enabled")
                 })?,
+                &config.instance_dir,
             ) {
                 Ok(adapter) => {
-                    let sidecar = config.instance_dir.join("teams_service_urls.json");
-                    new_messaging_manager
-                        .register(adapter.with_sidecar_path(sidecar))
-                        .await;
+                    new_messaging_manager.register(adapter).await;
                 }
                 Err(error) => {
                     tracing::error!(%error, "failed to build teams adapter");
