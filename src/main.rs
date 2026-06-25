@@ -1800,6 +1800,7 @@ async fn run(
         let mut telegram_permissions = None;
         let mut twitch_permissions = None;
         let mut mattermost_permissions = None;
+        let mut teams_permissions = None;
         let mut signal_permissions = None;
         initialize_agents(
             &config,
@@ -1819,6 +1820,7 @@ async fn run(
             &mut telegram_permissions,
             &mut twitch_permissions,
             &mut mattermost_permissions,
+            &mut teams_permissions,
             &mut signal_permissions,
             agent_links.clone(),
             agent_humans.clone(),
@@ -2585,6 +2587,7 @@ async fn run(
                                 let mut new_telegram_permissions = None;
                                 let mut new_twitch_permissions = None;
                                 let mut new_mattermost_permissions = None;
+                                let mut new_teams_permissions = None;
                                 let mut new_signal_permissions = None;
                                 match initialize_agents(
                                     &new_config,
@@ -2604,6 +2607,7 @@ async fn run(
                                     &mut new_telegram_permissions,
                                     &mut new_twitch_permissions,
                                     &mut new_mattermost_permissions,
+                                    &mut new_teams_permissions,
                                     &mut new_signal_permissions,
                                     agent_links.clone(),
                                     agent_humans.clone(),
@@ -2750,6 +2754,7 @@ async fn initialize_agents(
     telegram_permissions: &mut Option<Arc<ArcSwap<spacebot::config::TelegramPermissions>>>,
     twitch_permissions: &mut Option<Arc<ArcSwap<spacebot::config::TwitchPermissions>>>,
     mattermost_permissions: &mut Option<Arc<ArcSwap<spacebot::config::MattermostPermissions>>>,
+    teams_permissions: &mut Option<Arc<ArcSwap<spacebot::config::TeamsPermissions>>>,
     signal_permissions: &mut Option<Arc<ArcSwap<spacebot::config::SignalPermissions>>>,
     agent_links: Arc<ArcSwap<Vec<spacebot::links::AgentLink>>>,
     agent_humans: Arc<ArcSwap<Vec<spacebot::config::HumanDef>>>,
@@ -3558,6 +3563,80 @@ async fn initialize_agents(
                 }
                 Err(error) => {
                     tracing::error!(%error, adapter = %instance.name, "failed to create named mattermost adapter");
+                }
+            }
+        }
+    }
+
+    // Shared Teams permissions (hot-reloadable via file watcher)
+    *teams_permissions = config.messaging.teams.as_ref().map(|teams_config| {
+        let perms = spacebot::config::TeamsPermissions::from_config(teams_config, &config.bindings);
+        Arc::new(ArcSwap::from_pointee(perms))
+    });
+
+    if let Some(teams_config) = &config.messaging.teams
+        && teams_config.enabled
+    {
+        if !teams_config.app_id.is_empty()
+            && !teams_config.client_secret.is_empty()
+            && !teams_config.tenant_id.is_empty()
+        {
+            match spacebot::messaging::teams::TeamsAdapter::new(
+                "teams",
+                &teams_config.app_id,
+                &teams_config.client_secret,
+                &teams_config.tenant_id,
+                teams_config.port,
+                &teams_config.bind,
+                teams_permissions.clone().ok_or_else(|| {
+                    anyhow::anyhow!("teams permissions not initialized when teams is enabled")
+                })?,
+            ) {
+                Ok(adapter) => {
+                    new_messaging_manager.register(adapter).await;
+                }
+                Err(error) => {
+                    tracing::error!(%error, "failed to build teams adapter");
+                }
+            }
+        }
+
+        for instance in teams_config
+            .instances
+            .iter()
+            .filter(|instance| instance.enabled)
+        {
+            if instance.app_id.is_empty()
+                || instance.client_secret.is_empty()
+                || instance.tenant_id.is_empty()
+            {
+                tracing::warn!(adapter = %instance.name, "skipping enabled teams instance with missing credentials");
+                continue;
+            }
+            let runtime_key = spacebot::config::binding_runtime_adapter_key(
+                "teams",
+                Some(instance.name.as_str()),
+            );
+            let perms = Arc::new(ArcSwap::from_pointee(
+                spacebot::config::TeamsPermissions::from_instance_config(
+                    instance,
+                    &config.bindings,
+                ),
+            ));
+            match spacebot::messaging::teams::TeamsAdapter::new(
+                runtime_key,
+                &instance.app_id,
+                &instance.client_secret,
+                &instance.tenant_id,
+                teams_config.port,
+                &teams_config.bind,
+                perms,
+            ) {
+                Ok(adapter) => {
+                    new_messaging_manager.register(adapter).await;
+                }
+                Err(error) => {
+                    tracing::warn!(%error, adapter = %instance.name, "failed to build named teams adapter");
                 }
             }
         }
