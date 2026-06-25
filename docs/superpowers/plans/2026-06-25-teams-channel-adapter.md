@@ -57,14 +57,16 @@ v1 implements only the ✅ rows. v2/v3 are explicit follow-ons; each non-v1 row 
 - **Modify** `src/messaging/target.rs` — `teams:` parse/normalize arm.
 - **Modify** `src/main.rs` — register default + named Teams instances at startup (mirror Slack block).
 - **Cargo.toml** — add `jsonwebtoken`, `azure_identity` (rustls).
-- *(Deferred to a follow-up task, not v1-blocking: `config/watcher.rs` hot-reload, `config/permissions.rs` `TeamsPermissions`.)*
+- **Modify** `src/config/permissions.rs` — `TeamsPermissions` (v1, Task 10).
+- **Modify** `src/agent/channel.rs`, `src/conversation/channels.rs` — mention-source arm + `extract_platform_meta` arm (Task 11).
+- *(Deferred to v1.1, not v1-blocking: `config/watcher.rs` hot-reload only.)*
 
 ---
 
 ## Task 1: Config types + TOML + loading
 
 **Files:** `src/config/types.rs`, `src/config/toml_schema.rs`, `src/config/load.rs`
-**Interfaces produced:** `TeamsConfig { enabled, app_id, client_secret, tenant_id, port, bind, instances: Vec<TeamsInstanceConfig>, allowed_users }`, `TeamsInstanceConfig { name, enabled, app_id, client_secret, tenant_id, allowed_users }`; `MessagingConfig.teams: Option<TeamsConfig>`.
+**Interfaces produced:** `TeamsConfig { enabled, app_id, client_secret, tenant_id, port, bind, instances: Vec<TeamsInstanceConfig>, <permission/binding fields mirroring SlackConfig — read by TeamsPermissions in Task 10> }`, `TeamsInstanceConfig { name, enabled, app_id, client_secret, tenant_id, <same permission fields as SlackInstanceConfig> }`; `MessagingConfig.teams: Option<TeamsConfig>`. **Do NOT add a raw `allowed_users` field — permissions flow through `TeamsPermissions`/bindings (C4); mirror exactly what `SlackConfig`/`SlackInstanceConfig` carry.**
 
 - [ ] **Step 1:** Add `TeamsConfig`/`TeamsInstanceConfig` to `types.rs` mirroring `SlackConfig`/`SlackInstanceConfig` (fields above; `port` default 3979 to avoid clashing with webhook's default; `bind` default `"0.0.0.0"` since it sits behind a reverse proxy). Implement `Debug` redacting `client_secret`, and `SystemSecrets` listing the secret field(s). Add `pub teams: Option<TeamsConfig>` to `MessagingConfig` and its `Default`.
 - [ ] **Step 2:** Add `"teams"` to `is_named_adapter_platform()`.
@@ -103,7 +105,7 @@ v1 implements only the ✅ rows. v2/v3 are explicit follow-ons; each non-v1 row 
 **Files:** `src/messaging/teams.rs`
 **Interface:** `impl Messaging for TeamsAdapter` — `name()`, `start() -> InboundStream`, `health_check()`, `shutdown()`. (`respond`/`broadcast` stubbed to `Ok(())` until Task 6.)
 
-- [ ] **Step 1:** Define `TeamsAdapter { runtime_key, app_id, tenant_id, token: TeamsTokenProvider, jwks: JwksCache, port, bind, service_urls: Arc<…>, inbound_tx, allowed_users }`. `new(...)` from config.
+- [ ] **Step 1:** Define `TeamsAdapter { runtime_key, app_id, tenant_id, token: TeamsTokenProvider, jwks: JwksCache, port, bind, service_urls: Arc<…>, inbound_tx, permissions: Arc<ArcSwap<TeamsPermissions>> }`. `new(...)` from config + permissions (Task 10 supplies `TeamsPermissions`; if Task 10 runs after this, stub the field as `Arc<ArcSwap<TeamsPermissions>>` and wire enforcement in Task 10). No raw `allowed_users`.
 - [ ] **Step 2:** Implement `start()` mirroring `webhook.rs`: build an axum `Router` with `POST /api/messages` and `GET /health`; bind `TcpListener` on `bind:port`; `tokio::spawn(axum::serve(...))`; return the `InboundStream` (a `tokio::mpsc` → `ReceiverStream`).
 - [ ] **Step 3:** The `/api/messages` handler: read the `Authorization` header → `validate_inbound_jwt` (401 on failure) → deserialize `Activity` → capture `serviceUrl` into the `service_urls` map keyed by `conversation_id` → `activity_to_inbound` → apply allowlist (silently drop unauthorized senders) → send on `inbound_tx`. Respond `200 OK` promptly.
 - [ ] **Step 4:** `health_check()` returns `Ok(())` if the token provider can mint a token. `name()` returns the runtime key.
@@ -114,7 +116,7 @@ v1 implements only the ✅ rows. v2/v3 are explicit follow-ons; each non-v1 row 
 **Files:** `src/messaging/teams.rs`
 **Interface:** `respond(&self, message, OutboundResponse::Text)`, `broadcast(&self, target, response)`.
 
-- [ ] **Step 1:** `respond` for `OutboundResponse::Text`: resolve `serviceUrl` (from `message.metadata`, fallback to the `service_urls` map by conversation), get a bearer token, `POST {serviceUrl}/v3/conversations/{conversationId}/activities` with an `Activity { type: "message", text, replyToId? }`. Use `mark_classified_broadcast` on API errors so permission/not-found are permanent. For non-`Text` variants in v1, return `unsupported_*` is wrong for respond — instead log + `Ok(())` OR return an error; **match the convention other adapters use for unsupported `respond` variants (check `webhook.rs`/`twitch.rs`) and follow it.**
+- [ ] **Step 1:** `respond` for `OutboundResponse::Text`: resolve `serviceUrl` (from `message.metadata`, fallback to the `service_urls` map by conversation), get a bearer token, `POST {serviceUrl}/v3/conversations/{conversationId}/activities` with an `Activity { type: "message", text, replyToId? }`. Use `mark_classified_broadcast` on API errors so permission/not-found are permanent. **Convention for unsupported `respond` variants = the `webhook.rs` one: map to text if possible, else `return Ok(())` (silent no-op) — never an error.** (`broadcast` is the opposite: it returns a permanent error via `ensure_supported_broadcast_response` — Step 2.) Verify against `webhook.rs:~197` at implementation time.
 - [ ] **Step 2:** `broadcast(target, response)`: parse `target` (`teams:{conversation_id}`), look up `serviceUrl` from the persisted `service_urls` sidecar, gate on `ensure_supported_broadcast_response("teams", &response, is_supported)` where `is_supported` allows only `Text` in v1, then POST as in Step 1.
 - [ ] **Step 2b:** Persist `service_urls` to a sidecar file under the agent/instance data dir (Hermes pattern) so proactive sends survive restarts. Load on `new()`.
 - [ ] **Step 3:** Test: `is_supported` predicate (Text true, others false); target parsing. Run; commit.
