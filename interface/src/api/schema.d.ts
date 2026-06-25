@@ -3299,6 +3299,9 @@ export interface components {
             signal_http_url?: string | null;
             slack_app_token?: string | null;
             slack_bot_token?: string | null;
+            teams_app_id?: string | null;
+            teams_client_secret?: string | null;
+            teams_tenant_id?: string | null;
             telegram_token?: string | null;
             twitch_client_id?: string | null;
             twitch_client_secret?: string | null;

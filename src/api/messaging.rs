@@ -105,6 +105,13 @@ pub(super) struct InstanceCredentials {
     mattermost_base_url: Option<String>,
     #[serde(default)]
     mattermost_token: Option<String>,
+    // Teams credentials
+    #[serde(default)]
+    teams_app_id: Option<String>,
+    #[serde(default)]
+    teams_client_secret: Option<String>,
+    #[serde(default)]
+    teams_tenant_id: Option<String>,
     // Signal credentials
     #[serde(default)]
     signal_http_url: Option<String>,
