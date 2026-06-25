@@ -803,6 +803,47 @@ pub(super) async fn messaging_status(
                     enabled: false,
                 });
 
+            // Teams status (single-instance only in v1)
+            let _teams_status = doc
+                .get("messaging")
+                .and_then(|m| m.get("teams"))
+                .map(|t| {
+                    let has_app_id = t
+                        .get("app_id")
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|s| !s.is_empty());
+                    let has_client_secret = t
+                        .get("client_secret")
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|s| !s.is_empty());
+                    let has_tenant_id = t
+                        .get("tenant_id")
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|s| !s.is_empty());
+                    let enabled = t.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false);
+                    let configured = has_app_id && has_client_secret && has_tenant_id;
+
+                    if configured {
+                        push_instance_status(
+                            &mut instances,
+                            bindings,
+                            "teams",
+                            None,
+                            true,
+                            enabled,
+                        );
+                    }
+
+                    PlatformStatus {
+                        configured,
+                        enabled: configured && enabled,
+                    }
+                })
+                .unwrap_or(PlatformStatus {
+                    configured: false,
+                    enabled: false,
+                });
+
             // Signal status and instances
             let signal_status = doc
                 .get("messaging")
@@ -2122,7 +2163,15 @@ pub(super) async fn delete_messaging_instance(
 
     if !matches!(
         platform.as_str(),
-        "discord" | "slack" | "telegram" | "twitch" | "email" | "webhook" | "mattermost" | "signal"
+        "discord"
+            | "slack"
+            | "telegram"
+            | "twitch"
+            | "email"
+            | "webhook"
+            | "mattermost"
+            | "signal"
+            | "teams"
     ) {
         return Ok(Json(MessagingInstanceActionResponse {
             success: false,
@@ -2233,6 +2282,12 @@ pub(super) async fn delete_messaging_instance(
                     table.remove("group_ids");
                     table.remove("group_allowed_users");
                     table.remove("ignore_stories");
+                }
+                "teams" => {
+                    table.remove("app_id");
+                    table.remove("client_secret");
+                    table.remove("tenant_id");
+                    table.remove("dm_allowed_users");
                 }
                 _ => {}
             }
