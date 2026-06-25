@@ -8,6 +8,7 @@
 //! - Bot Framework Activity deserialization and normalization to `InboundMessage`.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -19,6 +20,7 @@ use jsonwebtoken::{
 use reqwest::Client;
 use serde::Deserialize;
 use tokio::sync::{Mutex, RwLock};
+use url::Url;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -679,6 +681,54 @@ pub fn activity_to_inbound(activity: &Activity, runtime_key: &str) -> Option<cra
 }
 
 // ---------------------------------------------------------------------------
+// SSRF guard
+// ---------------------------------------------------------------------------
+
+/// Return `true` iff `url` is a safe Bot Framework serviceUrl.
+///
+/// Rules:
+/// - Must parse as a valid URL.
+/// - Scheme must be `https` (case-insensitive).
+/// - Host must end with `.botframework.com` or `.trafficmanager.net`.
+///
+/// This guards against attacker-supplied serviceUrl values that could be used
+/// to exfiltrate the Bot Connector bearer token.
+fn is_allowed_service_url(url: &str) -> bool {
+    let Ok(parsed) = Url::parse(url) else {
+        return false;
+    };
+    if parsed.scheme() != "https" {
+        return false;
+    }
+    let host = match parsed.host_str() {
+        Some(h) => h.to_lowercase(),
+        None => return false,
+    };
+    host.ends_with(".botframework.com") || host.ends_with(".trafficmanager.net")
+}
+
+// ---------------------------------------------------------------------------
+// Sidecar persistence helpers
+// ---------------------------------------------------------------------------
+
+/// Persist `map` as JSON to `path` atomically (write-tmp → rename).
+/// Errors are silently swallowed (log-only) to avoid disrupting normal flow.
+fn save_service_urls(map: &HashMap<String, String>, path: &std::path::Path) {
+    let tmp = path.with_extension("json.tmp");
+    let Ok(json) = serde_json::to_string(map) else {
+        tracing::warn!(?path, "teams sidecar: failed to serialise service_urls");
+        return;
+    };
+    if std::fs::write(&tmp, &json).is_ok() {
+        if let Err(e) = std::fs::rename(&tmp, path) {
+            tracing::warn!(%e, ?path, "teams sidecar: rename failed");
+        }
+    } else {
+        tracing::warn!(?path, "teams sidecar: write to tmp file failed");
+    }
+}
+
+// ---------------------------------------------------------------------------
 // TeamsAdapter — inbound HTTP server
 // ---------------------------------------------------------------------------
 
@@ -690,20 +740,28 @@ use axum::routing::{get, post};
 use tokio::sync::mpsc;
 
 use crate::config::TeamsPermissions;
-use crate::messaging::traits::{InboundStream, Messaging};
+use crate::messaging::traits::{
+    InboundStream, Messaging, ensure_supported_broadcast_response, mark_classified_broadcast,
+    mark_permanent_broadcast,
+};
 use crate::{InboundMessage, OutboundResponse};
 
 /// Shared state injected into axum handlers.
 #[derive(Clone)]
-#[allow(dead_code)] // `token` used by Task 6 outbound implementation
 struct TeamsHandlerState {
     inbound_tx: mpsc::Sender<InboundMessage>,
+    /// Available to handlers for future outbound calls (e.g., typing indicators).
+    #[allow(dead_code)]
     token: Arc<TeamsTokenProvider>,
     jwks: Arc<JwksCache>,
     app_id: String,
     service_urls: Arc<Mutex<HashMap<String, String>>>,
     permissions: Arc<ArcSwap<TeamsPermissions>>,
     runtime_key: String,
+    /// Available to handlers for future outbound calls.
+    #[allow(dead_code)]
+    http_client: Client,
+    sidecar_path: Option<PathBuf>,
 }
 
 /// Microsoft Teams Bot Framework adapter.
@@ -718,12 +776,16 @@ pub struct TeamsAdapter {
     port: u16,
     bind: String,
     /// `conversation_id → serviceUrl` — populated on each inbound Activity so
-    /// the outbound adapter (Task 6) knows where to send replies.
+    /// the outbound adapter knows where to send replies.
     service_urls: Arc<Mutex<HashMap<String, String>>>,
     /// Lazily populated by `start()`; stored so handlers can send inbound
     /// messages without holding a lock across await points.
     inbound_tx: Arc<RwLock<Option<mpsc::Sender<InboundMessage>>>>,
     permissions: Arc<ArcSwap<TeamsPermissions>>,
+    /// HTTP client for outbound Bot Connector requests.
+    http_client: Client,
+    /// Optional path for sidecar persistence of service_urls.
+    sidecar_path: Option<PathBuf>,
 }
 
 impl TeamsAdapter {
@@ -749,6 +811,10 @@ impl TeamsAdapter {
             client_secret.into(),
         )?);
         let jwks = Arc::new(JwksCache::new()?);
+        let http_client = Client::builder()
+            .timeout(Duration::from_secs(30))
+            .build()
+            .context("failed to build HTTP client for Teams outbound")?;
 
         Ok(Self {
             runtime_key: runtime_key.into(),
@@ -761,7 +827,18 @@ impl TeamsAdapter {
             service_urls: Arc::new(Mutex::new(HashMap::new())),
             inbound_tx: Arc::new(RwLock::new(None)),
             permissions,
+            http_client,
+            sidecar_path: None,
         })
+    }
+
+    /// Set the sidecar persistence path for `service_urls`.
+    ///
+    /// When set, `service_urls` is loaded from this path on `start()` and
+    /// persisted atomically after each inbound capture or outbound send.
+    pub fn with_sidecar_path(mut self, path: PathBuf) -> Self {
+        self.sidecar_path = Some(path);
+        self
     }
 }
 
@@ -771,6 +848,27 @@ impl Messaging for TeamsAdapter {
     }
 
     async fn start(&self) -> crate::Result<InboundStream> {
+        // Load sidecar on startup if configured.
+        if let Some(ref path) = self.sidecar_path {
+            match std::fs::read_to_string(path) {
+                Ok(contents) => match serde_json::from_str::<HashMap<String, String>>(&contents) {
+                    Ok(loaded) => {
+                        *self.service_urls.lock().await = loaded;
+                        tracing::info!(?path, "teams sidecar: loaded service_urls");
+                    }
+                    Err(e) => {
+                        tracing::warn!(%e, ?path, "teams sidecar: failed to parse service_urls JSON");
+                    }
+                },
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    // Expected on first startup — not an error.
+                }
+                Err(e) => {
+                    tracing::warn!(%e, ?path, "teams sidecar: failed to read service_urls file");
+                }
+            }
+        }
+
         let (inbound_tx, inbound_rx) = mpsc::channel::<InboundMessage>(256);
         *self.inbound_tx.write().await = Some(inbound_tx.clone());
 
@@ -782,6 +880,8 @@ impl Messaging for TeamsAdapter {
             service_urls: self.service_urls.clone(),
             permissions: self.permissions.clone(),
             runtime_key: self.runtime_key.clone(),
+            http_client: self.http_client.clone(),
+            sidecar_path: self.sidecar_path.clone(),
         };
 
         let app = Router::new()
@@ -813,15 +913,202 @@ impl Messaging for TeamsAdapter {
 
     async fn respond(
         &self,
-        _message: &InboundMessage,
-        _response: OutboundResponse,
+        message: &InboundMessage,
+        response: OutboundResponse,
     ) -> crate::Result<()> {
-        // Stubbed — real outbound implementation is Task 6.
+        // Extract the text to send (or return Ok(()) for unsupported variants).
+        let text = match response {
+            OutboundResponse::Text(t) => t,
+            OutboundResponse::ThreadReply { text, .. } => text,
+            OutboundResponse::Ephemeral { text, .. } => text,
+            OutboundResponse::RichMessage { text, .. } => text,
+            OutboundResponse::ScheduledMessage { text, .. } => text,
+            // Silent no-ops for unsupported variants.
+            OutboundResponse::Reaction(_)
+            | OutboundResponse::RemoveReaction(_)
+            | OutboundResponse::Status(_)
+            | OutboundResponse::StreamStart
+            | OutboundResponse::StreamChunk(_)
+            | OutboundResponse::StreamEnd
+            | OutboundResponse::File { .. } => return Ok(()),
+        };
+
+        // Resolve serviceUrl.
+        let service_url = message
+            .metadata
+            .get("teams_service_url")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        // If not found in metadata, look up from the map.
+        let service_url = match service_url {
+            Some(u) => u,
+            None => {
+                let urls = self.service_urls.lock().await;
+                match urls.get(&message.conversation_id).cloned() {
+                    Some(u) => u,
+                    None => {
+                        return Err(mark_permanent_broadcast(anyhow::anyhow!(
+                            "teams respond: no serviceUrl for conversation_id {}",
+                            message.conversation_id
+                        )));
+                    }
+                }
+            }
+        };
+
+        // SSRF guard — reject non-allowlisted serviceUrls.
+        if !is_allowed_service_url(&service_url) {
+            return Err(mark_permanent_broadcast(anyhow::anyhow!(
+                "teams respond: serviceUrl blocked by SSRF guard: {service_url}"
+            )));
+        }
+
+        // Strip the platform prefix to get the bare MS conversation id.
+        let bare_conv_id = message
+            .conversation_id
+            .strip_prefix(&format!("{}:", self.runtime_key))
+            .unwrap_or(&message.conversation_id)
+            .to_string();
+
+        // Build the reply-to id if present.
+        let reply_to_id = message
+            .metadata
+            .get("teams_reply_to_id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        // Build the JSON body.
+        let body = if let Some(ref reply_to) = reply_to_id {
+            serde_json::json!({
+                "type": "message",
+                "text": text,
+                "replyToId": reply_to,
+            })
+        } else {
+            serde_json::json!({
+                "type": "message",
+                "text": text,
+            })
+        };
+
+        let url = format!(
+            "{}/v3/conversations/{}/activities",
+            service_url.trim_end_matches('/'),
+            bare_conv_id,
+        );
+
+        let token = self
+            .token
+            .bearer()
+            .await
+            .map_err(mark_classified_broadcast)?;
+
+        let resp = self
+            .http_client
+            .post(&url)
+            .bearer_auth(&token)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| mark_classified_broadcast(anyhow::anyhow!("teams respond HTTP error: {e}")))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body_text = resp.text().await.unwrap_or_else(|_| "<unreadable>".to_owned());
+            return Err(mark_classified_broadcast(anyhow::anyhow!(
+                "teams respond: Bot Connector returned {status}: {body_text}"
+            )));
+        }
+
+        // Persist updated service_urls if sidecar is configured.
+        if let Some(ref path) = self.sidecar_path {
+            let urls = self.service_urls.lock().await;
+            save_service_urls(&urls, path);
+        }
+
         Ok(())
     }
 
-    async fn broadcast(&self, _target: &str, _response: OutboundResponse) -> crate::Result<()> {
-        // Stubbed — real proactive implementation is Task 6.
+    async fn broadcast(&self, target: &str, response: OutboundResponse) -> crate::Result<()> {
+        // Gate: only Text is supported for proactive broadcast.
+        fn is_supported(r: &OutboundResponse) -> bool {
+            matches!(r, OutboundResponse::Text(_))
+        }
+        ensure_supported_broadcast_response("teams", &response, is_supported)?;
+
+        let OutboundResponse::Text(text) = response else {
+            // Already handled by ensure_supported_broadcast_response above,
+            // but the compiler needs this to be exhaustive.
+            unreachable!()
+        };
+
+        // Look up serviceUrl — the full `target` string is the map key.
+        let service_url = {
+            let urls = self.service_urls.lock().await;
+            match urls.get(target).cloned() {
+                Some(u) => u,
+                None => {
+                    return Err(mark_permanent_broadcast(anyhow::anyhow!(
+                        "teams broadcast: no serviceUrl for target {target}"
+                    )));
+                }
+            }
+        };
+
+        // SSRF guard.
+        if !is_allowed_service_url(&service_url) {
+            return Err(mark_permanent_broadcast(anyhow::anyhow!(
+                "teams broadcast: serviceUrl blocked by SSRF guard: {service_url}"
+            )));
+        }
+
+        // Strip the platform prefix to get the bare MS conversation id.
+        let bare_conv_id = target
+            .strip_prefix(&format!("{}:", self.runtime_key))
+            .unwrap_or(target)
+            .to_string();
+
+        let body = serde_json::json!({
+            "type": "message",
+            "text": text,
+        });
+
+        let url = format!(
+            "{}/v3/conversations/{}/activities",
+            service_url.trim_end_matches('/'),
+            bare_conv_id,
+        );
+
+        let token = self
+            .token
+            .bearer()
+            .await
+            .map_err(mark_classified_broadcast)?;
+
+        let resp = self
+            .http_client
+            .post(&url)
+            .bearer_auth(&token)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| mark_classified_broadcast(anyhow::anyhow!("teams broadcast HTTP error: {e}")))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body_text = resp.text().await.unwrap_or_else(|_| "<unreadable>".to_owned());
+            return Err(mark_classified_broadcast(anyhow::anyhow!(
+                "teams broadcast: Bot Connector returned {status}: {body_text}"
+            )));
+        }
+
+        // Persist updated service_urls if sidecar is configured.
+        if let Some(ref path) = self.sidecar_path {
+            let urls = self.service_urls.lock().await;
+            save_service_urls(&urls, path);
+        }
+
         Ok(())
     }
 
@@ -873,11 +1160,19 @@ async fn handle_messages(
         }
     };
 
-    // --- Step 3: Capture serviceUrl ---
+    // --- Step 3: Capture serviceUrl (keyed by rewritten conversation_id) ---
     {
-        let conv_id = format!("teams:{}", activity.conversation.id);
+        let base = format!("teams:{}", activity.conversation.id);
+        let conv_key = crate::messaging::apply_runtime_adapter_to_conversation_id(
+            &state.runtime_key,
+            base,
+        );
         let mut urls = state.service_urls.lock().await;
-        urls.insert(conv_id, activity.service_url.clone());
+        urls.insert(conv_key, activity.service_url.clone());
+        // Persist sidecar if configured.
+        if let Some(ref path) = state.sidecar_path {
+            save_service_urls(&urls, path);
+        }
     }
 
     // --- Step 4: Normalize to InboundMessage ---
@@ -1533,5 +1828,137 @@ vIyJeH8/89a9IXZXlMIA9KH9
 
         let stored = map.lock().await.get(&conv_id).cloned();
         assert_eq!(stored.as_deref(), Some(url));
+    }
+
+    // -----------------------------------------------------------------------
+    // SSRF guard tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn ssrf_guard_allows_valid_botframework() {
+        assert!(
+            is_allowed_service_url("https://api.botframework.com/"),
+            "api.botframework.com should be allowed"
+        );
+    }
+
+    #[test]
+    fn ssrf_guard_allows_trafficmanager() {
+        assert!(
+            is_allowed_service_url("https://smba.trafficmanager.net/amer/"),
+            "smba.trafficmanager.net should be allowed"
+        );
+    }
+
+    #[test]
+    fn ssrf_guard_rejects_http() {
+        assert!(
+            !is_allowed_service_url("http://smba.trafficmanager.net/"),
+            "http scheme should be rejected"
+        );
+    }
+
+    #[test]
+    fn ssrf_guard_rejects_evil_host() {
+        assert!(
+            !is_allowed_service_url("https://evil.example.com"),
+            "unrelated host should be rejected"
+        );
+    }
+
+    #[test]
+    fn ssrf_guard_rejects_evil_suffix() {
+        assert!(
+            !is_allowed_service_url("https://botframework.com.evil.com"),
+            "botframework.com.evil.com should be rejected (evil suffix)"
+        );
+    }
+
+    #[test]
+    fn ssrf_guard_rejects_invalid_url() {
+        assert!(
+            !is_allowed_service_url("not-a-url"),
+            "invalid URL should be rejected"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // is_supported broadcast variant tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn is_supported_text_is_true() {
+        fn is_supported(r: &OutboundResponse) -> bool {
+            matches!(r, OutboundResponse::Text(_))
+        }
+        assert!(
+            is_supported(&OutboundResponse::Text("hello".to_string())),
+            "Text should be supported for broadcast"
+        );
+    }
+
+    #[test]
+    fn is_supported_other_is_false() {
+        fn is_supported(r: &OutboundResponse) -> bool {
+            matches!(r, OutboundResponse::Text(_))
+        }
+        assert!(
+            !is_supported(&OutboundResponse::Reaction("👍".to_string())),
+            "Reaction should not be supported for broadcast"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Conversation ID strip tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn conv_id_strip_default() {
+        let conv_id = "teams:conv-abc";
+        let runtime_key = "teams";
+        let bare = conv_id
+            .strip_prefix(&format!("{runtime_key}:"))
+            .unwrap_or(conv_id);
+        assert_eq!(bare, "conv-abc");
+    }
+
+    #[test]
+    fn conv_id_strip_named() {
+        let conv_id = "teams:prod:conv-abc";
+        let runtime_key = "teams:prod";
+        let bare = conv_id
+            .strip_prefix(&format!("{runtime_key}:"))
+            .unwrap_or(conv_id);
+        assert_eq!(bare, "conv-abc");
+    }
+
+    #[test]
+    fn conv_id_strip_colon_in_id() {
+        // Inner colons in the MS id must be preserved.
+        let conv_id = "teams:conv:abc:def";
+        let runtime_key = "teams";
+        let bare = conv_id
+            .strip_prefix(&format!("{runtime_key}:"))
+            .unwrap_or(conv_id);
+        assert_eq!(bare, "conv:abc:def");
+    }
+
+    // -----------------------------------------------------------------------
+    // Map-key fix test
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn map_key_named_instance() {
+        use crate::messaging::apply_runtime_adapter_to_conversation_id;
+
+        let runtime_key = "teams:prod";
+        let ms_id = "conv-abc";
+        let base = format!("teams:{ms_id}");
+        let rewritten = apply_runtime_adapter_to_conversation_id(runtime_key, base);
+
+        assert_eq!(
+            rewritten, "teams:prod:conv-abc",
+            "named instance should produce teams:prod:conv-abc, not teams:conv-abc"
+        );
     }
 }
