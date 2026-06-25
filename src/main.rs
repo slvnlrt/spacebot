@@ -1845,6 +1845,7 @@ async fn run(
             twitch_permissions,
             mattermost_permissions,
             signal_permissions,
+            teams_permissions,
             bindings.clone(),
             Some(messaging_manager.clone()),
             llm_manager.clone(),
@@ -1863,6 +1864,7 @@ async fn run(
             None, // twitch_permissions
             None, // mattermost_permissions
             None, // signal_permissions
+            None, // teams_permissions
             bindings.clone(),
             None,
             llm_manager.clone(),
@@ -2631,6 +2633,7 @@ async fn run(
                                             new_twitch_permissions,
                                             new_mattermost_permissions,
                                             new_signal_permissions,
+                                            new_teams_permissions,
                                             bindings.clone(),
                                             Some(messaging_manager.clone()),
                                             new_llm_manager.clone(),
