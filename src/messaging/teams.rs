@@ -431,6 +431,9 @@ pub async fn validate_inbound_jwt(
 /// - `validate_aud` is **always** `true`.
 /// - `validate_exp` is **always** `true` (the default).
 /// - Leeway is 300 s (5 min), matching Microsoft's industry-standard guidance.
+/// - `exp`, `aud`, and `iss` are all **required** claims — a token that omits
+///   any of them is rejected outright, regardless of signature validity.  This
+///   prevents cross-bot replay attacks using tokens that simply lack an `aud`.
 pub fn validate_token_with_key(
     token: &str,
     expected_aud: &str,
@@ -449,6 +452,11 @@ pub fn validate_token_with_key(
     // Expiry: validated by default; allow 5 min clock skew.
     validation.validate_exp = true;
     validation.leeway = 300;
+
+    // Require exp, aud, and iss to be present in the token.  jsonwebtoken only
+    // *validates* claims that exist; without this, a token that simply omits
+    // `aud` or `iss` would pass the audience/issuer checks entirely.
+    validation.set_required_spec_claims(&["exp", "aud", "iss"]);
 
     // Decode and verify in one step.
     decode::<serde_json::Value>(token, key, &validation)
@@ -661,6 +669,68 @@ vIyJeH8/89a9IXZXlMIA9KH9
         // The decoding key is an RSA key; jsonwebtoken will reject the HS256 alg.
         let err = validate_token_with_key(&token, APP_ID, ISSUER, &decoding_key());
         assert!(err.is_err(), "HS256 token should be rejected; got: {err:?}");
+    }
+
+    /// Token with `aud` claim entirely absent → rejected.
+    ///
+    /// Regression test: jsonwebtoken only *validates* `aud` when the claim is
+    /// present.  `set_required_spec_claims` must include `"aud"` so that a
+    /// correctly signed token that simply omits the audience is not accepted.
+    #[test]
+    fn test_jwt_missing_aud_rejected() {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time before epoch")
+            .as_secs() as i64;
+
+        // Intentionally omit the `aud` field.
+        let claims = json!({
+            "iss": ISSUER,
+            "exp": now + 3600,
+            "nbf": now - 60,
+            "iat": now - 60,
+        });
+
+        let header = Header::new(Algorithm::RS256);
+        let token = encode(&header, &claims, &encoding_key())
+            .expect("test JWT encoding failed");
+
+        let err = validate_token_with_key(&token, APP_ID, ISSUER, &decoding_key());
+        assert!(
+            err.is_err(),
+            "token missing `aud` claim should be rejected; got: {err:?}"
+        );
+    }
+
+    /// Token with `iss` claim entirely absent → rejected.
+    ///
+    /// Regression test: jsonwebtoken only *validates* `iss` when the claim is
+    /// present.  `set_required_spec_claims` must include `"iss"` so that a
+    /// correctly signed token that omits the issuer is not accepted.
+    #[test]
+    fn test_jwt_missing_iss_rejected() {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time before epoch")
+            .as_secs() as i64;
+
+        // Intentionally omit the `iss` field.
+        let claims = json!({
+            "aud": APP_ID,
+            "exp": now + 3600,
+            "nbf": now - 60,
+            "iat": now - 60,
+        });
+
+        let header = Header::new(Algorithm::RS256);
+        let token = encode(&header, &claims, &encoding_key())
+            .expect("test JWT encoding failed");
+
+        let err = validate_token_with_key(&token, APP_ID, ISSUER, &decoding_key());
+        assert!(
+            err.is_err(),
+            "token missing `iss` claim should be rejected; got: {err:?}"
+        );
     }
 
     // -----------------------------------------------------------------------
