@@ -5,7 +5,9 @@
 //! - Inbound JWT validator: verifies that incoming POST /api/messages requests
 //!   are signed by Azure Bot Service, preventing message injection by third
 //!   parties.
+//! - Bot Framework Activity deserialization and normalization to `InboundMessage`.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -466,6 +468,217 @@ pub fn validate_token_with_key(
 }
 
 // ---------------------------------------------------------------------------
+// Bot Framework Activity deserialization
+// ---------------------------------------------------------------------------
+
+/// The `from` / `recipient` identity object in a Bot Framework Activity.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct ActivityAccount {
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+}
+
+/// The `conversation` object in a Bot Framework Activity.
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActivityConversation {
+    pub id: String,
+    #[serde(rename = "conversationType")]
+    pub conversation_type: Option<String>,
+}
+
+/// Subset of the Bot Framework Activity schema used for inbound message
+/// processing.  Unknown fields are silently ignored (tolerant parsing).
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct Activity {
+    /// The activity type, e.g. "message", "conversationUpdate", "typing".
+    #[serde(rename = "type")]
+    pub activity_type: String,
+
+    /// Unique activity identifier assigned by the Bot Connector.
+    #[serde(default)]
+    pub id: String,
+
+    /// The text body of the message (may be absent for non-message activities).
+    pub text: Option<String>,
+
+    /// The sender of the activity (the user or service sending to the bot).
+    pub from: ActivityAccount,
+
+    /// The conversation this activity belongs to.
+    pub conversation: ActivityConversation,
+
+    /// Base URI of the channel service — used by the outbound adapter to send
+    /// replies back to the correct Bot Connector endpoint.
+    #[serde(rename = "serviceUrl")]
+    pub service_url: String,
+
+    /// The bot (recipient) identity.
+    pub recipient: ActivityAccount,
+
+    /// Platform-specific extension data.
+    #[serde(rename = "channelData", default)]
+    pub channel_data: serde_json::Value,
+
+    /// The ID of the activity this is a reply to, if any.
+    #[serde(rename = "replyToId")]
+    pub reply_to_id: Option<String>,
+
+    /// Mention entities and other structured data attached to the activity.
+    #[serde(default)]
+    pub entities: Option<Vec<serde_json::Value>>,
+}
+
+// ---------------------------------------------------------------------------
+// Activity → InboundMessage normalization
+// ---------------------------------------------------------------------------
+
+/// Remove all `<at>...</at>` mention spans from `text` and collapse any
+/// resulting runs of whitespace into single spaces.
+fn strip_at_mentions(text: &str) -> String {
+    // Iteratively remove <at>...</at> tags (non-greedy inner match).
+    let mut result = String::with_capacity(text.len());
+    let mut remaining = text;
+    while let Some(start) = remaining.find("<at>") {
+        result.push_str(&remaining[..start]);
+        remaining = &remaining[start + "<at>".len()..];
+        if let Some(end) = remaining.find("</at>") {
+            remaining = &remaining[end + "</at>".len()..];
+        } else {
+            // Malformed — no closing tag; keep the rest verbatim.
+            result.push_str(remaining);
+            remaining = "";
+            break;
+        }
+    }
+    result.push_str(remaining);
+
+    // Collapse runs of whitespace (spaces, tabs, newlines) to a single space
+    // and trim the result.
+    result
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Determine whether the bot was @mentioned in `activity`.
+///
+/// Priority:
+/// 1. Check `entities` for a `"mention"` entry whose `mentioned.id` equals
+///    `activity.recipient.id`.
+/// 2. Fall back to presence of any `<at>` tag in the raw text.
+fn bot_was_mentioned(activity: &Activity) -> bool {
+    let bot_id = &activity.recipient.id;
+
+    if let Some(entities) = &activity.entities {
+        for entity in entities {
+            let is_mention = entity
+                .get("type")
+                .and_then(|v| v.as_str())
+                .map(|t| t.eq_ignore_ascii_case("mention"))
+                .unwrap_or(false);
+
+            if is_mention {
+                let mentioned_id = entity
+                    .pointer("/mentioned/id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                if mentioned_id == bot_id {
+                    return true;
+                }
+            }
+        }
+    }
+
+    // Fallback: presence of an <at> tag in text implies a mention.
+    activity
+        .text
+        .as_deref()
+        .map(|t| t.contains("<at>"))
+        .unwrap_or(false)
+}
+
+/// Convert a Bot Framework [`Activity`] to a project-standard [`InboundMessage`].
+///
+/// Returns `None` for any activity whose `type` is not `"message"` — v1 only
+/// handles conversational message activities.
+///
+/// # Metadata keys set
+///
+/// | Key                        | Description                                      |
+/// |----------------------------|--------------------------------------------------|
+/// | `"message_id"`             | Bot Connector activity `id`                      |
+/// | `"teams_service_url"`      | `serviceUrl` — needed by the outbound adapter    |
+/// | `"teams_conversation_type"`| `conversationType` when present                  |
+/// | `"teams_reply_to_id"`      | `replyToId` when present                         |
+/// | `"teams_mentioned"`        | `"true"` / `"false"` — whether the bot was @mentioned |
+pub fn activity_to_inbound(activity: &Activity, runtime_key: &str) -> Option<crate::InboundMessage> {
+    if !activity.activity_type.eq_ignore_ascii_case("message") {
+        return None;
+    }
+
+    let raw_text = activity.text.as_deref().unwrap_or("").trim().to_string();
+    let clean_text = strip_at_mentions(&raw_text);
+    let mentioned = bot_was_mentioned(activity);
+
+    // Build the conversation_id.
+    let base_conversation_id = format!("teams:{}", activity.conversation.id);
+    let conversation_id =
+        crate::messaging::apply_runtime_adapter_to_conversation_id(
+            runtime_key,
+            base_conversation_id,
+        );
+
+    // Assemble metadata.
+    let mut metadata: HashMap<String, serde_json::Value> = HashMap::new();
+
+    metadata.insert(
+        crate::metadata_keys::MESSAGE_ID.to_string(),
+        serde_json::json!(activity.id),
+    );
+    metadata.insert(
+        "teams_service_url".to_string(),
+        serde_json::json!(activity.service_url),
+    );
+    if let Some(conv_type) = &activity.conversation.conversation_type {
+        metadata.insert(
+            "teams_conversation_type".to_string(),
+            serde_json::json!(conv_type),
+        );
+    }
+    if let Some(reply_to) = &activity.reply_to_id {
+        metadata.insert(
+            "teams_reply_to_id".to_string(),
+            serde_json::json!(reply_to),
+        );
+    }
+    metadata.insert(
+        "teams_mentioned".to_string(),
+        serde_json::json!(if mentioned { "true" } else { "false" }),
+    );
+
+    let formatted_author = if activity.from.name.is_empty() {
+        None
+    } else {
+        Some(activity.from.name.clone())
+    };
+
+    Some(crate::InboundMessage {
+        id: activity.id.clone(),
+        source: "teams".to_string(),
+        adapter: Some(runtime_key.to_string()),
+        conversation_id,
+        sender_id: activity.from.id.clone(),
+        agent_id: None,
+        content: crate::MessageContent::Text(clean_text),
+        timestamp: chrono::Utc::now(),
+        metadata,
+        formatted_author,
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Unit tests
 // ---------------------------------------------------------------------------
 
@@ -804,5 +1017,146 @@ vIyJeH8/89a9IXZXlMIA9KH9
         // Expires in leeway + 1 s → still fresh by exactly 1 second.
         let expires_at = now + LEEWAY + Duration::from_secs(1);
         assert!(!needs_refresh(expires_at, now, LEEWAY));
+    }
+
+    // -----------------------------------------------------------------------
+    // Activity → InboundMessage mapping tests
+    // -----------------------------------------------------------------------
+
+    /// Personal (DM) message: conversation_id, content, sender, metadata.
+    #[test]
+    fn test_activity_to_inbound_personal_dm() {
+        let raw = r#"{
+            "type": "message",
+            "id": "act-001",
+            "text": "Hello bot!",
+            "from": { "id": "user-aaa", "name": "Alice Smith" },
+            "conversation": { "id": "conv-dm-001", "conversationType": "personal" },
+            "serviceUrl": "https://smba.trafficmanager.net/amer/",
+            "recipient": { "id": "bot-bbb", "name": "MyBot" },
+            "channelData": {},
+            "entities": []
+        }"#;
+
+        let activity: Activity = serde_json::from_str(raw).expect("parse activity");
+        let msg = activity_to_inbound(&activity, "teams")
+            .expect("should produce InboundMessage for message activity");
+
+        assert_eq!(msg.id, "act-001");
+        assert_eq!(msg.source, "teams");
+        assert_eq!(msg.adapter, Some("teams".to_string()));
+        assert_eq!(msg.conversation_id, "teams:conv-dm-001");
+        assert_eq!(msg.sender_id, "user-aaa");
+        assert_eq!(msg.formatted_author, Some("Alice Smith".to_string()));
+
+        // Content text should be unchanged (no <at> tags).
+        if let crate::MessageContent::Text(text) = &msg.content {
+            assert_eq!(text, "Hello bot!");
+        } else {
+            panic!("expected Text content");
+        }
+
+        // Metadata: serviceUrl and conversationType.
+        assert_eq!(
+            msg.metadata.get("teams_service_url").and_then(|v| v.as_str()),
+            Some("https://smba.trafficmanager.net/amer/")
+        );
+        assert_eq!(
+            msg.metadata.get("teams_conversation_type").and_then(|v| v.as_str()),
+            Some("personal")
+        );
+        // No mention in DM (no <at> tag and no mention entity for bot-bbb).
+        assert_eq!(
+            msg.metadata.get("teams_mentioned").and_then(|v| v.as_str()),
+            Some("false")
+        );
+        // message_id metadata.
+        assert_eq!(
+            msg.metadata.get(crate::metadata_keys::MESSAGE_ID).and_then(|v| v.as_str()),
+            Some("act-001")
+        );
+    }
+
+    /// Channel @mention: <at> tag is stripped, teams_mentioned == "true".
+    #[test]
+    fn test_activity_to_inbound_channel_mention_strips_at_tag() {
+        let raw = r#"{
+            "type": "message",
+            "id": "act-002",
+            "text": "<at>MyBot</at> hello world",
+            "from": { "id": "user-bbb", "name": "Bob Jones" },
+            "conversation": { "id": "conv-ch-999", "conversationType": "channel" },
+            "serviceUrl": "https://smba.trafficmanager.net/emea/",
+            "recipient": { "id": "bot-bbb", "name": "MyBot" },
+            "channelData": {},
+            "entities": [
+                {
+                    "type": "mention",
+                    "mentioned": { "id": "bot-bbb", "name": "MyBot" },
+                    "text": "<at>MyBot</at>"
+                }
+            ]
+        }"#;
+
+        let activity: Activity = serde_json::from_str(raw).expect("parse activity");
+        let msg = activity_to_inbound(&activity, "teams")
+            .expect("should produce InboundMessage");
+
+        // <at>MyBot</at> prefix should be stripped; remaining text trimmed.
+        if let crate::MessageContent::Text(text) = &msg.content {
+            assert_eq!(text, "hello world");
+        } else {
+            panic!("expected Text content");
+        }
+
+        assert_eq!(
+            msg.metadata.get("teams_mentioned").and_then(|v| v.as_str()),
+            Some("true")
+        );
+        assert_eq!(msg.conversation_id, "teams:conv-ch-999");
+    }
+
+    /// Non-message activity type returns None.
+    #[test]
+    fn test_activity_to_inbound_non_message_returns_none() {
+        let raw = r#"{
+            "type": "conversationUpdate",
+            "id": "act-003",
+            "from": { "id": "user-ccc", "name": "Carol" },
+            "conversation": { "id": "conv-xyz", "conversationType": "channel" },
+            "serviceUrl": "https://smba.trafficmanager.net/amer/",
+            "recipient": { "id": "bot-ddd", "name": "MyBot" },
+            "channelData": {}
+        }"#;
+
+        let activity: Activity = serde_json::from_str(raw).expect("parse activity");
+        let result = activity_to_inbound(&activity, "teams");
+        assert!(
+            result.is_none(),
+            "conversationUpdate should produce None, got: {result:?}"
+        );
+    }
+
+    /// Named-instance runtime_key rewrites the conversation_id prefix.
+    #[test]
+    fn test_activity_to_inbound_named_runtime_key() {
+        let raw = r#"{
+            "type": "message",
+            "id": "act-004",
+            "text": "ping",
+            "from": { "id": "user-ddd", "name": "Dave" },
+            "conversation": { "id": "conv-named-001" },
+            "serviceUrl": "https://smba.trafficmanager.net/amer/",
+            "recipient": { "id": "bot-eee", "name": "MyBot" },
+            "channelData": {}
+        }"#;
+
+        let activity: Activity = serde_json::from_str(raw).expect("parse activity");
+        let msg = activity_to_inbound(&activity, "teams:support")
+            .expect("should produce InboundMessage");
+
+        // Named adapter: runtime_key != "teams", so prefix should be rewritten.
+        assert_eq!(msg.conversation_id, "teams:support:conv-named-001");
+        assert_eq!(msg.adapter, Some("teams:support".to_string()));
     }
 }
