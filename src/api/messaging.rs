@@ -1634,7 +1634,15 @@ pub(super) async fn create_messaging_instance(
 
     if !matches!(
         platform.as_str(),
-        "discord" | "slack" | "telegram" | "twitch" | "email" | "webhook" | "mattermost" | "signal"
+        "discord"
+            | "slack"
+            | "telegram"
+            | "twitch"
+            | "email"
+            | "webhook"
+            | "mattermost"
+            | "signal"
+            | "teams"
     ) {
         return Ok(Json(MessagingInstanceActionResponse {
             success: false,
@@ -1676,6 +1684,14 @@ pub(super) async fn create_messaging_instance(
                 ),
             }));
         }
+    }
+
+    // Teams v1: single bot only — named instances not supported yet
+    if platform.as_str() == "teams" && request.name.is_some() {
+        return Ok(Json(MessagingInstanceActionResponse {
+            success: false,
+            message: "Teams supports a single bot in this version; named instances are not available yet.".to_string(),
+        }));
     }
 
     let config_path = state.config_path.read().await.clone();
@@ -1847,6 +1863,25 @@ pub(super) async fn create_messaging_instance(
                             // Omitted - preserve existing value by doing nothing
                         }
                     }
+                }
+                "teams" => {
+                    let app_id = credentials.teams_app_id.as_deref().unwrap_or("").trim();
+                    let client_secret = credentials
+                        .teams_client_secret
+                        .as_deref()
+                        .unwrap_or("")
+                        .trim();
+                    let tenant_id = credentials.teams_tenant_id.as_deref().unwrap_or("").trim();
+                    if app_id.is_empty() || client_secret.is_empty() || tenant_id.is_empty() {
+                        return Ok(Json(MessagingInstanceActionResponse {
+                            success: false,
+                            message: "App ID, client secret, and tenant ID are all required"
+                                .to_string(),
+                        }));
+                    }
+                    platform_table["app_id"] = toml_edit::value(app_id);
+                    platform_table["client_secret"] = toml_edit::value(client_secret);
+                    platform_table["tenant_id"] = toml_edit::value(tenant_id);
                 }
                 _ => {}
             }

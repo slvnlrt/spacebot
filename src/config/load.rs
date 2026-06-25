@@ -2856,6 +2856,51 @@ enabled = true
         );
     }
 
+    /// Verifies that the TOML shape the handler writes round-trips correctly
+    /// through Config::from_toml for a default Teams instance.
+    #[test]
+    fn test_teams_handler_toml_round_trip() {
+        let config = parse_config(
+            r#"
+[messaging.teams]
+enabled = true
+app_id = "test-app-id"
+client_secret = "test-secret"
+tenant_id = "test-tenant"
+"#,
+        );
+
+        let teams = config
+            .messaging
+            .teams
+            .as_ref()
+            .expect("teams config should be present");
+
+        assert_eq!(teams.app_id, "test-app-id");
+        assert_eq!(teams.client_secret, "test-secret");
+        assert_eq!(teams.tenant_id, "test-tenant");
+        assert!(teams.enabled);
+    }
+
+    /// Verifies that a TOML block missing client_secret (simulating a handler
+    /// bug) results in None — the loader disables configs with missing credentials.
+    #[test]
+    fn test_teams_handler_toml_missing_secret_disabled() {
+        let config = parse_config(
+            r#"
+[messaging.teams]
+enabled = true
+app_id = "test-app-id"
+tenant_id = "test-tenant"
+"#,
+        );
+
+        assert!(
+            config.messaging.teams.is_none(),
+            "teams config without client_secret should resolve to None"
+        );
+    }
+
     /// Debug output must not expose the client_secret value.
     #[test]
     fn test_teams_config_debug_redacts_secret() {
