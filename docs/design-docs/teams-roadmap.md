@@ -2,6 +2,12 @@
 
 > Design document for the work deferred out of the Teams adapter **v1** (single bot, text + @mention). It is grounded in (a) the Microsoft Bot Framework / Teams platform wire format (cited to Microsoft Learn) and (b) the actual spacebot code seams (cited `file:line`, verified against the `feat/teams-channel` branch). It is a design, not an implementation plan — each version below should get its own `writing-plans` plan before execution.
 
+## Status log
+- **v1** — shipped (single bot, text + @mention). See below.
+- **v1.2 — Teams in the Channels UI** — **SHIPPED** (commits `5cc3add..43bbed2`, plan `docs/superpowers/plans/2026-06-26-teams-channels-ui.md`). Connect/delete/status a Teams bot from Settings → Channels (single-instance). This also **delivered the config-watcher hot-reload parity** that was deferred as v1.1 "Track B" / W1 below — Teams now hot-starts on config change like the other adapters (default instance). Opus final review: SHIP, no critical; full `cargo test --lib` 943/0.
+  - Tracked follow-ups (functionally correct today, non-blocking): **I-1** add a `teams` arm to `toggle_platform` (`src/api/messaging.rs` enable `match`, currently catch-all `_ => {}`) so toggle-ON is self-contained instead of relying on the watcher write — reuse `build_teams_adapter`; **M-1** reconcile the param order between `initialize_agents` (teams-before-signal) and `spawn_file_watcher` (signal-before-teams) — safe but a readability hazard.
+- **v1.1 (multi-bot) / v2 / v3** — designed below, not yet built. (v1.1's watcher-parity sub-item is now done via v1.2; what remains of v1.1 is the shared-listener multi-bot work.)
+
 ## Where v1 stands
 
 v1 (shipped on `feat/teams-channel`) implements: own axum inbound server (`POST /api/messages` + `/health`), Azure JWT validation (RS256, `iss`/`aud`/`exp` required), `Activity` → `InboundMessage::Text`, `TeamsPermissions` enforcement, outbound `respond`/`broadcast` of **text** with an SSRF-guarded serviceUrl, registration mirroring Slack, `target.rs` routing, @mention detection, `extract_platform_meta`. **One bot per port** (named instances are parsed but deliberately not started — `src/main.rs:3612` warns).
