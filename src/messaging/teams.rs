@@ -679,6 +679,246 @@ pub fn activity_to_inbound(activity: &Activity, runtime_key: &str) -> Option<cra
 }
 
 // ---------------------------------------------------------------------------
+// TeamsAdapter — inbound HTTP server
+// ---------------------------------------------------------------------------
+
+use arc_swap::ArcSwap;
+use axum::Router;
+use axum::extract::State;
+use axum::http::{HeaderMap, StatusCode};
+use axum::routing::{get, post};
+use tokio::sync::mpsc;
+
+use crate::config::TeamsPermissions;
+use crate::messaging::traits::{InboundStream, Messaging};
+use crate::{InboundMessage, OutboundResponse};
+
+/// Shared state injected into axum handlers.
+#[derive(Clone)]
+#[allow(dead_code)] // `token` used by Task 6 outbound implementation
+struct TeamsHandlerState {
+    inbound_tx: mpsc::Sender<InboundMessage>,
+    token: Arc<TeamsTokenProvider>,
+    jwks: Arc<JwksCache>,
+    app_id: String,
+    service_urls: Arc<Mutex<HashMap<String, String>>>,
+    permissions: Arc<ArcSwap<TeamsPermissions>>,
+    runtime_key: String,
+}
+
+/// Microsoft Teams Bot Framework adapter.
+pub struct TeamsAdapter {
+    /// Runtime key (adapter name), e.g. `"teams"` or `"teams:prod"`.
+    runtime_key: String,
+    app_id: String,
+    #[allow(dead_code)]
+    tenant_id: String,
+    token: Arc<TeamsTokenProvider>,
+    jwks: Arc<JwksCache>,
+    port: u16,
+    bind: String,
+    /// `conversation_id → serviceUrl` — populated on each inbound Activity so
+    /// the outbound adapter (Task 6) knows where to send replies.
+    service_urls: Arc<Mutex<HashMap<String, String>>>,
+    /// Lazily populated by `start()`; stored so handlers can send inbound
+    /// messages without holding a lock across await points.
+    inbound_tx: Arc<RwLock<Option<mpsc::Sender<InboundMessage>>>>,
+    permissions: Arc<ArcSwap<TeamsPermissions>>,
+}
+
+impl TeamsAdapter {
+    /// Construct a new `TeamsAdapter` from discrete credentials.
+    ///
+    /// `permissions` should be pre-built via `TeamsPermissions::from_config` /
+    /// `from_instance_config` and wrapped in `Arc<ArcSwap<..>>` so the config
+    /// watcher can hot-reload it without restarting the listener.
+    pub fn new(
+        runtime_key: impl Into<String>,
+        app_id: impl Into<String>,
+        client_secret: impl Into<String>,
+        tenant_id: impl Into<String>,
+        port: u16,
+        bind: impl Into<String>,
+        permissions: Arc<ArcSwap<TeamsPermissions>>,
+    ) -> anyhow::Result<Self> {
+        let tenant_id = tenant_id.into();
+        let app_id = app_id.into();
+        let token = Arc::new(TeamsTokenProvider::new(
+            tenant_id.clone(),
+            app_id.clone(),
+            client_secret.into(),
+        )?);
+        let jwks = Arc::new(JwksCache::new()?);
+
+        Ok(Self {
+            runtime_key: runtime_key.into(),
+            app_id,
+            tenant_id,
+            token,
+            jwks,
+            port,
+            bind: bind.into(),
+            service_urls: Arc::new(Mutex::new(HashMap::new())),
+            inbound_tx: Arc::new(RwLock::new(None)),
+            permissions,
+        })
+    }
+}
+
+impl Messaging for TeamsAdapter {
+    fn name(&self) -> &str {
+        &self.runtime_key
+    }
+
+    async fn start(&self) -> crate::Result<InboundStream> {
+        let (inbound_tx, inbound_rx) = mpsc::channel::<InboundMessage>(256);
+        *self.inbound_tx.write().await = Some(inbound_tx.clone());
+
+        let state = TeamsHandlerState {
+            inbound_tx,
+            token: self.token.clone(),
+            jwks: self.jwks.clone(),
+            app_id: self.app_id.clone(),
+            service_urls: self.service_urls.clone(),
+            permissions: self.permissions.clone(),
+            runtime_key: self.runtime_key.clone(),
+        };
+
+        let app = Router::new()
+            .route("/api/messages", post(handle_messages))
+            .route("/health", get(handle_health))
+            .with_state(state);
+
+        let bind = if self.bind.contains(':') {
+            format!("[{}]:{}", self.bind, self.port)
+        } else {
+            format!("{}:{}", self.bind, self.port)
+        };
+
+        let listener = tokio::net::TcpListener::bind(&bind)
+            .await
+            .with_context(|| format!("failed to bind Teams webhook server to {bind}"))?;
+
+        tracing::info!(%bind, "Teams webhook server listening");
+
+        tokio::spawn(async move {
+            if let Err(error) = axum::serve(listener, app).await {
+                tracing::error!(%error, "Teams webhook server exited with error");
+            }
+        });
+
+        let stream = tokio_stream::wrappers::ReceiverStream::new(inbound_rx);
+        Ok(Box::pin(stream))
+    }
+
+    async fn respond(
+        &self,
+        _message: &InboundMessage,
+        _response: OutboundResponse,
+    ) -> crate::Result<()> {
+        // Stubbed — real outbound implementation is Task 6.
+        Ok(())
+    }
+
+    async fn broadcast(&self, _target: &str, _response: OutboundResponse) -> crate::Result<()> {
+        // Stubbed — real proactive implementation is Task 6.
+        Ok(())
+    }
+
+    async fn health_check(&self) -> crate::Result<()> {
+        self.token
+            .bearer()
+            .await
+            .map(|_| ())
+            .map_err(crate::error::Error::Other)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Axum handlers
+// ---------------------------------------------------------------------------
+
+/// POST /api/messages — the Bot Framework inbound message endpoint.
+///
+/// Security flow:
+///   1. Validate `Authorization: Bearer <jwt>` via Azure Bot Service JWKS → 401 on failure.
+///   2. Parse JSON body as `Activity` → 400 on failure.
+///   3. Capture `serviceUrl` into the `service_urls` map.
+///   4. Normalize to `InboundMessage` (returns `None` for non-message activities) → 200, no dispatch.
+///   5. Permission check (DM: enforce `dm_allowed_users`; channel: enforce `channel_filter` if set)
+///      → silently drop (200 OK, no dispatch) on deny.
+///   6. Send to inbound channel; return 200.
+async fn handle_messages(
+    headers: HeaderMap,
+    State(state): State<TeamsHandlerState>,
+    body: axum::body::Bytes,
+) -> Result<StatusCode, (StatusCode, &'static str)> {
+    // --- Step 1: JWT auth ---
+    let auth_header = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+
+    if let Err(err) = validate_inbound_jwt(auth_header, &state.app_id, &state.jwks).await {
+        tracing::warn!(%err, "Teams inbound JWT validation failed — returning 401");
+        return Err((StatusCode::UNAUTHORIZED, "unauthorized"));
+    }
+
+    // --- Step 2: Parse body ---
+    let activity: Activity = match serde_json::from_slice(&body) {
+        Ok(a) => a,
+        Err(err) => {
+            tracing::warn!(%err, "Teams inbound activity parse failed — returning 400");
+            return Err((StatusCode::BAD_REQUEST, "bad request"));
+        }
+    };
+
+    // --- Step 3: Capture serviceUrl ---
+    {
+        let conv_id = format!("teams:{}", activity.conversation.id);
+        let mut urls = state.service_urls.lock().await;
+        urls.insert(conv_id, activity.service_url.clone());
+    }
+
+    // --- Step 4: Normalize to InboundMessage ---
+    let Some(msg) = activity_to_inbound(&activity, &state.runtime_key) else {
+        // Non-message activity (typing, conversationUpdate, etc.) — ack and ignore.
+        return Ok(StatusCode::OK);
+    };
+
+    // --- Step 5: Permission check ---
+    let conversation_type = activity
+        .conversation
+        .conversation_type
+        .as_deref();
+    let channel_id = &activity.conversation.id;
+    let sender_id = &activity.from.id;
+
+    let perms = state.permissions.load();
+    if !perms.is_allowed(conversation_type, sender_id, channel_id) {
+        tracing::debug!(
+            sender_id,
+            ?conversation_type,
+            channel_id,
+            "Teams inbound message dropped by permission filter"
+        );
+        // Return 200 so Bot Framework doesn't retry.
+        return Ok(StatusCode::OK);
+    }
+
+    // --- Step 6: Dispatch ---
+    if state.inbound_tx.send(msg).await.is_err() {
+        tracing::warn!("Teams inbound channel closed; dropping message");
+    }
+
+    Ok(StatusCode::OK)
+}
+
+async fn handle_health() -> StatusCode {
+    StatusCode::OK
+}
+
+// ---------------------------------------------------------------------------
 // Unit tests
 // ---------------------------------------------------------------------------
 
@@ -1158,5 +1398,140 @@ vIyJeH8/89a9IXZXlMIA9KH9
         // Named adapter: runtime_key != "teams", so prefix should be rewritten.
         assert_eq!(msg.conversation_id, "teams:support:conv-named-001");
         assert_eq!(msg.adapter, Some("teams:support".to_string()));
+    }
+
+    // -----------------------------------------------------------------------
+    // TeamsAdapter unit tests
+    // -----------------------------------------------------------------------
+
+    use crate::config::TeamsPermissions;
+
+    /// `TeamsAdapter::name()` returns the runtime key supplied at construction.
+    #[test]
+    fn adapter_name_returns_runtime_key() {
+        let perms = Arc::new(arc_swap::ArcSwap::from_pointee(TeamsPermissions::default()));
+        let adapter = TeamsAdapter::new(
+            "teams:ops",
+            "app-id",
+            "secret",
+            "common",
+            3979,
+            "0.0.0.0",
+            perms,
+        )
+        .expect("TeamsAdapter::new");
+        assert_eq!(adapter.name(), "teams:ops");
+    }
+
+    // -----------------------------------------------------------------------
+    // TeamsPermissions::is_allowed tests
+    // -----------------------------------------------------------------------
+
+    /// DM sender in dm_allowed_users → allowed.
+    #[test]
+    fn permission_dm_allowed_user_is_permitted() {
+        let perms = TeamsPermissions {
+            channel_filter: None,
+            dm_allowed_users: vec!["user-aad-123".to_string()],
+        };
+        assert!(
+            perms.is_allowed(Some("personal"), "user-aad-123", "conv-dm-001"),
+            "listed DM user should be allowed"
+        );
+    }
+
+    /// DM sender NOT in dm_allowed_users → denied.
+    #[test]
+    fn permission_dm_unknown_user_is_denied() {
+        let perms = TeamsPermissions {
+            channel_filter: None,
+            dm_allowed_users: vec!["user-aad-123".to_string()],
+        };
+        assert!(
+            !perms.is_allowed(Some("personal"), "other-user", "conv-dm-001"),
+            "unlisted DM user should be denied"
+        );
+    }
+
+    /// Empty dm_allowed_users → all DMs blocked.
+    #[test]
+    fn permission_empty_dm_list_blocks_all_dms() {
+        let perms = TeamsPermissions {
+            channel_filter: None,
+            dm_allowed_users: vec![],
+        };
+        assert!(
+            !perms.is_allowed(Some("personal"), "any-user", "conv-dm-001"),
+            "empty dm_allowed_users should block all DMs"
+        );
+    }
+
+    /// No channel_filter → all channels accepted.
+    #[test]
+    fn permission_no_channel_filter_allows_any_channel() {
+        let perms = TeamsPermissions {
+            channel_filter: None,
+            dm_allowed_users: vec![],
+        };
+        assert!(
+            perms.is_allowed(Some("channel"), "user-x", "any-channel-id"),
+            "None channel_filter should allow all channels"
+        );
+    }
+
+    /// channel_filter present and channel in list → allowed.
+    #[test]
+    fn permission_channel_filter_allows_listed_channel() {
+        let perms = TeamsPermissions {
+            channel_filter: Some(vec!["ch-allowed".to_string()]),
+            dm_allowed_users: vec![],
+        };
+        assert!(
+            perms.is_allowed(Some("channel"), "user-x", "ch-allowed"),
+            "channel in filter list should be allowed"
+        );
+    }
+
+    /// channel_filter present but channel NOT in list → denied.
+    #[test]
+    fn permission_channel_filter_denies_unlisted_channel() {
+        let perms = TeamsPermissions {
+            channel_filter: Some(vec!["ch-allowed".to_string()]),
+            dm_allowed_users: vec![],
+        };
+        assert!(
+            !perms.is_allowed(Some("channel"), "user-x", "ch-other"),
+            "channel absent from filter list should be denied"
+        );
+    }
+
+    /// `conversation_type = None` falls through to channel path → filter applies.
+    #[test]
+    fn permission_none_conversation_type_treated_as_channel() {
+        let perms = TeamsPermissions {
+            channel_filter: Some(vec!["ch-ok".to_string()]),
+            dm_allowed_users: vec![],
+        };
+        // None type + allowed channel → allowed.
+        assert!(perms.is_allowed(None, "user-x", "ch-ok"));
+        // None type + disallowed channel → denied.
+        assert!(!perms.is_allowed(None, "user-x", "ch-other"));
+    }
+
+    // -----------------------------------------------------------------------
+    // serviceUrl capture helper (inline test of the map logic)
+    // -----------------------------------------------------------------------
+
+    /// Inserting a conversation's serviceUrl into the map and reading it back.
+    #[tokio::test]
+    async fn service_urls_map_captures_and_retrieves_url() {
+        let map: Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(HashMap::new()));
+        let conv_id = "teams:conv-abc".to_string();
+        let url = "https://smba.trafficmanager.net/amer/";
+
+        map.lock().await.insert(conv_id.clone(), url.to_string());
+
+        let stored = map.lock().await.get(&conv_id).cloned();
+        assert_eq!(stored.as_deref(), Some(url));
     }
 }

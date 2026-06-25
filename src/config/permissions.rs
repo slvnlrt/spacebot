@@ -606,6 +606,43 @@ impl TeamsPermissions {
             dm_allowed_users,
         }
     }
+
+    /// Decide whether an inbound Teams activity should be dispatched.
+    ///
+    /// # Arguments
+    ///
+    /// * `conversation_type` – the `conversationType` claim from the Activity
+    ///   (`"personal"` for DMs, `"channel"` / `"groupChat"` for team channels).
+    ///   `None` is treated as a channel message.
+    /// * `sender_id` – the AAD object ID of the sender.
+    /// * `channel_id` – the Teams channel ID (from `activity.conversation.id`).
+    ///
+    /// # Decision rules
+    ///
+    /// - **DM (`"personal"`):** allowed iff `dm_allowed_users` is non-empty and
+    ///   contains `sender_id`. Empty list = all DMs blocked.
+    /// - **Channel / other:** allowed iff `channel_filter` is `None` (open)
+    ///   **or** `channel_filter` contains `channel_id`.
+    pub fn is_allowed(
+        &self,
+        conversation_type: Option<&str>,
+        sender_id: &str,
+        channel_id: &str,
+    ) -> bool {
+        if conversation_type == Some("personal") {
+            // DM path — fail-closed: block when list is empty or sender absent.
+            if self.dm_allowed_users.is_empty() {
+                return false;
+            }
+            self.dm_allowed_users.iter().any(|u| u == sender_id)
+        } else {
+            // Channel / groupChat path.
+            match &self.channel_filter {
+                None => true,
+                Some(allowed) => allowed.iter().any(|c| c == channel_id),
+            }
+        }
+    }
 }
 
 fn binding_adapter_selector_matches(binding: &Binding, adapter_selector: Option<&str>) -> bool {
