@@ -1,7 +1,8 @@
 use super::{
     Binding, DiscordConfig, DiscordInstanceConfig, MattermostConfig, MattermostInstanceConfig,
     SignalConfig, SignalInstanceConfig, SlackConfig, SlackInstanceConfig, TeamsConfig,
-    TeamsInstanceConfig, TelegramConfig, TelegramInstanceConfig, TwitchConfig, TwitchInstanceConfig,
+    TeamsInstanceConfig, TelegramConfig, TelegramInstanceConfig, TwitchConfig,
+    TwitchInstanceConfig,
 };
 use std::collections::HashMap;
 
@@ -752,7 +753,9 @@ mod teams_permissions_tests {
         let instance = make_teams_instance_config("prod", vec!["instance-user-456"]);
         let perms = TeamsPermissions::from_instance_config(&instance, &[]);
         assert!(
-            perms.dm_allowed_users.contains(&"instance-user-456".to_string()),
+            perms
+                .dm_allowed_users
+                .contains(&"instance-user-456".to_string()),
             "instance-user-456 should be in dm_allowed_users from instance config"
         );
         assert!(

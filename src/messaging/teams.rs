@@ -14,8 +14,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::Context as _;
 use jsonwebtoken::{
-    Algorithm, DecodingKey, Header, Validation, decode, decode_header,
-    jwk::{JwkSet},
+    Algorithm, DecodingKey, Header, Validation, decode, decode_header, jwk::JwkSet,
 };
 use reqwest::Client;
 use serde::Deserialize;
@@ -31,8 +30,7 @@ use url::Url;
 const REFRESH_LEEWAY: Duration = Duration::from_secs(300);
 
 /// Azure AD token endpoint template — `{tenant}` is replaced at runtime.
-const TOKEN_ENDPOINT: &str =
-    "https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token";
+const TOKEN_ENDPOINT: &str = "https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token";
 
 /// The scope required to call the Bot Connector service.
 const BOT_FRAMEWORK_SCOPE: &str = "https://api.botframework.com/.default";
@@ -127,10 +125,10 @@ impl TeamsTokenProvider {
         let now = Instant::now();
 
         // Return the cached token if it is still comfortably valid.
-        if let Some(ref cached) = *guard {
-            if !needs_refresh(cached.expires_at, now, REFRESH_LEEWAY) {
-                return Ok(cached.token.clone());
-            }
+        if let Some(ref cached) = *guard
+            && !needs_refresh(cached.expires_at, now, REFRESH_LEEWAY)
+        {
+            return Ok(cached.token.clone());
         }
 
         // Cache is empty or stale — fetch a new token.
@@ -162,9 +160,7 @@ impl TeamsTokenProvider {
                 .text()
                 .await
                 .unwrap_or_else(|_| "<unreadable>".to_owned());
-            anyhow::bail!(
-                "Azure AD token endpoint returned {status}: {body}"
-            );
+            anyhow::bail!("Azure AD token endpoint returned {status}: {body}");
         }
 
         let token_resp: TokenResponse = response
@@ -262,25 +258,28 @@ impl JwksCache {
         // Fast path: read lock.
         {
             let guard = self.inner.read().await;
-            if let Some(ref cached) = *guard {
-                if !Self::is_stale(&cached.fetched_at) {
-                    return Ok(Arc::new(cached.keyset.clone()));
-                }
+            if let Some(ref cached) = *guard
+                && !Self::is_stale(&cached.fetched_at)
+            {
+                return Ok(Arc::new(cached.keyset.clone()));
             }
         }
 
         // Slow path: write lock — fetch fresh keys.
         let mut guard = self.inner.write().await;
         // Double-check: another waiter may have refreshed while we waited.
-        if let Some(ref cached) = *guard {
-            if !Self::is_stale(&cached.fetched_at) {
-                return Ok(Arc::new(cached.keyset.clone()));
-            }
+        if let Some(ref cached) = *guard
+            && !Self::is_stale(&cached.fetched_at)
+        {
+            return Ok(Arc::new(cached.keyset.clone()));
         }
 
         let keyset = Self::fetch_keyset(&self.http).await?;
         let fetched_at = SystemTime::now();
-        *guard = Some(JwksCacheInner { keyset: keyset.clone(), fetched_at });
+        *guard = Some(JwksCacheInner {
+            keyset: keyset.clone(),
+            fetched_at,
+        });
         Ok(Arc::new(keyset))
     }
 
@@ -290,8 +289,7 @@ impl JwksCache {
     pub async fn find_key(&self, kid: &str) -> anyhow::Result<DecodingKey> {
         let keyset = self.keyset().await?;
         if let Some(jwk) = keyset.find(kid) {
-            return DecodingKey::from_jwk(jwk)
-                .context("failed to build DecodingKey from JWK");
+            return DecodingKey::from_jwk(jwk).context("failed to build DecodingKey from JWK");
         }
 
         // Refresh once on unknown kid (key rotation).
@@ -397,8 +395,7 @@ pub async fn validate_inbound_jwt(
     }
 
     // Decode the header only (no signature check) to get the `kid`.
-    let header: Header = decode_header(token)
-        .context("failed to decode JWT header")?;
+    let header: Header = decode_header(token).context("failed to decode JWT header")?;
 
     let kid = header
         .kid
@@ -463,8 +460,7 @@ pub fn validate_token_with_key(
     validation.set_required_spec_claims(&["exp", "aud", "iss"]);
 
     // Decode and verify in one step.
-    decode::<serde_json::Value>(token, key, &validation)
-        .context("JWT validation failed")?;
+    decode::<serde_json::Value>(token, key, &validation).context("JWT validation failed")?;
 
     Ok(())
 }
@@ -558,10 +554,7 @@ fn strip_at_mentions(text: &str) -> String {
 
     // Collapse runs of whitespace (spaces, tabs, newlines) to a single space
     // and trim the result.
-    result
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
+    result.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// Determine whether the bot was @mentioned in `activity`.
@@ -615,7 +608,10 @@ fn bot_was_mentioned(activity: &Activity) -> bool {
 /// | `"teams_conversation_type"`| `conversationType` when present                  |
 /// | `"teams_reply_to_id"`      | `replyToId` when present                         |
 /// | `"teams_mentioned"`        | `"true"` / `"false"` — whether the bot was @mentioned |
-pub fn activity_to_inbound(activity: &Activity, runtime_key: &str) -> Option<crate::InboundMessage> {
+pub fn activity_to_inbound(
+    activity: &Activity,
+    runtime_key: &str,
+) -> Option<crate::InboundMessage> {
     if !activity.activity_type.eq_ignore_ascii_case("message") {
         return None;
     }
@@ -626,11 +622,10 @@ pub fn activity_to_inbound(activity: &Activity, runtime_key: &str) -> Option<cra
 
     // Build the conversation_id.
     let base_conversation_id = format!("teams:{}", activity.conversation.id);
-    let conversation_id =
-        crate::messaging::apply_runtime_adapter_to_conversation_id(
-            runtime_key,
-            base_conversation_id,
-        );
+    let conversation_id = crate::messaging::apply_runtime_adapter_to_conversation_id(
+        runtime_key,
+        base_conversation_id,
+    );
 
     // Assemble metadata.
     let mut metadata: HashMap<String, serde_json::Value> = HashMap::new();
@@ -650,10 +645,7 @@ pub fn activity_to_inbound(activity: &Activity, runtime_key: &str) -> Option<cra
         );
     }
     if let Some(reply_to) = &activity.reply_to_id {
-        metadata.insert(
-            "teams_reply_to_id".to_string(),
-            serde_json::json!(reply_to),
-        );
+        metadata.insert("teams_reply_to_id".to_string(), serde_json::json!(reply_to));
     }
     metadata.insert(
         "teams_mentioned".to_string(),
@@ -1011,11 +1003,16 @@ impl Messaging for TeamsAdapter {
             .json(&body)
             .send()
             .await
-            .map_err(|e| mark_classified_broadcast(anyhow::anyhow!("teams respond HTTP error: {e}")))?;
+            .map_err(|e| {
+                mark_classified_broadcast(anyhow::anyhow!("teams respond HTTP error: {e}"))
+            })?;
 
         if !resp.status().is_success() {
             let status = resp.status();
-            let body_text = resp.text().await.unwrap_or_else(|_| "<unreadable>".to_owned());
+            let body_text = resp
+                .text()
+                .await
+                .unwrap_or_else(|_| "<unreadable>".to_owned());
             return Err(mark_classified_broadcast(anyhow::anyhow!(
                 "teams respond: Bot Connector returned {status}: {body_text}"
             )));
@@ -1093,11 +1090,16 @@ impl Messaging for TeamsAdapter {
             .json(&body)
             .send()
             .await
-            .map_err(|e| mark_classified_broadcast(anyhow::anyhow!("teams broadcast HTTP error: {e}")))?;
+            .map_err(|e| {
+                mark_classified_broadcast(anyhow::anyhow!("teams broadcast HTTP error: {e}"))
+            })?;
 
         if !resp.status().is_success() {
             let status = resp.status();
-            let body_text = resp.text().await.unwrap_or_else(|_| "<unreadable>".to_owned());
+            let body_text = resp
+                .text()
+                .await
+                .unwrap_or_else(|_| "<unreadable>".to_owned());
             return Err(mark_classified_broadcast(anyhow::anyhow!(
                 "teams broadcast: Bot Connector returned {status}: {body_text}"
             )));
@@ -1163,10 +1165,8 @@ async fn handle_messages(
     // --- Step 3: Capture serviceUrl (keyed by rewritten conversation_id) ---
     {
         let base = format!("teams:{}", activity.conversation.id);
-        let conv_key = crate::messaging::apply_runtime_adapter_to_conversation_id(
-            &state.runtime_key,
-            base,
-        );
+        let conv_key =
+            crate::messaging::apply_runtime_adapter_to_conversation_id(&state.runtime_key, base);
         let mut urls = state.service_urls.lock().await;
         urls.insert(conv_key, activity.service_url.clone());
         // Persist sidecar if configured.
@@ -1182,10 +1182,7 @@ async fn handle_messages(
     };
 
     // --- Step 5: Permission check ---
-    let conversation_type = activity
-        .conversation
-        .conversation_type
-        .as_deref();
+    let conversation_type = activity.conversation.conversation_type.as_deref();
     let channel_id = &activity.conversation.id;
     let sender_id = &activity.from.id;
 
@@ -1220,9 +1217,9 @@ async fn handle_health() -> StatusCode {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::{Duration, Instant, UNIX_EPOCH};
     use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
     use serde_json::json;
+    use std::time::{Duration, Instant, UNIX_EPOCH};
 
     const LEEWAY: Duration = REFRESH_LEEWAY;
 
@@ -1341,8 +1338,7 @@ vIyJeH8/89a9IXZXlMIA9KH9
     }
 
     fn decoding_key() -> DecodingKey {
-        DecodingKey::from_rsa_pem(TEST_RSA_PUBLIC_KEY_PEM)
-            .expect("test public key is valid")
+        DecodingKey::from_rsa_pem(TEST_RSA_PUBLIC_KEY_PEM).expect("test public key is valid")
     }
 
     // -----------------------------------------------------------------------
@@ -1381,7 +1377,10 @@ vIyJeH8/89a9IXZXlMIA9KH9
         // 10 minutes in the past — beyond the 5-minute leeway.
         let token = make_jwt(ISSUER, APP_ID, -600, &encoding_key());
         let err = validate_token_with_key(&token, APP_ID, ISSUER, &decoding_key());
-        assert!(err.is_err(), "expired token should be rejected; got: {err:?}");
+        assert!(
+            err.is_err(),
+            "expired token should be rejected; got: {err:?}"
+        );
     }
 
     /// Token signed by a DIFFERENT private key → signature fails.
@@ -1411,8 +1410,8 @@ vIyJeH8/89a9IXZXlMIA9KH9
 
         let hmac_key = EncodingKey::from_secret(b"some-hmac-secret");
         let header = Header::new(Algorithm::HS256);
-        let token = jsonwebtoken::encode(&header, &claims, &hmac_key)
-            .expect("HMAC token encoding failed");
+        let token =
+            jsonwebtoken::encode(&header, &claims, &hmac_key).expect("HMAC token encoding failed");
 
         // The decoding key is an RSA key; jsonwebtoken will reject the HS256 alg.
         let err = validate_token_with_key(&token, APP_ID, ISSUER, &decoding_key());
@@ -1440,8 +1439,7 @@ vIyJeH8/89a9IXZXlMIA9KH9
         });
 
         let header = Header::new(Algorithm::RS256);
-        let token = encode(&header, &claims, &encoding_key())
-            .expect("test JWT encoding failed");
+        let token = encode(&header, &claims, &encoding_key()).expect("test JWT encoding failed");
 
         let err = validate_token_with_key(&token, APP_ID, ISSUER, &decoding_key());
         assert!(
@@ -1471,8 +1469,7 @@ vIyJeH8/89a9IXZXlMIA9KH9
         });
 
         let header = Header::new(Algorithm::RS256);
-        let token = encode(&header, &claims, &encoding_key())
-            .expect("test JWT encoding failed");
+        let token = encode(&header, &claims, &encoding_key()).expect("test JWT encoding failed");
 
         let err = validate_token_with_key(&token, APP_ID, ISSUER, &decoding_key());
         assert!(
@@ -1503,7 +1500,10 @@ vIyJeH8/89a9IXZXlMIA9KH9
     async fn test_inbound_jwt_empty_bearer() {
         let jwks = JwksCache::new().expect("JwksCache::new");
         let err = validate_inbound_jwt("Bearer ", APP_ID, &jwks).await;
-        assert!(err.is_err(), "empty Bearer token should be rejected; got: {err:?}");
+        assert!(
+            err.is_err(),
+            "empty Bearer token should be rejected; got: {err:?}"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1593,11 +1593,15 @@ vIyJeH8/89a9IXZXlMIA9KH9
 
         // Metadata: serviceUrl and conversationType.
         assert_eq!(
-            msg.metadata.get("teams_service_url").and_then(|v| v.as_str()),
+            msg.metadata
+                .get("teams_service_url")
+                .and_then(|v| v.as_str()),
             Some("https://smba.trafficmanager.net/amer/")
         );
         assert_eq!(
-            msg.metadata.get("teams_conversation_type").and_then(|v| v.as_str()),
+            msg.metadata
+                .get("teams_conversation_type")
+                .and_then(|v| v.as_str()),
             Some("personal")
         );
         // No mention in DM (no <at> tag and no mention entity for bot-bbb).
@@ -1607,7 +1611,9 @@ vIyJeH8/89a9IXZXlMIA9KH9
         );
         // message_id metadata.
         assert_eq!(
-            msg.metadata.get(crate::metadata_keys::MESSAGE_ID).and_then(|v| v.as_str()),
+            msg.metadata
+                .get(crate::metadata_keys::MESSAGE_ID)
+                .and_then(|v| v.as_str()),
             Some("act-001")
         );
     }
@@ -1634,8 +1640,7 @@ vIyJeH8/89a9IXZXlMIA9KH9
         }"#;
 
         let activity: Activity = serde_json::from_str(raw).expect("parse activity");
-        let msg = activity_to_inbound(&activity, "teams")
-            .expect("should produce InboundMessage");
+        let msg = activity_to_inbound(&activity, "teams").expect("should produce InboundMessage");
 
         // <at>MyBot</at> prefix should be stripped; remaining text trimmed.
         if let crate::MessageContent::Text(text) = &msg.content {
@@ -1687,8 +1692,8 @@ vIyJeH8/89a9IXZXlMIA9KH9
         }"#;
 
         let activity: Activity = serde_json::from_str(raw).expect("parse activity");
-        let msg = activity_to_inbound(&activity, "teams:support")
-            .expect("should produce InboundMessage");
+        let msg =
+            activity_to_inbound(&activity, "teams:support").expect("should produce InboundMessage");
 
         // Named adapter: runtime_key != "teams", so prefix should be rewritten.
         assert_eq!(msg.conversation_id, "teams:support:conv-named-001");

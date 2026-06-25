@@ -2743,7 +2743,6 @@ fn load_human_md(human_dir: &std::path::Path) -> Option<String> {
 #[cfg(test)]
 mod teams_config_tests {
     use super::super::toml_schema::TomlConfig;
-    use super::super::types::{MessagingConfig, TeamsConfig};
     use super::Config;
 
     fn parse_config(toml: &str) -> Config {
