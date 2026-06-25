@@ -16,7 +16,7 @@ pub use load::set_resolve_secrets_store;
 pub use onboarding::run_onboarding;
 pub use permissions::{
     DiscordPermissions, MattermostPermissions, SignalPermissions, SlackPermissions,
-    TelegramPermissions, TwitchPermissions,
+    TeamsPermissions, TelegramPermissions, TwitchPermissions,
 };
 pub(crate) use providers::default_provider_config;
 pub use runtime::RuntimeConfig;

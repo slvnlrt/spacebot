@@ -1,7 +1,7 @@
 use super::{
     Binding, DiscordConfig, DiscordInstanceConfig, MattermostConfig, MattermostInstanceConfig,
-    SignalConfig, SignalInstanceConfig, SlackConfig, SlackInstanceConfig, TelegramConfig,
-    TelegramInstanceConfig, TwitchConfig, TwitchInstanceConfig,
+    SignalConfig, SignalInstanceConfig, SlackConfig, SlackInstanceConfig, TeamsConfig,
+    TeamsInstanceConfig, TelegramConfig, TelegramInstanceConfig, TwitchConfig, TwitchInstanceConfig,
 };
 use std::collections::HashMap;
 
@@ -531,6 +531,83 @@ impl MattermostPermissions {
     }
 }
 
+/// Hot-reloadable Microsoft Teams permission filters.
+///
+/// Derived from bindings + Teams config. Shared with the Teams adapter
+/// via `Arc<ArcSwap<..>>` so the file watcher can swap in new values without
+/// restarting the webhook listener.
+///
+/// Teams bindings do not carry a workspace/tenant grouping key (unlike Slack's
+/// `workspace_id`), so `channel_filter` is a flat optional list rather than a
+/// per-workspace map.
+#[derive(Debug, Clone, Default)]
+pub struct TeamsPermissions {
+    /// Allowed Teams channel IDs (None = all channels accepted).
+    pub channel_filter: Option<Vec<String>>,
+    /// AAD object IDs (or UPN strings) allowed to DM the bot.
+    /// Empty = DMs blocked entirely.
+    pub dm_allowed_users: Vec<String>,
+}
+
+impl TeamsPermissions {
+    /// Build from the current config's Teams settings and bindings.
+    pub fn from_config(teams: &TeamsConfig, bindings: &[Binding]) -> Self {
+        Self::from_bindings_for_adapter(teams.dm_allowed_users.clone(), bindings, None)
+    }
+
+    /// Build permissions for a named Teams adapter instance.
+    pub fn from_instance_config(instance: &TeamsInstanceConfig, bindings: &[Binding]) -> Self {
+        Self::from_bindings_for_adapter(
+            instance.dm_allowed_users.clone(),
+            bindings,
+            Some(instance.name.as_str()),
+        )
+    }
+
+    fn from_bindings_for_adapter(
+        seed_dm_allowed_users: Vec<String>,
+        bindings: &[Binding],
+        adapter_selector: Option<&str>,
+    ) -> Self {
+        let teams_bindings: Vec<&Binding> = bindings
+            .iter()
+            .filter(|binding| {
+                binding.channel == "teams"
+                    && binding_adapter_selector_matches(binding, adapter_selector)
+            })
+            .collect();
+
+        // Teams bindings carry no workspace/tenant grouping key, so we collect
+        // a flat list of allowed channel IDs across all matching bindings.
+        let channel_filter = {
+            let channel_ids: Vec<String> = teams_bindings
+                .iter()
+                .flat_map(|b| b.channel_ids.clone())
+                .collect();
+            if channel_ids.is_empty() {
+                None
+            } else {
+                Some(channel_ids)
+            }
+        };
+
+        let mut dm_allowed_users = seed_dm_allowed_users;
+
+        for binding in &teams_bindings {
+            for id in &binding.dm_allowed_users {
+                if !dm_allowed_users.contains(id) {
+                    dm_allowed_users.push(id.clone());
+                }
+            }
+        }
+
+        Self {
+            channel_filter,
+            dm_allowed_users,
+        }
+    }
+}
+
 fn binding_adapter_selector_matches(binding: &Binding, adapter_selector: Option<&str>) -> bool {
     match (binding.adapter.as_deref(), adapter_selector) {
         (None, None) => true,
@@ -557,6 +634,95 @@ fn is_valid_base64(s: &str) -> bool {
     URL_SAFE_NO_PAD.decode(trimmed).is_ok()
         || URL_SAFE.decode(trimmed).is_ok()
         || STANDARD.decode(trimmed).is_ok()
+}
+
+#[cfg(test)]
+mod teams_permissions_tests {
+    use super::*;
+    use crate::config::types::{TeamsConfig, TeamsInstanceConfig};
+
+    fn make_teams_config(dm_allowed_users: Vec<&str>) -> TeamsConfig {
+        TeamsConfig {
+            enabled: true,
+            app_id: "app-id".into(),
+            client_secret: "secret".into(),
+            tenant_id: "common".into(),
+            port: 3979,
+            bind: "0.0.0.0".into(),
+            instances: vec![],
+            dm_allowed_users: dm_allowed_users.into_iter().map(String::from).collect(),
+        }
+    }
+
+    fn make_teams_instance_config(name: &str, dm_allowed_users: Vec<&str>) -> TeamsInstanceConfig {
+        TeamsInstanceConfig {
+            name: name.into(),
+            enabled: true,
+            app_id: "app-id".into(),
+            client_secret: "secret".into(),
+            tenant_id: "common".into(),
+            dm_allowed_users: dm_allowed_users.into_iter().map(String::from).collect(),
+        }
+    }
+
+    /// A DM sender present in dm_allowed_users is allowed.
+    #[test]
+    fn dm_allowed_user_is_permitted() {
+        let config = make_teams_config(vec!["user-aad-123"]);
+        let perms = TeamsPermissions::from_config(&config, &[]);
+        assert!(
+            perms.dm_allowed_users.contains(&"user-aad-123".to_string()),
+            "user-aad-123 should be in dm_allowed_users"
+        );
+    }
+
+    /// A DM sender NOT in dm_allowed_users is denied.
+    #[test]
+    fn dm_unknown_user_is_denied() {
+        let config = make_teams_config(vec!["user-aad-123"]);
+        let perms = TeamsPermissions::from_config(&config, &[]);
+        assert!(
+            !perms.dm_allowed_users.contains(&"unknown-user".to_string()),
+            "unknown-user should not be in dm_allowed_users"
+        );
+    }
+
+    /// Empty dm_allowed_users means DMs are blocked (no users permitted).
+    #[test]
+    fn empty_dm_allowed_users_blocks_all() {
+        let config = make_teams_config(vec![]);
+        let perms = TeamsPermissions::from_config(&config, &[]);
+        assert!(
+            perms.dm_allowed_users.is_empty(),
+            "empty dm_allowed_users should remain empty (block all DMs)"
+        );
+    }
+
+    /// channel_filter is None when no bindings provide channel IDs.
+    #[test]
+    fn no_bindings_yields_no_channel_filter() {
+        let config = make_teams_config(vec![]);
+        let perms = TeamsPermissions::from_config(&config, &[]);
+        assert!(
+            perms.channel_filter.is_none(),
+            "channel_filter should be None when no bindings specify channel IDs"
+        );
+    }
+
+    /// from_instance_config wires dm_allowed_users from the instance.
+    #[test]
+    fn instance_config_dm_allowed_users() {
+        let instance = make_teams_instance_config("prod", vec!["instance-user-456"]);
+        let perms = TeamsPermissions::from_instance_config(&instance, &[]);
+        assert!(
+            perms.dm_allowed_users.contains(&"instance-user-456".to_string()),
+            "instance-user-456 should be in dm_allowed_users from instance config"
+        );
+        assert!(
+            !perms.dm_allowed_users.contains(&"other-user".to_string()),
+            "other-user should not be allowed"
+        );
+    }
 }
 
 #[cfg(test)]
