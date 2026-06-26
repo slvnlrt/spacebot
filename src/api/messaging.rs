@@ -1607,6 +1607,42 @@ pub(super) async fn toggle_platform(
                         }
                     }
                 }
+                "teams" => {
+                    if let Some(teams_config) = &new_config.messaging.teams {
+                        if !teams_config.app_id.is_empty()
+                            && !teams_config.client_secret.is_empty()
+                            && !teams_config.tenant_id.is_empty()
+                        {
+                            let permissions = {
+                                let perms = crate::config::TeamsPermissions::from_config(
+                                    teams_config,
+                                    &new_config.bindings,
+                                );
+                                std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(perms))
+                            };
+                            let instance_dir = state.instance_dir.load();
+                            match crate::messaging::teams::build_teams_adapter(
+                                "teams",
+                                &teams_config.app_id,
+                                &teams_config.client_secret,
+                                &teams_config.tenant_id,
+                                teams_config.port,
+                                &teams_config.bind,
+                                permissions,
+                                &instance_dir,
+                            ) {
+                                Ok(adapter) => {
+                                    if let Err(error) = manager.register_and_start(adapter).await {
+                                        tracing::error!(%error, "failed to start teams adapter on toggle");
+                                    }
+                                }
+                                Err(error) => {
+                                    tracing::error!(%error, "failed to build teams adapter on toggle");
+                                }
+                            }
+                        }
+                    }
+                }
                 _ => {}
             }
         }
