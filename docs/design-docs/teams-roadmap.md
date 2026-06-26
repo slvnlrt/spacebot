@@ -153,6 +153,8 @@ At enterprise/Discord scale you can't allowlist DM users one by one. **Channels 
 
 # v3 — Human-in-the-loop approval via Adaptive Cards
 
+> **Superseded by a channel-agnostic design:** see `docs/design-docs/approval-cards-design.md`. That doc generalizes this Teams-specific sketch into shared infra (task provenance, a shared inbound interceptor, an approval resolver + RBAC, a `Messaging::update_message` capability) that any adapter plugs into, with Teams as the first implementation. The notes below are kept as the original Teams-only framing.
+
 **Goal:** when an agent action is gated on human approval, deliver an **Approve/Reject Adaptive Card** to a Teams conversation; a click resolves the gate. This is the feature Hermes Agent shipped (Allow Once / Session / Always / Deny card; "clicking a button resolves the approval inline and replaces the card" — [hermes docs](https://hermes-agent.nousresearch.com/docs/user-guide/messaging/teams)).
 
 ## Why this is a separate feature, not "v2 buttons"
