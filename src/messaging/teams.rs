@@ -760,6 +760,10 @@ fn attachment_to_media(
     // Uploaded file: anonymous downloadUrl, no auth needed.
     if ct == "application/vnd.microsoft.teams.file.download.info" {
         let url = att.content.get("downloadUrl")?.as_str()?.to_string();
+        // NOTE: for uploaded files `mime_type` carries the Teams `fileType`
+        // (a bare extension like "pdf"), not a real `type/subtype` MIME — Bot
+        // Framework's file.download.info exposes no media type. Inline images
+        // use the real Content-Type. Consumers must not assume `type/subtype`.
         let mime_type = att
             .content
             .get("fileType")
@@ -1039,9 +1043,6 @@ struct TeamsHandlerState {
     service_urls: Arc<Mutex<HashMap<String, String>>>,
     permissions: Arc<ArcSwap<TeamsPermissions>>,
     runtime_key: String,
-    /// Available to handlers for future outbound calls.
-    #[allow(dead_code)]
-    http_client: Client,
     sidecar_path: Option<PathBuf>,
 }
 
@@ -1255,7 +1256,6 @@ impl Messaging for TeamsAdapter {
             service_urls: self.service_urls.clone(),
             permissions: self.permissions.clone(),
             runtime_key: self.runtime_key.clone(),
-            http_client: self.http_client.clone(),
             sidecar_path: self.sidecar_path.clone(),
         };
 
@@ -2089,6 +2089,34 @@ vIyJeH8/89a9IXZXlMIA9KH9
     }
 
     #[test]
+    fn activity_to_inbound_inline_image_no_token_drops_bearer() {
+        // Attachments present but no bot token available (best-effort fetch failed):
+        // the image is still surfaced, just with no auth_header — file downloads
+        // that need no auth still work; inline-image fetch will simply 401.
+        let atts = serde_json::json!([{
+            "contentType": "image/png",
+            "contentUrl": "https://smba.trafficmanager.net/emea/img/1",
+            "name": "pasted.png"
+        }]);
+        let act = media_activity(atts, "");
+        let msg = activity_to_inbound(&act, "teams", None).expect("inbound");
+        match msg.content {
+            crate::MessageContent::Media { attachments, .. } => {
+                assert_eq!(attachments.len(), 1);
+                assert_eq!(
+                    attachments[0].url,
+                    "https://smba.trafficmanager.net/emea/img/1"
+                );
+                assert!(
+                    attachments[0].auth_header.is_none(),
+                    "no token -> no bearer even on an allowlisted host"
+                );
+            }
+            other => panic!("expected Media, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn activity_to_inbound_skips_card_attachments() {
         let atts = serde_json::json!([{
             "contentType": "application/vnd.microsoft.card.adaptive",
@@ -2467,7 +2495,7 @@ vIyJeH8/89a9IXZXlMIA9KH9
             activities_url("https://smba.trafficmanager.net/emea/", "conv:abc"),
             "https://smba.trafficmanager.net/emea/v3/conversations/conv:abc/activities"
         );
-        // Trailing slash is trimmed exactly once.
+        // Any trailing slash(es) are trimmed.
         assert_eq!(
             activities_url("https://x.botframework.com", "c1"),
             "https://x.botframework.com/v3/conversations/c1/activities"
