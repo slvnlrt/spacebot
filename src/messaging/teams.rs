@@ -487,6 +487,21 @@ pub struct ActivityConversation {
     pub conversation_type: Option<String>,
 }
 
+/// A Bot Framework attachment entry on an inbound Activity.
+/// Tolerant parsing — unknown fields ignored.
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TeamsAttachment {
+    pub content_type: String,
+    #[serde(default)]
+    pub content_url: Option<String>,
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Inline `content` object (e.g. file download info, or a card payload).
+    #[serde(default)]
+    pub content: serde_json::Value,
+}
+
 /// Subset of the Bot Framework Activity schema used for inbound message
 /// processing.  Unknown fields are silently ignored (tolerant parsing).
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -527,6 +542,10 @@ pub struct Activity {
     /// Mention entities and other structured data attached to the activity.
     #[serde(default)]
     pub entities: Option<Vec<serde_json::Value>>,
+
+    /// Inbound attachments (uploaded files, inline images, cards).
+    #[serde(default)]
+    pub attachments: Option<Vec<TeamsAttachment>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -641,6 +660,7 @@ fn bot_was_mentioned(activity: &Activity) -> bool {
 pub fn activity_to_inbound(
     activity: &Activity,
     runtime_key: &str,
+    media_bot_token: Option<&str>,
 ) -> Option<crate::InboundMessage> {
     if !activity.activity_type.eq_ignore_ascii_case("message") {
         return None;
@@ -688,6 +708,28 @@ pub fn activity_to_inbound(
         Some(activity.from.name.clone())
     };
 
+    // Build media attachments from inbound file/image attachments.
+    let media: Vec<crate::Attachment> = activity
+        .attachments
+        .as_deref()
+        .unwrap_or(&[])
+        .iter()
+        .filter_map(|att| attachment_to_media(att, media_bot_token))
+        .collect();
+
+    let content = if media.is_empty() {
+        crate::MessageContent::Text(clean_text)
+    } else {
+        crate::MessageContent::Media {
+            text: if clean_text.is_empty() {
+                None
+            } else {
+                Some(clean_text)
+            },
+            attachments: media,
+        }
+    };
+
     Some(crate::InboundMessage {
         id: activity.id.clone(),
         source: "teams".to_string(),
@@ -695,10 +737,64 @@ pub fn activity_to_inbound(
         conversation_id,
         sender_id: activity.from.id.clone(),
         agent_id: None,
-        content: crate::MessageContent::Text(clean_text),
+        content,
         timestamp: chrono::Utc::now(),
         metadata,
         formatted_author,
+    })
+}
+
+/// Map one Bot Framework attachment to a `crate::Attachment`, or `None` if it
+/// is not downloadable media (e.g. a card).
+fn attachment_to_media(
+    att: &TeamsAttachment,
+    media_bot_token: Option<&str>,
+) -> Option<crate::Attachment> {
+    let ct = att.content_type.as_str();
+
+    // Skip card attachments — not media.
+    if ct.starts_with("application/vnd.microsoft.card.") {
+        return None;
+    }
+
+    // Uploaded file: anonymous downloadUrl, no auth needed.
+    if ct == "application/vnd.microsoft.teams.file.download.info" {
+        let url = att.content.get("downloadUrl")?.as_str()?.to_string();
+        let mime_type = att
+            .content
+            .get("fileType")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        return Some(crate::Attachment {
+            filename: att.name.clone().unwrap_or_else(|| "file".into()),
+            mime_type,
+            url,
+            size_bytes: None,
+            auth_header: None,
+            pre_saved_id: None,
+        });
+    }
+
+    // Inline content (e.g. an image): contentUrl requires the bot's bearer.
+    // SECURITY (I2): the download layer forwards `auth_header` to the URL host
+    // on the first hop (channel_attachments.rs:104-128). `contentUrl` comes
+    // from inbound JSON, so only attach the Bot Connector bearer when the host
+    // is on the same allowlist as outbound serviceUrls (Teams inline images
+    // are served from *.trafficmanager.net). Never leak the credential to an
+    // attacker-named host — attach the URL with no auth instead.
+    let url = att.content_url.clone()?;
+    let auth_header = match media_bot_token {
+        Some(t) if is_allowed_service_url(&url) => Some(format!("Bearer {t}")),
+        _ => None,
+    };
+    Some(crate::Attachment {
+        filename: att.name.clone().unwrap_or_else(|| "attachment".into()),
+        mime_type: ct.to_string(),
+        url,
+        size_bytes: None,
+        auth_header,
+        pre_saved_id: None,
     })
 }
 
@@ -936,8 +1032,7 @@ use crate::{InboundMessage, OutboundResponse, StatusUpdate};
 #[derive(Clone)]
 struct TeamsHandlerState {
     inbound_tx: mpsc::Sender<InboundMessage>,
-    /// Available to handlers for future outbound calls (e.g., typing indicators).
-    #[allow(dead_code)]
+    /// Used to mint the bot bearer for downloading inline-image attachments.
     token: Arc<TeamsTokenProvider>,
     jwks: Arc<JwksCache>,
     app_id: String,
@@ -1367,13 +1462,7 @@ async fn handle_messages(
         }
     }
 
-    // --- Step 4: Normalize to InboundMessage ---
-    let Some(msg) = activity_to_inbound(&activity, &state.runtime_key) else {
-        // Non-message activity (typing, conversationUpdate, etc.) — ack and ignore.
-        return Ok(StatusCode::OK);
-    };
-
-    // --- Step 5: Permission check ---
+    // --- Step 4: Permission check ---
     let conversation_type = activity.conversation.conversation_type.as_deref();
     let channel_id = &activity.conversation.id;
     let sender_id = &activity.from.id;
@@ -1389,6 +1478,20 @@ async fn handle_messages(
         // Return 200 so Bot Framework doesn't retry.
         return Ok(StatusCode::OK);
     }
+
+    // --- Step 5: Normalize to InboundMessage ---
+    // Inline-image attachments need the bot's bearer to download; fetch it
+    // best-effort only when the activity carries attachments.
+    let media_bot_token = if activity.attachments.as_ref().is_some_and(|a| !a.is_empty()) {
+        state.token.bearer().await.ok()
+    } else {
+        None
+    };
+    let Some(msg) = activity_to_inbound(&activity, &state.runtime_key, media_bot_token.as_deref())
+    else {
+        // Non-message activity (typing, conversationUpdate, etc.) — ack and ignore.
+        return Ok(StatusCode::OK);
+    };
 
     // --- Step 6: Dispatch ---
     if state.inbound_tx.send(msg).await.is_err() {
@@ -1766,7 +1869,7 @@ vIyJeH8/89a9IXZXlMIA9KH9
         }"#;
 
         let activity: Activity = serde_json::from_str(raw).expect("parse activity");
-        let msg = activity_to_inbound(&activity, "teams")
+        let msg = activity_to_inbound(&activity, "teams", None)
             .expect("should produce InboundMessage for message activity");
 
         assert_eq!(msg.id, "act-001");
@@ -1832,7 +1935,8 @@ vIyJeH8/89a9IXZXlMIA9KH9
         }"#;
 
         let activity: Activity = serde_json::from_str(raw).expect("parse activity");
-        let msg = activity_to_inbound(&activity, "teams").expect("should produce InboundMessage");
+        let msg =
+            activity_to_inbound(&activity, "teams", None).expect("should produce InboundMessage");
 
         // <at>MyBot</at> prefix should be stripped; remaining text trimmed.
         if let crate::MessageContent::Text(text) = &msg.content {
@@ -1862,7 +1966,7 @@ vIyJeH8/89a9IXZXlMIA9KH9
         }"#;
 
         let activity: Activity = serde_json::from_str(raw).expect("parse activity");
-        let result = activity_to_inbound(&activity, "teams");
+        let result = activity_to_inbound(&activity, "teams", None);
         assert!(
             result.is_none(),
             "conversationUpdate should produce None, got: {result:?}"
@@ -1884,12 +1988,123 @@ vIyJeH8/89a9IXZXlMIA9KH9
         }"#;
 
         let activity: Activity = serde_json::from_str(raw).expect("parse activity");
-        let msg =
-            activity_to_inbound(&activity, "teams:support").expect("should produce InboundMessage");
+        let msg = activity_to_inbound(&activity, "teams:support", None)
+            .expect("should produce InboundMessage");
 
         // Named adapter: runtime_key != "teams", so prefix should be rewritten.
         assert_eq!(msg.conversation_id, "teams:support:conv-named-001");
         assert_eq!(msg.adapter, Some("teams:support".to_string()));
+    }
+
+    // -----------------------------------------------------------------------
+    // Inbound attachments → MessageContent::Media
+    // -----------------------------------------------------------------------
+
+    fn media_activity(attachments: serde_json::Value, text: &str) -> Activity {
+        let raw = serde_json::json!({
+            "type": "message",
+            "id": "act-1",
+            "text": text,
+            "from": { "id": "user-1", "name": "Alice" },
+            "conversation": { "id": "conv-1", "conversationType": "personal" },
+            "serviceUrl": "https://smba.trafficmanager.net/emea/",
+            "recipient": { "id": "bot-1", "name": "Bot" },
+            "attachments": attachments
+        });
+        serde_json::from_value(raw).expect("activity parses")
+    }
+
+    #[test]
+    fn activity_to_inbound_file_download_info_maps_to_media_no_auth() {
+        let atts = serde_json::json!([{
+            "contentType": "application/vnd.microsoft.teams.file.download.info",
+            "name": "report.pdf",
+            "content": { "downloadUrl": "https://files/anon/report.pdf", "fileType": "pdf" }
+        }]);
+        let act = media_activity(atts, "see attached");
+        let msg = activity_to_inbound(&act, "teams", None).expect("inbound");
+        match msg.content {
+            crate::MessageContent::Media { text, attachments } => {
+                assert_eq!(text.as_deref(), Some("see attached"));
+                assert_eq!(attachments.len(), 1);
+                assert_eq!(attachments[0].filename, "report.pdf");
+                assert_eq!(attachments[0].url, "https://files/anon/report.pdf");
+                assert_eq!(attachments[0].mime_type, "pdf");
+                assert!(attachments[0].auth_header.is_none());
+            }
+            other => panic!("expected Media, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn activity_to_inbound_inline_image_carries_bearer_auth() {
+        let atts = serde_json::json!([{
+            "contentType": "image/png",
+            "contentUrl": "https://smba.trafficmanager.net/emea/img/1",
+            "name": "pasted.png"
+        }]);
+        // contentUrl host is *.trafficmanager.net → on the allowlist → bearer attached.
+        let act = media_activity(atts, "");
+        let msg = activity_to_inbound(&act, "teams", Some("TOKEN123")).expect("inbound");
+        match msg.content {
+            crate::MessageContent::Media { text, attachments } => {
+                assert!(text.is_none(), "empty text -> None");
+                assert_eq!(attachments.len(), 1);
+                assert_eq!(
+                    attachments[0].url,
+                    "https://smba.trafficmanager.net/emea/img/1"
+                );
+                assert_eq!(attachments[0].mime_type, "image/png");
+                assert_eq!(
+                    attachments[0].auth_header.as_deref(),
+                    Some("Bearer TOKEN123")
+                );
+            }
+            other => panic!("expected Media, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn activity_to_inbound_inline_image_off_allowlist_drops_bearer() {
+        // I2: a contentUrl pointing at a non-allowlisted host must NOT receive the
+        // bot's Bot Connector bearer, even when a token is available.
+        let atts = serde_json::json!([{
+            "contentType": "image/png",
+            "contentUrl": "https://attacker.example/img/1",
+            "name": "evil.png"
+        }]);
+        let act = media_activity(atts, "");
+        let msg = activity_to_inbound(&act, "teams", Some("TOKEN123")).expect("inbound");
+        match msg.content {
+            crate::MessageContent::Media { attachments, .. } => {
+                assert_eq!(attachments.len(), 1);
+                assert_eq!(attachments[0].url, "https://attacker.example/img/1");
+                assert!(
+                    attachments[0].auth_header.is_none(),
+                    "bearer must not be sent to an off-allowlist host"
+                );
+            }
+            other => panic!("expected Media, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn activity_to_inbound_skips_card_attachments() {
+        let atts = serde_json::json!([{
+            "contentType": "application/vnd.microsoft.card.adaptive",
+            "content": { "type": "AdaptiveCard" }
+        }]);
+        let act = media_activity(atts, "hello");
+        let msg = activity_to_inbound(&act, "teams", None).expect("inbound");
+        // No media attachments produced -> stays Text.
+        assert!(matches!(msg.content, crate::MessageContent::Text(ref t) if t == "hello"));
+    }
+
+    #[test]
+    fn activity_to_inbound_no_attachments_stays_text() {
+        let act = media_activity(serde_json::json!([]), "just text");
+        let msg = activity_to_inbound(&act, "teams", None).expect("inbound");
+        assert!(matches!(msg.content, crate::MessageContent::Text(ref t) if t == "just text"));
     }
 
     // -----------------------------------------------------------------------
@@ -2177,7 +2392,8 @@ vIyJeH8/89a9IXZXlMIA9KH9
             "attributed <at id=\"0\"> tag should trigger mentioned=true via text fallback"
         );
         // Also verify the text is stripped correctly end-to-end.
-        let msg = activity_to_inbound(&activity, "teams").expect("should produce InboundMessage");
+        let msg =
+            activity_to_inbound(&activity, "teams", None).expect("should produce InboundMessage");
         if let crate::MessageContent::Text(text) = &msg.content {
             assert_eq!(text, "hello");
         } else {
