@@ -929,6 +929,67 @@ fn cards_to_attachments(cards: &[crate::Card]) -> Vec<serde_json::Value> {
         .collect()
 }
 
+/// Convert a generic `Button` to an Adaptive Card action.
+///
+/// A button with a `url` becomes `Action.OpenUrl`; otherwise `Action.Submit`
+/// whose `data` (echoed back by Teams as the inbound `value`) carries the
+/// correlation `action_id` (the button's `custom_id`, or its label as a
+/// fallback) plus the human `label`. `ButtonStyle` has no portable Adaptive
+/// Card equivalent and is intentionally dropped.
+fn button_to_action(btn: &crate::Button) -> serde_json::Value {
+    if let Some(url) = &btn.url {
+        return serde_json::json!({
+            "type": "Action.OpenUrl",
+            "title": btn.label,
+            "url": url,
+        });
+    }
+    let action_id = btn.custom_id.clone().unwrap_or_else(|| btn.label.clone());
+    serde_json::json!({
+        "type": "Action.Submit",
+        "title": btn.label,
+        "data": { "action_id": action_id, "label": btn.label },
+    })
+}
+
+/// Flatten `interactive_elements` into Adaptive Card actions.
+///
+/// Renders `Buttons`; `Select` (Adaptive Card `Input.ChoiceSet`) is deferred
+/// (see the v2b plan Scope section) and contributes no actions yet.
+fn interactive_elements_to_actions(elems: &[crate::InteractiveElements]) -> Vec<serde_json::Value> {
+    let mut actions = Vec::new();
+    for elem in elems {
+        match elem {
+            crate::InteractiveElements::Buttons { buttons } => {
+                actions.extend(buttons.iter().map(button_to_action));
+            }
+            // TODO(v2b.select): render SelectMenu as an Input.ChoiceSet + a
+            // single Action.Submit once validated against a real Teams client.
+            crate::InteractiveElements::Select { .. } => {}
+        }
+    }
+    actions
+}
+
+/// Build a standalone Adaptive Card attachment carrying `text` (if any) and
+/// the given `actions`. Appended after content cards so buttons render below.
+fn actions_card_attachment(text: &str, actions: Vec<serde_json::Value>) -> serde_json::Value {
+    let mut body: Vec<serde_json::Value> = Vec::new();
+    if !text.is_empty() {
+        body.push(serde_json::json!({ "type": "TextBlock", "text": text, "wrap": true }));
+    }
+    serde_json::json!({
+        "contentType": "application/vnd.microsoft.card.adaptive",
+        "content": {
+            "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+            "type": "AdaptiveCard",
+            "version": "1.5",
+            "body": body,
+            "actions": actions
+        }
+    })
+}
+
 /// Build the outbound `message` activity body — the exact seam `respond` uses.
 /// `attachments` and `reply_to` keys are only present when non-empty/`Some`.
 fn build_message_body(
@@ -1297,14 +1358,23 @@ impl Messaging for TeamsAdapter {
             OutboundResponse::ThreadReply { text, .. } => (text, Vec::new()),
             OutboundResponse::Ephemeral { text, .. } => (text, Vec::new()),
             OutboundResponse::ScheduledMessage { text, .. } => (text, Vec::new()),
-            // Teams consumes `cards`; `blocks`/`interactive_elements`/`poll`
-            // are ignored (text remains the fallback when there are no cards).
-            OutboundResponse::RichMessage { text, cards, .. } => {
-                let atts = if cards.is_empty() {
+            // Teams consumes `cards` + `interactive_elements`; `blocks`/`poll`
+            // are ignored (text remains the fallback when there are none).
+            OutboundResponse::RichMessage {
+                text,
+                cards,
+                interactive_elements,
+                ..
+            } => {
+                let mut atts = if cards.is_empty() {
                     Vec::new()
                 } else {
                     cards_to_attachments(&cards)
                 };
+                let actions = interactive_elements_to_actions(&interactive_elements);
+                if !actions.is_empty() {
+                    atts.push(actions_card_attachment(&text, actions));
+                }
                 (text, atts)
             }
             OutboundResponse::Reaction(_)
@@ -2751,5 +2821,121 @@ vIyJeH8/89a9IXZXlMIA9KH9
             "application/vnd.microsoft.card.adaptive"
         );
         assert_eq!(body["attachments"][0]["content"]["body"][0]["text"], "Hi");
+    }
+
+    // -----------------------------------------------------------------------
+    // v2b: button_to_action / interactive_elements_to_actions / actions_card_attachment
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn button_to_action_submit_embeds_action_id_and_label() {
+        let btn = crate::Button {
+            label: "Approve".into(),
+            custom_id: Some("approve_42".into()),
+            style: crate::ButtonStyle::Primary,
+            url: None,
+        };
+        let a = button_to_action(&btn);
+        assert_eq!(a["type"], "Action.Submit");
+        assert_eq!(a["title"], "Approve");
+        assert_eq!(a["data"]["action_id"], "approve_42");
+        assert_eq!(a["data"]["label"], "Approve");
+    }
+
+    #[test]
+    fn button_to_action_url_is_openurl() {
+        let btn = crate::Button {
+            label: "Docs".into(),
+            custom_id: None,
+            style: crate::ButtonStyle::Link,
+            url: Some("https://example.com/docs".into()),
+        };
+        let a = button_to_action(&btn);
+        assert_eq!(a["type"], "Action.OpenUrl");
+        assert_eq!(a["title"], "Docs");
+        assert_eq!(a["url"], "https://example.com/docs");
+    }
+
+    #[test]
+    fn button_to_action_submit_falls_back_to_label_id() {
+        let btn = crate::Button {
+            label: "Yes".into(),
+            custom_id: None,
+            style: crate::ButtonStyle::Secondary,
+            url: None,
+        };
+        let a = button_to_action(&btn);
+        assert_eq!(a["type"], "Action.Submit");
+        assert_eq!(a["data"]["action_id"], "Yes");
+    }
+
+    #[test]
+    fn interactive_elements_to_actions_flattens_buttons_and_skips_select() {
+        let elems = vec![
+            crate::InteractiveElements::Buttons {
+                buttons: vec![
+                    crate::Button {
+                        label: "A".into(),
+                        custom_id: Some("a".into()),
+                        style: crate::ButtonStyle::Primary,
+                        url: None,
+                    },
+                    crate::Button {
+                        label: "B".into(),
+                        custom_id: Some("b".into()),
+                        style: crate::ButtonStyle::Danger,
+                        url: None,
+                    },
+                ],
+            },
+            crate::InteractiveElements::Select {
+                select: crate::SelectMenu {
+                    custom_id: "s".into(),
+                    options: vec![],
+                    placeholder: None,
+                },
+            },
+        ];
+        let actions = interactive_elements_to_actions(&elems);
+        assert_eq!(actions.len(), 2, "2 buttons, select skipped in v2b");
+        assert_eq!(actions[0]["data"]["action_id"], "a");
+        assert_eq!(actions[1]["data"]["action_id"], "b");
+    }
+
+    #[test]
+    fn actions_card_attachment_carries_text_and_actions() {
+        let actions =
+            vec![serde_json::json!({"type":"Action.Submit","title":"X","data":{"action_id":"x"}})];
+        let att = actions_card_attachment("Pick one:", actions);
+        assert_eq!(
+            att["contentType"],
+            "application/vnd.microsoft.card.adaptive"
+        );
+        assert_eq!(att["content"]["type"], "AdaptiveCard");
+        assert_eq!(att["content"]["body"][0]["text"], "Pick one:");
+        assert_eq!(att["content"]["actions"][0]["data"]["action_id"], "x");
+    }
+
+    #[test]
+    fn rich_message_with_buttons_appends_action_card() {
+        let elems = vec![crate::InteractiveElements::Buttons {
+            buttons: vec![crate::Button {
+                label: "Approve".into(),
+                custom_id: Some("ok".into()),
+                style: crate::ButtonStyle::Primary,
+                url: None,
+            }],
+        }];
+        let actions = interactive_elements_to_actions(&elems);
+        let mut atts: Vec<serde_json::Value> = Vec::new();
+        if !actions.is_empty() {
+            atts.push(actions_card_attachment("Approve?", actions));
+        }
+        let body = build_message_body("Approve?", &atts, None);
+        assert_eq!(body["text"], "Approve?");
+        assert_eq!(
+            body["attachments"][0]["content"]["actions"][0]["data"]["action_id"],
+            "ok"
+        );
     }
 }
