@@ -5,7 +5,7 @@
 ## Status log
 - **v1** — shipped (single bot, text + @mention). See below.
 - **v1.2 — Teams in the Channels UI** — **SHIPPED** (commits `5cc3add..43bbed2`, plan `docs/superpowers/plans/2026-06-26-teams-channels-ui.md`). Connect/delete/status a Teams bot from Settings → Channels (single-instance). This also **delivered the config-watcher hot-reload parity** that was deferred as v1.1 "Track B" / W1 below — Teams now hot-starts on config change like the other adapters (default instance). Opus final review: SHIP, no critical; full `cargo test --lib` 943/0.
-  - Tracked follow-ups (functionally correct today, non-blocking): **I-1** add a `teams` arm to `toggle_platform` (`src/api/messaging.rs` enable `match`, currently catch-all `_ => {}`) so toggle-ON is self-contained instead of relying on the watcher write — reuse `build_teams_adapter`; **M-1** reconcile the param order between `initialize_agents` (teams-before-signal) and `spawn_file_watcher` (signal-before-teams) — safe but a readability hazard.
+  - Follow-ups (both **RESOLVED**, commits `12962f8e` + `00b36776`, reviewed): **I-1** ✅ added a `teams` arm to `toggle_platform` so toggle-ON starts the adapter self-contained (mirrors siblings via `build_teams_adapter`, no longer watcher-race-dependent); **M-1** ✅ aligned the permission param order (`initialize_agents` now matches `spawn_file_watcher`: `…mattermost, signal, teams`).
 - **v1.1 (multi-bot) / v2 / v3** — designed below, not yet built. (v1.1's watcher-parity sub-item is now done via v1.2; what remains of v1.1 is the shared-listener multi-bot work.)
 
 ## Where v1 stands
