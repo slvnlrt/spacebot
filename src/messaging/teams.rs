@@ -738,6 +738,114 @@ fn activities_url(service_url: &str, bare_conv_id: &str) -> String {
     )
 }
 
+/// Convert a `crate::Card` into an Adaptive Card `content` object.
+///
+/// Faithful subset mapping (Teams mirrors the Discord `cards` payload, not
+/// Slack `blocks`). Gaps with no Adaptive Card equivalent are intentionally
+/// dropped: `color` (no RGB in Adaptive Cards — only semantic container
+/// styles) and `CardField.inline` (no per-fact layout flag); author icon/url
+/// are omitted for v2a simplicity.
+fn card_to_adaptive(card: &crate::Card) -> serde_json::Value {
+    let mut body: Vec<serde_json::Value> = Vec::new();
+
+    if let Some(author) = &card.author {
+        if !author.name.trim().is_empty() {
+            body.push(serde_json::json!({
+                "type": "TextBlock", "text": author.name, "weight": "Bolder",
+                "isSubtle": true, "wrap": true, "spacing": "None"
+            }));
+        }
+    }
+
+    // Title (linked if a url is present); a bare url with no title still links.
+    let title_text = match (&card.title, &card.url) {
+        (Some(t), Some(u)) => Some(format!("[{t}]({u})")),
+        (Some(t), None) => Some(t.clone()),
+        (None, Some(u)) => Some(format!("[{u}]({u})")),
+        (None, None) => None,
+    };
+    if let Some(text) = title_text {
+        body.push(serde_json::json!({
+            "type": "TextBlock", "text": text, "weight": "Bolder",
+            "size": "Large", "wrap": true
+        }));
+    }
+
+    if let Some(desc) = &card.description {
+        body.push(serde_json::json!({ "type": "TextBlock", "text": desc, "wrap": true }));
+    }
+
+    if let Some(image) = &card.image {
+        body.push(serde_json::json!({ "type": "Image", "url": image.url, "size": "Stretch" }));
+    }
+    if let Some(thumb) = &card.thumbnail {
+        body.push(serde_json::json!({ "type": "Image", "url": thumb.url, "size": "Small" }));
+    }
+
+    if !card.fields.is_empty() {
+        let facts: Vec<serde_json::Value> = card
+            .fields
+            .iter()
+            .map(|f| serde_json::json!({ "title": f.name, "value": f.value }))
+            .collect();
+        body.push(serde_json::json!({ "type": "FactSet", "facts": facts }));
+    }
+
+    // Footer + timestamp collapse into one subtle line.
+    let footer_text = match (
+        card.footer.as_ref().map(|f| f.text.as_str()),
+        &card.timestamp,
+    ) {
+        (Some(f), Some(ts)) => Some(format!("{f} • {ts}")),
+        (Some(f), None) => Some(f.to_string()),
+        (None, Some(ts)) => Some(ts.clone()),
+        (None, None) => None,
+    };
+    if let Some(text) = footer_text {
+        body.push(serde_json::json!({
+            "type": "TextBlock", "text": text, "isSubtle": true,
+            "size": "Small", "spacing": "Small", "wrap": true
+        }));
+    }
+
+    serde_json::json!({
+        "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+        "type": "AdaptiveCard",
+        "version": "1.5",
+        "body": body
+    })
+}
+
+/// Wrap each card as a Bot Framework Adaptive Card attachment.
+fn cards_to_attachments(cards: &[crate::Card]) -> Vec<serde_json::Value> {
+    cards
+        .iter()
+        .map(|card| {
+            serde_json::json!({
+                "contentType": "application/vnd.microsoft.card.adaptive",
+                "content": card_to_adaptive(card)
+            })
+        })
+        .collect()
+}
+
+/// Build the outbound `message` activity body — the exact seam `respond` uses.
+/// `attachments` and `reply_to` keys are only present when non-empty/`Some`.
+fn build_message_body(
+    text: &str,
+    attachments: &[serde_json::Value],
+    reply_to: Option<&str>,
+) -> serde_json::Value {
+    let mut body = serde_json::json!({ "type": "message", "text": text });
+    if !attachments.is_empty() {
+        body["attachments"] = serde_json::json!(attachments);
+    }
+    if let Some(reply_to) = reply_to {
+        body["replyToId"] = serde_json::json!(reply_to);
+    }
+    body
+}
+
 /// Strip the `"<runtime_key>:"` prefix from a routing key to recover the bare
 /// Microsoft conversation id. Inner colons in the MS id are preserved.
 fn strip_runtime_prefix<'a>(routing_key: &'a str, runtime_key: &str) -> &'a str {
@@ -1072,15 +1180,22 @@ impl Messaging for TeamsAdapter {
         message: &InboundMessage,
         response: OutboundResponse,
     ) -> crate::Result<()> {
-        // Extract the text to send (or return Ok(()) for unsupported variants).
-        let text = match response {
-            OutboundResponse::Text(t) => t,
-            OutboundResponse::ThreadReply { text, .. } => text,
-            OutboundResponse::Ephemeral { text, .. } => text,
-            OutboundResponse::RichMessage { text, .. } => text,
-            OutboundResponse::ScheduledMessage { text, .. } => text,
-            // Silent no-ops for unsupported variants. (Status is delivered via
-            // send_status, not respond — see the Messaging trait routing.)
+        // Extract text + any cards (or return Ok(()) for unsupported variants).
+        let (text, attachments) = match response {
+            OutboundResponse::Text(t) => (t, Vec::new()),
+            OutboundResponse::ThreadReply { text, .. } => (text, Vec::new()),
+            OutboundResponse::Ephemeral { text, .. } => (text, Vec::new()),
+            OutboundResponse::ScheduledMessage { text, .. } => (text, Vec::new()),
+            // Teams consumes `cards`; `blocks`/`interactive_elements`/`poll`
+            // are ignored (text remains the fallback when there are no cards).
+            OutboundResponse::RichMessage { text, cards, .. } => {
+                let atts = if cards.is_empty() {
+                    Vec::new()
+                } else {
+                    cards_to_attachments(&cards)
+                };
+                (text, atts)
+            }
             OutboundResponse::Reaction(_)
             | OutboundResponse::RemoveReaction(_)
             | OutboundResponse::Status(_)
@@ -1094,17 +1209,12 @@ impl Messaging for TeamsAdapter {
             .metadata
             .get("teams_service_url")
             .and_then(|v| v.as_str());
-
         let reply_to_id = message
             .metadata
             .get("teams_reply_to_id")
             .and_then(|v| v.as_str());
 
-        let mut body = serde_json::json!({ "type": "message", "text": text });
-        if let Some(reply_to) = reply_to_id {
-            body["replyToId"] = serde_json::json!(reply_to);
-        }
-
+        let body = build_message_body(&text, &attachments, reply_to_id);
         self.send_activity(&message.conversation_id, inline, body)
             .await
     }
@@ -2089,5 +2199,211 @@ vIyJeH8/89a9IXZXlMIA9KH9
         );
         // No prefix match → returned unchanged.
         assert_eq!(strip_runtime_prefix("conv-abc", "teams"), "conv-abc");
+    }
+
+    // -----------------------------------------------------------------------
+    // Adaptive Card rendering tests (Task 2)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn card_to_adaptive_maps_core_fields() {
+        let card = crate::Card {
+            title: Some("Deploy ready".into()),
+            description: Some("Click to approve".into()),
+            color: Some(0x00ff00),
+            url: None,
+            fields: vec![
+                crate::CardField {
+                    name: "Env".into(),
+                    value: "prod".into(),
+                    inline: true,
+                },
+                crate::CardField {
+                    name: "Build".into(),
+                    value: "#42".into(),
+                    inline: false,
+                },
+            ],
+            footer: Some(crate::CardFooter {
+                text: "by ci-bot".into(),
+                icon_url: None,
+            }),
+            thumbnail: None,
+            image: Some(crate::CardImage {
+                url: "https://img/x.png".into(),
+            }),
+            author: None,
+            timestamp: Some("2026-06-26T10:00:00Z".into()),
+        };
+        let v = card_to_adaptive(&card);
+        assert_eq!(v["type"], "AdaptiveCard");
+        assert_eq!(v["version"], "1.5");
+        let body = v["body"].as_array().expect("body array");
+        // Title TextBlock present, Bolder/Large.
+        let title = body
+            .iter()
+            .find(|e| e["text"] == "Deploy ready")
+            .expect("title block");
+        assert_eq!(title["type"], "TextBlock");
+        assert_eq!(title["weight"], "Bolder");
+        assert_eq!(title["size"], "Large");
+        // Description present.
+        assert!(body.iter().any(|e| e["text"] == "Click to approve"));
+        // Image element present.
+        assert!(
+            body.iter()
+                .any(|e| e["type"] == "Image" && e["url"] == "https://img/x.png")
+        );
+        // FactSet with both fields.
+        let facts = body
+            .iter()
+            .find(|e| e["type"] == "FactSet")
+            .expect("factset");
+        let facts = facts["facts"].as_array().expect("facts array");
+        assert_eq!(facts.len(), 2);
+        assert_eq!(facts[0]["title"], "Env");
+        assert_eq!(facts[0]["value"], "prod");
+        // Footer carries the timestamp.
+        assert!(body.iter().any(|e| {
+            e["isSubtle"] == true
+                && e["text"].as_str().unwrap_or("").contains("by ci-bot")
+                && e["text"]
+                    .as_str()
+                    .unwrap_or("")
+                    .contains("2026-06-26T10:00:00Z")
+        }));
+        // color is NOT emitted anywhere.
+        let s = v.to_string();
+        assert!(
+            s.find("65280").is_none(),
+            "raw color value must not leak into the card"
+        );
+        assert!(
+            s.find("\"color\"").is_none(),
+            "no color key in the Adaptive Card"
+        );
+    }
+
+    #[test]
+    fn card_to_adaptive_empty_card_has_empty_body() {
+        let card = crate::Card {
+            title: None,
+            description: None,
+            color: None,
+            url: None,
+            fields: vec![],
+            footer: None,
+            thumbnail: None,
+            image: None,
+            author: None,
+            timestamp: None,
+        };
+        let v = card_to_adaptive(&card);
+        assert_eq!(v["type"], "AdaptiveCard");
+        assert_eq!(v["body"].as_array().expect("body array").len(), 0);
+    }
+
+    #[test]
+    fn card_to_adaptive_title_with_url_is_markdown_link() {
+        let card = crate::Card {
+            title: Some("Open PR".into()),
+            description: None,
+            color: None,
+            url: Some("https://github.com/x/y/pull/1".into()),
+            fields: vec![],
+            footer: None,
+            thumbnail: None,
+            image: None,
+            author: None,
+            timestamp: None,
+        };
+        let v = card_to_adaptive(&card);
+        let body = v["body"].as_array().unwrap();
+        assert!(
+            body.iter().any(|e| e["type"] == "TextBlock"
+                && e["text"] == "[Open PR](https://github.com/x/y/pull/1)")
+        );
+    }
+
+    #[test]
+    fn cards_to_attachments_wraps_each_card() {
+        let cards = vec![
+            crate::Card {
+                title: Some("A".into()),
+                description: None,
+                color: None,
+                url: None,
+                fields: vec![],
+                footer: None,
+                thumbnail: None,
+                image: None,
+                author: None,
+                timestamp: None,
+            },
+            crate::Card {
+                title: Some("B".into()),
+                description: None,
+                color: None,
+                url: None,
+                fields: vec![],
+                footer: None,
+                thumbnail: None,
+                image: None,
+                author: None,
+                timestamp: None,
+            },
+        ];
+        let atts = cards_to_attachments(&cards);
+        assert_eq!(atts.len(), 2);
+        assert_eq!(
+            atts[0]["contentType"],
+            "application/vnd.microsoft.card.adaptive"
+        );
+        assert_eq!(atts[0]["content"]["type"], "AdaptiveCard");
+        assert_eq!(atts[1]["content"]["body"][0]["text"], "B");
+        assert_eq!(
+            atts[0]["content"]["$schema"],
+            "http://adaptivecards.io/schemas/adaptive-card.json"
+        );
+    }
+
+    #[test]
+    fn build_message_body_omits_optional_keys_when_empty() {
+        let body = build_message_body("hello", &[], None);
+        assert_eq!(body["type"], "message");
+        assert_eq!(body["text"], "hello");
+        assert!(
+            body.get("attachments").is_none(),
+            "no attachments key when empty"
+        );
+        assert!(
+            body.get("replyToId").is_none(),
+            "no replyToId key when None"
+        );
+    }
+
+    #[test]
+    fn build_message_body_includes_cards_and_reply_to() {
+        let cards = vec![crate::Card {
+            title: Some("Hi".into()),
+            description: None,
+            color: None,
+            url: None,
+            fields: vec![],
+            footer: None,
+            thumbnail: None,
+            image: None,
+            author: None,
+            timestamp: None,
+        }];
+        let attachments = cards_to_attachments(&cards);
+        let body = build_message_body("Hi", &attachments, Some("act-99"));
+        assert_eq!(body["text"], "Hi");
+        assert_eq!(body["replyToId"], "act-99");
+        assert_eq!(
+            body["attachments"][0]["contentType"],
+            "application/vnd.microsoft.card.adaptive"
+        );
+        assert_eq!(body["attachments"][0]["content"]["body"][0]["text"], "Hi");
     }
 }
