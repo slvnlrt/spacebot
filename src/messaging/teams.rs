@@ -546,6 +546,11 @@ pub struct Activity {
     /// Inbound attachments (uploaded files, inline images, cards).
     #[serde(default)]
     pub attachments: Option<Vec<TeamsAttachment>>,
+
+    /// Adaptive Card `Action.Submit` payload (button `data` merged with input
+    /// values). Present on a card-button click; absent on normal messages.
+    #[serde(default)]
+    pub value: Option<serde_json::Value>,
 }
 
 // ---------------------------------------------------------------------------
@@ -643,6 +648,44 @@ fn bot_was_mentioned(activity: &Activity) -> bool {
         .unwrap_or(false)
 }
 
+/// Map an `Action.Submit` `value` object to a `MessageContent::Interaction`.
+///
+/// `value` is the button `data` (we embed `action_id`+`label`) merged with any
+/// Adaptive Card input submissions. NOTE: downstream the agent sees this
+/// flattened to text (channel.rs renders Interaction via Display) — fine for
+/// conversational buttons, but NOT a deterministic gate (that is v3).
+fn value_to_interaction(
+    value: &serde_json::Value,
+    message_ts: Option<String>,
+) -> crate::MessageContent {
+    let action_id = value
+        .get("action_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let label = value
+        .get("label")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    // Any other string-valued fields are submitted input values.
+    let values: Vec<String> = value
+        .as_object()
+        .map(|obj| {
+            obj.iter()
+                .filter(|(k, _)| k.as_str() != "action_id" && k.as_str() != "label")
+                .filter_map(|(_, v)| v.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+    crate::MessageContent::Interaction {
+        action_id,
+        block_id: None,
+        values,
+        label,
+        message_ts,
+    }
+}
+
 /// Convert a Bot Framework [`Activity`] to a project-standard [`InboundMessage`].
 ///
 /// Returns `None` for any activity whose `type` is not `"message"` — v1 only
@@ -708,25 +751,43 @@ pub fn activity_to_inbound(
         Some(activity.from.name.clone())
     };
 
-    // Build media attachments from inbound file/image attachments.
-    let media: Vec<crate::Attachment> = activity
-        .attachments
-        .as_deref()
-        .unwrap_or(&[])
-        .iter()
-        .filter_map(|att| attachment_to_media(att, media_bot_token))
-        .collect();
-
-    let content = if media.is_empty() {
-        crate::MessageContent::Text(clean_text)
-    } else {
-        crate::MessageContent::Media {
-            text: if clean_text.is_empty() {
+    // A card-button click (Action.Submit) arrives as a message Activity with a
+    // non-empty `value` object — surface it as an Interaction (checked before
+    // text/media; a Submit carries no text/attachments).
+    let content = if let Some(value) = activity
+        .value
+        .as_ref()
+        .filter(|v| v.as_object().is_some_and(|o| !o.is_empty()))
+    {
+        let message_ts = activity.reply_to_id.clone().or_else(|| {
+            if activity.id.is_empty() {
                 None
             } else {
-                Some(clean_text)
-            },
-            attachments: media,
+                Some(activity.id.clone())
+            }
+        });
+        value_to_interaction(value, message_ts)
+    } else {
+        // Build media attachments from inbound file/image attachments.
+        let media: Vec<crate::Attachment> = activity
+            .attachments
+            .as_deref()
+            .unwrap_or(&[])
+            .iter()
+            .filter_map(|att| attachment_to_media(att, media_bot_token))
+            .collect();
+
+        if media.is_empty() {
+            crate::MessageContent::Text(clean_text)
+        } else {
+            crate::MessageContent::Media {
+                text: if clean_text.is_empty() {
+                    None
+                } else {
+                    Some(clean_text)
+                },
+                attachments: media,
+            }
         }
     };
 
@@ -2203,6 +2264,71 @@ vIyJeH8/89a9IXZXlMIA9KH9
         let act = media_activity(serde_json::json!([]), "just text");
         let msg = activity_to_inbound(&act, "teams", None).expect("inbound");
         assert!(matches!(msg.content, crate::MessageContent::Text(ref t) if t == "just text"));
+    }
+
+    fn submit_activity(value: serde_json::Value) -> Activity {
+        let raw = serde_json::json!({
+            "type": "message",
+            "id": "click-1",
+            "from": { "id": "user-1", "name": "Alice" },
+            "conversation": { "id": "conv-1", "conversationType": "personal" },
+            "serviceUrl": "https://smba.trafficmanager.net/emea/",
+            "recipient": { "id": "bot-1", "name": "Bot" },
+            "replyToId": "card-act-9",
+            "value": value
+        });
+        serde_json::from_value(raw).expect("activity parses")
+    }
+
+    #[test]
+    fn value_to_interaction_extracts_action_id_label_and_values() {
+        let v =
+            serde_json::json!({ "action_id": "approve", "label": "Approve", "comment": "lgtm" });
+        let c = value_to_interaction(&v, Some("card-act-9".into()));
+        match c {
+            crate::MessageContent::Interaction {
+                action_id,
+                block_id,
+                values,
+                label,
+                message_ts,
+            } => {
+                assert_eq!(action_id, "approve");
+                assert_eq!(label.as_deref(), Some("Approve"));
+                assert!(block_id.is_none());
+                assert_eq!(message_ts.as_deref(), Some("card-act-9"));
+                assert_eq!(values, vec!["lgtm".to_string()]); // extra string field
+            }
+            other => panic!("expected Interaction, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn activity_to_inbound_action_submit_becomes_interaction() {
+        let act = submit_activity(serde_json::json!({ "action_id": "reject", "label": "Reject" }));
+        let msg = activity_to_inbound(&act, "teams", None).expect("inbound");
+        match msg.content {
+            crate::MessageContent::Interaction {
+                action_id,
+                message_ts,
+                values,
+                ..
+            } => {
+                assert_eq!(action_id, "reject");
+                assert_eq!(message_ts.as_deref(), Some("card-act-9")); // replyToId
+                assert!(values.is_empty()); // plain button, no extra fields
+            }
+            other => panic!("expected Interaction, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn activity_to_inbound_empty_value_is_not_interaction() {
+        // A normal message with an empty/object-less value must stay Text.
+        let mut act = submit_activity(serde_json::json!({}));
+        act.text = Some("hello".into());
+        let msg = activity_to_inbound(&act, "teams", None).expect("inbound");
+        assert!(matches!(msg.content, crate::MessageContent::Text(ref t) if t == "hello"));
     }
 
     // -----------------------------------------------------------------------
