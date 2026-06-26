@@ -729,6 +729,57 @@ fn is_allowed_service_url(url: &str) -> bool {
     host.ends_with(".botframework.com") || host.ends_with(".trafficmanager.net")
 }
 
+/// Build the Bot Connector "send activity" URL for a conversation.
+fn activities_url(service_url: &str, bare_conv_id: &str) -> String {
+    format!(
+        "{}/v3/conversations/{}/activities",
+        service_url.trim_end_matches('/'),
+        bare_conv_id,
+    )
+}
+
+/// Strip the `"<runtime_key>:"` prefix from a routing key to recover the bare
+/// Microsoft conversation id. Inner colons in the MS id are preserved.
+fn strip_runtime_prefix<'a>(routing_key: &'a str, runtime_key: &str) -> &'a str {
+    routing_key
+        .strip_prefix(&format!("{runtime_key}:"))
+        .unwrap_or(routing_key)
+}
+
+/// POST a fully-formed activity body to the Bot Connector.
+///
+/// `service_url` MUST already be SSRF-validated by the caller
+/// (`resolve_service_url`). This is a free fn so the typing-refresh task can
+/// call it from a `'static` context with cloned `Arc`s.
+async fn post_activity(
+    http: &Client,
+    token: &TeamsTokenProvider,
+    service_url: &str,
+    bare_conv_id: &str,
+    body: &serde_json::Value,
+) -> crate::Result<()> {
+    let url = activities_url(service_url, bare_conv_id);
+    let bearer = token.bearer().await.map_err(mark_classified_broadcast)?;
+    let resp = http
+        .post(&url)
+        .bearer_auth(&bearer)
+        .json(body)
+        .send()
+        .await
+        .map_err(|e| mark_classified_broadcast(anyhow::anyhow!("teams send HTTP error: {e}")))?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body_text = resp
+            .text()
+            .await
+            .unwrap_or_else(|_| "<unreadable>".to_owned());
+        return Err(mark_classified_broadcast(anyhow::anyhow!(
+            "teams send: Bot Connector returned {status}: {body_text}"
+        )));
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Sidecar persistence helpers
 // ---------------------------------------------------------------------------
@@ -862,6 +913,62 @@ impl TeamsAdapter {
         self.sidecar_path = Some(path);
         self
     }
+
+    /// Resolve and SSRF-validate the serviceUrl for an outbound send.
+    ///
+    /// Prefers the `inline` hint (the inbound activity's captured serviceUrl);
+    /// otherwise looks up `service_urls[routing_key]`. Returns a permanent
+    /// error if missing or blocked by the SSRF guard.
+    async fn resolve_service_url(
+        &self,
+        routing_key: &str,
+        inline: Option<&str>,
+    ) -> crate::Result<String> {
+        let service_url = match inline {
+            Some(u) => u.to_string(),
+            None => {
+                let urls = self.service_urls.lock().await;
+                match urls.get(routing_key).cloned() {
+                    Some(u) => u,
+                    None => {
+                        return Err(mark_permanent_broadcast(anyhow::anyhow!(
+                            "teams send: no serviceUrl for routing key {routing_key}"
+                        )));
+                    }
+                }
+            }
+        };
+        if !is_allowed_service_url(&service_url) {
+            return Err(mark_permanent_broadcast(anyhow::anyhow!(
+                "teams send: serviceUrl blocked by SSRF guard: {service_url}"
+            )));
+        }
+        Ok(service_url)
+    }
+
+    /// Resolve the serviceUrl, send `body`, and persist the sidecar.
+    async fn send_activity(
+        &self,
+        routing_key: &str,
+        inline: Option<&str>,
+        body: serde_json::Value,
+    ) -> crate::Result<()> {
+        let service_url = self.resolve_service_url(routing_key, inline).await?;
+        let bare_conv_id = strip_runtime_prefix(routing_key, &self.runtime_key);
+        post_activity(
+            &self.http_client,
+            &self.token,
+            &service_url,
+            bare_conv_id,
+            &body,
+        )
+        .await?;
+        if let Some(ref path) = self.sidecar_path {
+            let urls = self.service_urls.lock().await;
+            save_service_urls(&urls, path);
+        }
+        Ok(())
+    }
 }
 
 /// Build a `TeamsAdapter` with the sidecar path set to
@@ -972,7 +1079,8 @@ impl Messaging for TeamsAdapter {
             OutboundResponse::Ephemeral { text, .. } => text,
             OutboundResponse::RichMessage { text, .. } => text,
             OutboundResponse::ScheduledMessage { text, .. } => text,
-            // Silent no-ops for unsupported variants.
+            // Silent no-ops for unsupported variants. (Status is delivered via
+            // send_status, not respond — see the Messaging trait routing.)
             OutboundResponse::Reaction(_)
             | OutboundResponse::RemoveReaction(_)
             | OutboundResponse::Status(_)
@@ -982,106 +1090,23 @@ impl Messaging for TeamsAdapter {
             | OutboundResponse::File { .. } => return Ok(()),
         };
 
-        // Resolve serviceUrl.
-        let service_url = message
+        let inline = message
             .metadata
             .get("teams_service_url")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
+            .and_then(|v| v.as_str());
 
-        // If not found in metadata, look up from the map.
-        let service_url = match service_url {
-            Some(u) => u,
-            None => {
-                let urls = self.service_urls.lock().await;
-                match urls.get(&message.conversation_id).cloned() {
-                    Some(u) => u,
-                    None => {
-                        return Err(mark_permanent_broadcast(anyhow::anyhow!(
-                            "teams respond: no serviceUrl for conversation_id {}",
-                            message.conversation_id
-                        )));
-                    }
-                }
-            }
-        };
-
-        // SSRF guard — reject non-allowlisted serviceUrls.
-        if !is_allowed_service_url(&service_url) {
-            return Err(mark_permanent_broadcast(anyhow::anyhow!(
-                "teams respond: serviceUrl blocked by SSRF guard: {service_url}"
-            )));
-        }
-
-        // Strip the platform prefix to get the bare MS conversation id.
-        let bare_conv_id = message
-            .conversation_id
-            .strip_prefix(&format!("{}:", self.runtime_key))
-            .unwrap_or(&message.conversation_id)
-            .to_string();
-
-        // Build the reply-to id if present.
         let reply_to_id = message
             .metadata
             .get("teams_reply_to_id")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
+            .and_then(|v| v.as_str());
 
-        // Build the JSON body.
-        let body = if let Some(ref reply_to) = reply_to_id {
-            serde_json::json!({
-                "type": "message",
-                "text": text,
-                "replyToId": reply_to,
-            })
-        } else {
-            serde_json::json!({
-                "type": "message",
-                "text": text,
-            })
-        };
-
-        let url = format!(
-            "{}/v3/conversations/{}/activities",
-            service_url.trim_end_matches('/'),
-            bare_conv_id,
-        );
-
-        let token = self
-            .token
-            .bearer()
-            .await
-            .map_err(mark_classified_broadcast)?;
-
-        let resp = self
-            .http_client
-            .post(&url)
-            .bearer_auth(&token)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| {
-                mark_classified_broadcast(anyhow::anyhow!("teams respond HTTP error: {e}"))
-            })?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body_text = resp
-                .text()
-                .await
-                .unwrap_or_else(|_| "<unreadable>".to_owned());
-            return Err(mark_classified_broadcast(anyhow::anyhow!(
-                "teams respond: Bot Connector returned {status}: {body_text}"
-            )));
+        let mut body = serde_json::json!({ "type": "message", "text": text });
+        if let Some(reply_to) = reply_to_id {
+            body["replyToId"] = serde_json::json!(reply_to);
         }
 
-        // Persist updated service_urls if sidecar is configured.
-        if let Some(ref path) = self.sidecar_path {
-            let urls = self.service_urls.lock().await;
-            save_service_urls(&urls, path);
-        }
-
-        Ok(())
+        self.send_activity(&message.conversation_id, inline, body)
+            .await
     }
 
     async fn broadcast(&self, target: &str, response: OutboundResponse) -> crate::Result<()> {
@@ -1092,83 +1117,11 @@ impl Messaging for TeamsAdapter {
         ensure_supported_broadcast_response("teams", &response, is_supported)?;
 
         let OutboundResponse::Text(text) = response else {
-            // Already handled by ensure_supported_broadcast_response above,
-            // but the compiler needs this to be exhaustive.
             unreachable!()
         };
 
-        // Look up serviceUrl — the full `target` string is the map key.
-        let service_url = {
-            let urls = self.service_urls.lock().await;
-            match urls.get(target).cloned() {
-                Some(u) => u,
-                None => {
-                    return Err(mark_permanent_broadcast(anyhow::anyhow!(
-                        "teams broadcast: no serviceUrl for target {target}"
-                    )));
-                }
-            }
-        };
-
-        // SSRF guard.
-        if !is_allowed_service_url(&service_url) {
-            return Err(mark_permanent_broadcast(anyhow::anyhow!(
-                "teams broadcast: serviceUrl blocked by SSRF guard: {service_url}"
-            )));
-        }
-
-        // Strip the platform prefix to get the bare MS conversation id.
-        let bare_conv_id = target
-            .strip_prefix(&format!("{}:", self.runtime_key))
-            .unwrap_or(target)
-            .to_string();
-
-        let body = serde_json::json!({
-            "type": "message",
-            "text": text,
-        });
-
-        let url = format!(
-            "{}/v3/conversations/{}/activities",
-            service_url.trim_end_matches('/'),
-            bare_conv_id,
-        );
-
-        let token = self
-            .token
-            .bearer()
-            .await
-            .map_err(mark_classified_broadcast)?;
-
-        let resp = self
-            .http_client
-            .post(&url)
-            .bearer_auth(&token)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| {
-                mark_classified_broadcast(anyhow::anyhow!("teams broadcast HTTP error: {e}"))
-            })?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body_text = resp
-                .text()
-                .await
-                .unwrap_or_else(|_| "<unreadable>".to_owned());
-            return Err(mark_classified_broadcast(anyhow::anyhow!(
-                "teams broadcast: Bot Connector returned {status}: {body_text}"
-            )));
-        }
-
-        // Persist updated service_urls if sidecar is configured.
-        if let Some(ref path) = self.sidecar_path {
-            let urls = self.service_urls.lock().await;
-            save_service_urls(&urls, path);
-        }
-
-        Ok(())
+        let body = serde_json::json!({ "type": "message", "text": text });
+        self.send_activity(target, None, body).await
     }
 
     async fn health_check(&self) -> crate::Result<()> {
@@ -2108,5 +2061,33 @@ vIyJeH8/89a9IXZXlMIA9KH9
             rewritten, "teams:prod:conv-abc",
             "named instance should produce teams:prod:conv-abc, not teams:conv-abc"
         );
+    }
+
+    #[test]
+    fn activities_url_builds_expected_path() {
+        assert_eq!(
+            activities_url("https://smba.trafficmanager.net/emea/", "conv:abc"),
+            "https://smba.trafficmanager.net/emea/v3/conversations/conv:abc/activities"
+        );
+        // Trailing slash is trimmed exactly once.
+        assert_eq!(
+            activities_url("https://x.botframework.com", "c1"),
+            "https://x.botframework.com/v3/conversations/c1/activities"
+        );
+    }
+
+    #[test]
+    fn strip_runtime_prefix_default_named_and_inner_colons() {
+        assert_eq!(strip_runtime_prefix("teams:conv-abc", "teams"), "conv-abc");
+        assert_eq!(
+            strip_runtime_prefix("teams:prod:conv-abc", "teams:prod"),
+            "conv-abc"
+        );
+        assert_eq!(
+            strip_runtime_prefix("teams:conv:abc:def", "teams"),
+            "conv:abc:def"
+        );
+        // No prefix match → returned unchanged.
+        assert_eq!(strip_runtime_prefix("conv-abc", "teams"), "conv-abc");
     }
 }
