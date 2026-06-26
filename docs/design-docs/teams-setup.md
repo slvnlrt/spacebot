@@ -338,7 +338,8 @@ In Microsoft Teams, find the bot by name (via the app you installed), open a cha
 
 **⚠️ DMs are fail-closed.** In v1 the bot **silently ignores** DMs from any user not listed in `dm_allowed_users` (an empty list = all DMs denied). You need the sender's Teams **MRI** (a `29:…` string), which you don't know up front. Two ways:
 - **Easiest — @mention in a channel instead.** Channel messages are *not* gated by `dm_allowed_users` (the channel path is open), so adding the bot to a team and `@mentioning` it gives an immediate round-trip without any allowlist.
-- **To enable DMs:** send the bot a DM once (it'll be dropped), then read the spacebot log — the drop is logged at debug as `Teams inbound message dropped by permission filter sender_id="29:…"`. Copy that `29:…` value into `dm_allowed_users`, restart, and DM again. (Run with `--debug` to see the line.)
+- **To enable DMs for specific users:** send the bot a DM once (it'll be dropped), then read the spacebot log — the drop is logged at debug as `Teams inbound message dropped by permission filter sender_id="29:…"`. Copy that `29:…` value into `dm_allowed_users`, restart, and DM again. (Run with `--debug` to see the line.)
+- **To allow DMs from everyone (enterprise-scale):** set `dm_allowed_users = ["*"]`. The `"*"` wildcard accepts any DM sender — use it when allowlisting users one-by-one isn't practical (e.g. an org-wide deployment). An **empty** list still blocks all DMs (it is not an implicit allow-all), so `["*"]` is the explicit opt-in.
 
 ### 3. @mention in a channel
 

@@ -632,10 +632,14 @@ impl TeamsPermissions {
     ) -> bool {
         if conversation_type == Some("personal") {
             // DM path — fail-closed: block when list is empty or sender absent.
+            // A `"*"` entry is an explicit allow-all-DMs wildcard (mirrors
+            // Signal); an empty list still blocks every DM.
             if self.dm_allowed_users.is_empty() {
                 return false;
             }
-            self.dm_allowed_users.iter().any(|u| u == sender_id)
+            self.dm_allowed_users
+                .iter()
+                .any(|u| u == "*" || u == sender_id)
         } else {
             // Channel / groupChat path.
             match &self.channel_filter {
@@ -744,6 +748,46 @@ mod teams_permissions_tests {
         assert!(
             perms.channel_filter.is_none(),
             "channel_filter should be None when no bindings specify channel IDs"
+        );
+    }
+
+    /// A `"*"` DM wildcard allows any DM sender (mirrors Signal), while an
+    /// empty list still blocks all DMs and a specific list stays exact-match.
+    #[test]
+    fn dm_wildcard_allows_any_sender() {
+        let wildcard = TeamsPermissions {
+            channel_filter: None,
+            dm_allowed_users: vec!["*".to_string()],
+        };
+        assert!(
+            wildcard.is_allowed(Some("personal"), "anyone-at-all", ""),
+            "\"*\" wildcard must allow an arbitrary DM sender"
+        );
+        assert!(
+            wildcard.is_allowed(Some("personal"), "29:another-random-mri", ""),
+            "\"*\" wildcard must allow a second arbitrary DM sender"
+        );
+
+        let empty = TeamsPermissions {
+            channel_filter: None,
+            dm_allowed_users: vec![],
+        };
+        assert!(
+            !empty.is_allowed(Some("personal"), "anyone", ""),
+            "empty dm_allowed_users must still block all DMs (no implicit wildcard)"
+        );
+
+        let specific = TeamsPermissions {
+            channel_filter: None,
+            dm_allowed_users: vec!["user-aad-123".to_string()],
+        };
+        assert!(
+            specific.is_allowed(Some("personal"), "user-aad-123", ""),
+            "a specifically-listed user is still allowed"
+        );
+        assert!(
+            !specific.is_allowed(Some("personal"), "someone-else", ""),
+            "a non-listed user is still denied when there is no wildcard"
         );
     }
 
