@@ -139,6 +139,12 @@ Because `Interaction` is flattened to its `Display` string before the LLM (fact 
 - Streaming is genuinely hard (cumulative text, throttle, personal-only) and low ROI for an agent that posts whole messages — consider deferring indefinitely.
 - `RichMessage` from the agent carries Slack `blocks` AND Discord `cards`; Teams should consume `cards` and fall back to `text`, ignoring `blocks` (mirror how each adapter ignores the other's payload — `slack.rs:1025`, `discord.rs`).
 
+### Permissions at scale — allow-all DMs (`"*"` wildcard)
+
+At enterprise/Discord scale you can't allowlist DM users one by one. **Channels are already open** (`TeamsPermissions::is_allowed` channel branch: `channel_filter None → true`, `permissions.rs:~639`), so team/channel @mentions work for everyone with no per-user list. **DMs are the gap:** the DM branch (`permissions.rs:635-638`) is exact-match only and does NOT honor a `"*"` wildcard, so there's no "allow all DMs" — and `dm_allowed_users = ["*"]` silently denies all (footgun).
+- **v2 (Teams):** add `"*"` support to the `is_allowed` DM branch (`dm_users.iter().any(|id| id == "*")`), mirroring **Signal** (the only adapter that already does this — `permissions.rs:427`). Small: one condition + a test + a `teams-setup.md` note removing the footgun.
+- **⚠️ Upstream PR (cross-adapter alignment, code-only):** only **Signal** honors the `"*"` DM/group wildcard; **Slack** (`types.rs:1807`), **Discord/Telegram/Twitch/Mattermost** and **Teams** all use exact-match. This is a pre-existing inconsistency in the *existing* adapters — worth a dedicated upstream PR to align them all on Signal's documented `["*"]` = allow-all convention (off `main`, code-only, no Teams/surreal coupling).
+
 ---
 
 # v3 — Human-in-the-loop approval via Adaptive Cards
