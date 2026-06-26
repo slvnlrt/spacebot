@@ -846,6 +846,11 @@ fn build_message_body(
     body
 }
 
+/// A bare Bot Framework typing activity (auto-expires after a few seconds).
+fn typing_activity_body() -> serde_json::Value {
+    serde_json::json!({ "type": "typing" })
+}
+
 /// Strip the `"<runtime_key>:"` prefix from a routing key to recover the bare
 /// Microsoft conversation id. Inner colons in the MS id are preserved.
 fn strip_runtime_prefix<'a>(routing_key: &'a str, runtime_key: &str) -> &'a str {
@@ -925,7 +930,7 @@ use crate::messaging::traits::{
     InboundStream, Messaging, ensure_supported_broadcast_response, mark_classified_broadcast,
     mark_permanent_broadcast,
 };
-use crate::{InboundMessage, OutboundResponse};
+use crate::{InboundMessage, OutboundResponse, StatusUpdate};
 
 /// Shared state injected into axum handlers.
 #[derive(Clone)]
@@ -967,6 +972,9 @@ pub struct TeamsAdapter {
     http_client: Client,
     /// Optional path for sidecar persistence of service_urls.
     sidecar_path: Option<PathBuf>,
+    /// Active typing-refresh tasks, keyed by `conversation_id`. Each loops
+    /// re-sending a `typing` activity until aborted by `stop_typing`.
+    typing_tasks: Arc<RwLock<HashMap<String, tokio::task::JoinHandle<()>>>>,
 }
 
 impl TeamsAdapter {
@@ -1010,6 +1018,7 @@ impl TeamsAdapter {
             permissions,
             http_client,
             sidecar_path: None,
+            typing_tasks: Arc::new(RwLock::new(HashMap::new())),
         })
     }
 
@@ -1076,6 +1085,13 @@ impl TeamsAdapter {
             save_service_urls(&urls, path);
         }
         Ok(())
+    }
+
+    /// Abort and drop the typing-refresh task for a conversation, if any.
+    async fn stop_typing(&self, conversation_id: &str) {
+        if let Some(handle) = self.typing_tasks.write().await.remove(conversation_id) {
+            handle.abort();
+        }
     }
 }
 
@@ -1217,6 +1233,62 @@ impl Messaging for TeamsAdapter {
         let body = build_message_body(&text, &attachments, reply_to_id);
         self.send_activity(&message.conversation_id, inline, body)
             .await
+    }
+
+    async fn send_status(
+        &self,
+        message: &InboundMessage,
+        status: StatusUpdate,
+    ) -> crate::Result<()> {
+        let conversation_id = message.conversation_id.clone();
+        match status {
+            StatusUpdate::Thinking => {
+                let inline = message
+                    .metadata
+                    .get("teams_service_url")
+                    .and_then(|v| v.as_str());
+                // Resolve once up front; a miss/blocked URL is non-fatal for typing.
+                let service_url = match self.resolve_service_url(&conversation_id, inline).await {
+                    Ok(u) => u,
+                    Err(error) => {
+                        tracing::debug!(%error, "teams typing: no serviceUrl; skipping");
+                        return Ok(());
+                    }
+                };
+                let bare_conv_id =
+                    strip_runtime_prefix(&conversation_id, &self.runtime_key).to_string();
+                let http = self.http_client.clone();
+                let token = self.token.clone();
+
+                let handle = tokio::spawn(async move {
+                    let body = typing_activity_body();
+                    loop {
+                        if let Err(error) =
+                            post_activity(&http, &token, &service_url, &bare_conv_id, &body).await
+                        {
+                            tracing::debug!(%error, "teams typing send failed; stopping loop");
+                            break;
+                        }
+                        // Teams typing expires after a few seconds — refresh.
+                        tokio::time::sleep(Duration::from_secs(2)).await;
+                    }
+                });
+
+                // Replace any prior task for this conversation.
+                if let Some(old) = self
+                    .typing_tasks
+                    .write()
+                    .await
+                    .insert(conversation_id, handle)
+                {
+                    old.abort();
+                }
+            }
+            // Teams has no richer status surface in v2a — any non-Thinking
+            // status clears typing.
+            _ => self.stop_typing(&conversation_id).await,
+        }
+        Ok(())
     }
 
     async fn broadcast(&self, target: &str, response: OutboundResponse) -> crate::Result<()> {
@@ -2365,6 +2437,36 @@ vIyJeH8/89a9IXZXlMIA9KH9
             atts[0]["content"]["$schema"],
             "http://adaptivecards.io/schemas/adaptive-card.json"
         );
+    }
+
+    #[test]
+    fn typing_activity_body_is_typing_type() {
+        let b = typing_activity_body();
+        assert_eq!(b["type"], "typing");
+        // No text field — a bare typing activity.
+        assert!(b.get("text").is_none());
+    }
+
+    #[tokio::test]
+    async fn stop_typing_removes_and_aborts_the_task() {
+        let perms = std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(
+            crate::config::TeamsPermissions::default(),
+        ));
+        let adapter = TeamsAdapter::new("teams", "app", "secret", "tenant", 0, "127.0.0.1", perms)
+            .expect("adapter");
+        // Insert a long-lived dummy task under a conversation key.
+        let handle = tokio::spawn(async { tokio::time::sleep(Duration::from_secs(60)).await });
+        adapter
+            .typing_tasks
+            .write()
+            .await
+            .insert("teams:conv-1".to_string(), handle);
+        assert_eq!(adapter.typing_tasks.read().await.len(), 1);
+        adapter.stop_typing("teams:conv-1").await;
+        assert!(adapter.typing_tasks.read().await.is_empty());
+        // Stopping an unknown conversation is a no-op.
+        adapter.stop_typing("teams:unknown").await;
+        assert!(adapter.typing_tasks.read().await.is_empty());
     }
 
     #[test]
