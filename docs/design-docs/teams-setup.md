@@ -2,7 +2,9 @@
 
 Connect a spacebot agent to Microsoft Teams via the Azure Bot Service / Bot Framework.
 
-**Time estimate:** 20–30 minutes.
+> **Battle-tested:** this guide was walked end-to-end against a live tenant on 2026-06-26 (real Azure Bot + sideloaded app + a real DM round-trip). The ⚠️ callouts are the actual snags hit along the way.
+
+**Time estimate:** 30–45 minutes (more if you're creating an Azure subscription for the first time).
 
 **Prerequisites:**
 
@@ -57,7 +59,8 @@ The Azure Bot resource registers the messaging endpoint with the Bot Connector s
 
 2. Fill in:
    - **Bot handle:** unique name (alphanumeric + hyphens).
-   - **Subscription / Resource group:** as appropriate.
+   - **Subscription / Resource group:** as appropriate. **⚠️ A Microsoft 365 tenant does NOT come with an Azure subscription** — Azure billing is separate. If you have none, the create blade can't proceed: go to **Subscriptions → + Add → Pay-As-You-Go** first (the subscription itself is free; a card is required for identity verification but isn't charged on free tiers).
+   - **Pricing tier:** click **Change plan** and select **F0 (Free)**. The default is often **S1 (paid)**. **F0 covers standard channels — including Teams — with unlimited messages, at $0.** Verify the estimated cost shows 0; avoid S1.
    - **Microsoft App ID:** select **Use existing app registration** and paste the Application (client) ID from Step 1.
    - **App type:** **Single Tenant** (matching the app registration above).
    - **App Tenant ID:** paste the Directory (tenant) ID from Step 1.
@@ -94,77 +97,105 @@ my-teams-bot/
 └── icon-outline.png    (32×32 px, transparent PNG with white/transparent icon)
 ```
 
-#### Minimal `manifest.json`
+#### Minimal `manifest.json` (battle-tested)
 
 ```json
 {
-  "$schema": "https://developer.microsoft.com/json-schemas/teams/v1.29/MicrosoftTeams.schema.json",
-  "manifestVersion": "1.29",
+  "$schema": "https://developer.microsoft.com/en-us/json-schemas/teams/v1.17/MicrosoftTeams.schema.json",
+  "manifestVersion": "1.17",
   "version": "1.0.0",
-  "id": "<YOUR-APP-ID-UUID>",
-  "packageName": "com.example.myspacebot",
-  "name": {
-    "short": "My Spacebot",
-    "full": "My Spacebot — AI assistant"
-  },
-  "description": {
-    "short": "AI bot powered by spacebot.",
-    "full": "An AI assistant powered by spacebot, connected to Microsoft Teams."
-  },
-  "icons": {
-    "color": "icon-color.png",
-    "outline": "icon-outline.png"
-  },
+  "id": "<APP-MANIFEST-GUID>",
   "developer": {
-    "name": "Your Name / Org",
+    "name": "Your Org",
     "websiteUrl": "https://example.com",
     "privacyUrl": "https://example.com/privacy",
     "termsOfUseUrl": "https://example.com/terms"
   },
+  "icons": { "color": "icon-color.png", "outline": "icon-outline.png" },
+  "name": { "short": "My Spacebot", "full": "My Spacebot — AI assistant" },
+  "description": {
+    "short": "AI bot powered by spacebot.",
+    "full": "An AI assistant powered by spacebot, connected to Microsoft Teams."
+  },
+  "accentColor": "#6264A7",
   "bots": [
     {
-      "botId": "<YOUR-APP-ID-UUID>",
-      "scopes": ["personal", "team", "groupChat"]
+      "botId": "<YOUR-APP-ID>",
+      "scopes": ["personal", "team", "groupchat"],
+      "supportsFiles": false,
+      "isNotificationOnly": false
     }
-  ]
+  ],
+  "validDomains": []
 }
 ```
 
-- Replace `<YOUR-APP-ID-UUID>` (both `id` and `bots[0].botId`) with the **Application (client) ID** from Step 1.
-- `scopes`: `personal` = DMs; `team` = channel @mentions; `groupChat` = group chat messages.
+> **⚠️ Gotchas that will reject your manifest (learned the hard way — validated 2026-06-26):**
+> - **`id` ≠ `botId`.** `id` is the Teams *app* id and must be **its own plain GUID** (generate a fresh one). `bots[0].botId` is your **App (client) ID** from Step 1. Reusing the App ID as `id` gets rejected: *"The manifest product ID could not be parsed. The ID must be a plain GUID."*
+> - **No `packageName`.** Manifest schema 1.17 rejects it: *"Property 'packageName' has not been defined and the schema does not allow additional properties."* (Older docs show it — drop it.)
+> - **`manifestVersion: "1.17"`** works reliably. `1.29` is not a valid manifest value. Confirm at [manifest schema docs](https://learn.microsoft.com/en-us/microsoftteams/platform/resources/schema/manifest-schema).
+> - **`scopes`**: `personal` = DMs, `team` = channel @mentions, `groupchat` = group chats (lowercase).
+> - `accentColor` and `validDomains` are required by the schema.
 
-> **Schema version note:** The example uses schema version `1.29` (current as of June 2026). Verify the latest version at [learn.microsoft.com/microsoftteams/platform/resources/schema/manifest-schema](https://learn.microsoft.com/en-us/microsoftteams/platform/resources/schema/manifest-schema) before packaging.
+#### Easiest: generate the package with a script
 
-#### Zip the package
+Hand-crafting icons + zip is fiddly (Teams validates icon dimensions, and the zip must have the three files at the **root**). This Python script (stdlib only — no PIL/imagemagick/zip needed) emits a valid package. Set your two GUIDs and run it:
 
-```sh
-cd my-teams-bot
-zip -r ../my-teams-bot.zip .
+```python
+import zlib, struct, json, zipfile, os, uuid
+APP_ID   = "<YOUR-APP-ID>"            # from Step 1 (bots[].botId)
+APP_GUID = str(uuid.uuid4())          # distinct Teams app id
+def png(w, h, px):
+    raw = bytearray()
+    for y in range(h):
+        raw.append(0)
+        for x in range(w): raw += bytes(px(x, y))
+    def chunk(t, d): return struct.pack(">I", len(d)) + t + d + struct.pack(">I", zlib.crc32(t + d) & 0xffffffff)
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 6, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(bytes(raw), 9)) + chunk(b"IEND", b""))
+color   = png(192, 192, lambda x, y: (98, 100, 167, 255))
+outline = png(32, 32, lambda x, y: (255, 255, 255, 255) if 6 <= x < 26 and 6 <= y < 26 else (0, 0, 0, 0))
+manifest = {
+    "$schema": "https://developer.microsoft.com/en-us/json-schemas/teams/v1.17/MicrosoftTeams.schema.json",
+    "manifestVersion": "1.17", "version": "1.0.0", "id": APP_GUID,
+    "developer": {"name": "Your Org", "websiteUrl": "https://example.com",
+                  "privacyUrl": "https://example.com/privacy", "termsOfUseUrl": "https://example.com/terms"},
+    "icons": {"color": "icon-color.png", "outline": "icon-outline.png"},
+    "name": {"short": "My Spacebot", "full": "My Spacebot — AI assistant"},
+    "description": {"short": "AI bot powered by spacebot.", "full": "AI assistant powered by spacebot."},
+    "accentColor": "#6264A7",
+    "bots": [{"botId": APP_ID, "scopes": ["personal", "team", "groupchat"],
+              "supportsFiles": False, "isNotificationOnly": False}],
+    "validDomains": [],
+}
+os.makedirs("pkg", exist_ok=True)
+open("pkg/icon-color.png", "wb").write(color)
+open("pkg/icon-outline.png", "wb").write(outline)
+open("pkg/manifest.json", "w").write(json.dumps(manifest, indent=2))
+with zipfile.ZipFile("teams-app.zip", "w", zipfile.ZIP_DEFLATED) as z:
+    for f in ("manifest.json", "icon-color.png", "icon-outline.png"): z.write(f"pkg/{f}", f)
+print("wrote teams-app.zip (app id", APP_GUID, "/ botId", APP_ID + ")")
 ```
 
-The zip file must contain `manifest.json` at the root (not inside a subdirectory).
+The resulting `teams-app.zip` has `manifest.json` + both icons at the root, ready to upload.
 
-### Upload to Teams (sideloading)
+### (Optional) Validate the manifest first
 
-For a private/internal bot without publishing to the Teams Store:
+If upload fails with an opaque error, import the zip into the [Teams Developer Portal](https://dev.teams.microsoft.com) (**Apps → Import app**) — it reports **specific** schema errors (this is how the `packageName`/`id` gotchas above were found). Fix and re-zip until it imports cleanly. (You don't have to *install* from here.)
 
-**Enable sideloading (admin, one-time):**
+### Install the app (the path that works — validated 2026-06-26)
 
-1. Sign in to the [Teams admin center](https://admin.teams.microsoft.com/).
-2. Go to **Teams apps** → **Setup Policies** → **Global**.
-3. Toggle **Upload custom apps** → **On** → **Save**.
-4. Go to **Teams apps** → **Manage apps** → **Actions** → **Org-wide app settings** → enable **Let users interact with custom apps in preview**.
+**1. Enable custom-app upload (admin, one-time):** [Teams admin center](https://admin.teams.microsoft.com/) → **Teams apps → Setup policies → Global** → **Upload custom apps = On** → Save. (Policy changes can take a few minutes to propagate.)
 
-   > Allow up to 24 hours for the policy change to propagate.
+**2. Upload via Teams:** in the Teams client → **Apps → Manage your apps → Upload an app → Upload a custom app** → select your `teams-app.zip`.
 
-**Upload the package:**
+**3. Approve + restrict (admin):** the upload typically triggers **"this app needs admin approval"** / *"Permissions needed — ask your IT admin to add ..."*. As admin:
+   - [Teams admin center](https://admin.teams.microsoft.com/) → **Teams apps → Manage apps** → find your app → **Allow** it (status must not be *Blocked*).
+   - In the same place (or **Permission policies**), **restrict who can install it**. For a private/internal bot, scope it to **specific users** (e.g. just yourself) so it is **not** exposed org-wide. This keeps the bot invisible to everyone except the users you allow.
 
-In Microsoft Teams (desktop or web):
-1. Go to **Apps** (left sidebar) → **Manage your apps** → **Upload an app** → **Upload a custom app**.
-2. Select `my-teams-bot.zip`.
-3. Confirm the install dialog.
+   > Allow a few minutes for the approval/restriction to propagate, then retry **Add** in Teams.
 
-For organization-wide rollout, upload via **Teams admin center** → **Teams apps** → **Manage apps** → **Upload new app** instead of per-user sideloading.
+**Alternatives:** the **Developer Portal → Preview in Teams** can install it directly for the signed-in account (no admin-center round-trip), but it installs for *that* account — make sure it's the account you'll test from. For org-wide rollout, upload via **Manage apps → Upload new app** and publish.
 
 ---
 
@@ -303,9 +334,11 @@ This confirms the proxy is correctly forwarding to spacebot's listener.
 
 ### 2. DM the bot
 
-In Microsoft Teams, find the bot by name (via the app you sideloaded), open a chat, and send a message. If the bot responds, the full end-to-end path (Teams → Azure Bot Service → HTTPS endpoint → spacebot → Azure Bot Service → Teams) is working.
+In Microsoft Teams, find the bot by name (via the app you installed), open a chat, and send a message. If the bot responds, the full end-to-end path (Teams → Azure Bot Service → HTTPS endpoint → spacebot → Azure Bot Service → Teams) is working.
 
-Note: the user's Teams object ID must be in `dm_allowed_users` (or the list may be empty to deny all DMs — in v1 the bot ignores DMs from users not in that list).
+**⚠️ DMs are fail-closed.** In v1 the bot **silently ignores** DMs from any user not listed in `dm_allowed_users` (an empty list = all DMs denied). You need the sender's Teams **MRI** (a `29:…` string), which you don't know up front. Two ways:
+- **Easiest — @mention in a channel instead.** Channel messages are *not* gated by `dm_allowed_users` (the channel path is open), so adding the bot to a team and `@mentioning` it gives an immediate round-trip without any allowlist.
+- **To enable DMs:** send the bot a DM once (it'll be dropped), then read the spacebot log — the drop is logged at debug as `Teams inbound message dropped by permission filter sender_id="29:…"`. Copy that `29:…` value into `dm_allowed_users`, restart, and DM again. (Run with `--debug` to see the line.)
 
 ### 3. @mention in a channel
 
@@ -334,3 +367,16 @@ The following are not supported in the current Teams adapter — text messages a
 - **Reverse proxy:** spacebot's listener is plain HTTP and should never be exposed directly to the internet. Bind it to `127.0.0.1` if your proxy is on the same host, or to a private network interface if it is not, and let the proxy handle TLS termination.
 
 - **Rotate secrets:** Azure AD client secrets have an expiry. Set a calendar reminder before expiry; rotation requires updating the secret in the Azure portal and redeploying with the new value. The bot will stop working the moment the secret expires.
+
+---
+
+## Facilitating onboarding (future work)
+
+This setup is ~30–45 min of mostly-manual Azure/Teams clicking. The Azure-side steps (app registration, Azure Bot, Teams admin approval) are inherent to the platform and can't be automated from spacebot without Graph API access + delegated admin consent. But several parts *can* be made easier, roughly in increasing effort:
+
+1. **Ship the manifest generator** (low effort, high value). The Python script above is already a working generator. Promote it to a first-class tool — e.g. a `spacebot teams-manifest --app-id <id> --name "..."` subcommand (or a `scripts/` file) that emits a valid `teams-app.zip` with correct icons and a fresh app GUID. Removes the #1 source of failure (hand-edited manifests: `packageName`/`id`/version).
+2. **Pre-fill from the Channels UI** (medium). The v1.2 *Settings → Channels → Teams* form already collects `app_id`/`tenant_id`/secret. It could also offer a **"Download Teams app package"** button that runs the generator server-side and hands back the zip — so the admin never touches JSON.
+3. **Guided checklist in the UI** (medium). A step-by-step panel mirroring this doc (with the ⚠️ gotchas inline), plus a **live "/health via your endpoint" probe** and an **"inbound received / JWT validated" indicator** to confirm the Azure wiring before the admin goes hunting.
+4. **Publish to the Teams Store** (high effort, only if distributing broadly). Microsoft store validation + review; gives users one-click install but is overkill for internal/self-hosted deployments and adds a review/maintenance burden. Not recommended unless spacebot ships a public Teams app.
+
+**Recommended next:** (1) — turn the generator into a CLI command and link it from this doc; it's small and kills the manifest pitfalls outright.
