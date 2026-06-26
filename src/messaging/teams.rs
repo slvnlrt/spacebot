@@ -1416,6 +1416,11 @@ impl Messaging for TeamsAdapter {
         // Extract text + any cards (or return Ok(()) for unsupported variants).
         let (text, attachments) = match response {
             OutboundResponse::Text(t) => (t, Vec::new()),
+            // Teams threads via the conversation id itself (channel messages
+            // carry ...@thread.tacv2;messageid=<root>), and respond posts back
+            // to that id forwarding reply_to_id — so a ThreadReply already
+            // lands in the originating thread. `thread_name` (a Discord-style
+            // named new thread) has no Bot Framework equivalent and is dropped.
             OutboundResponse::ThreadReply { text, .. } => (text, Vec::new()),
             OutboundResponse::Ephemeral { text, .. } => (text, Vec::new()),
             OutboundResponse::ScheduledMessage { text, .. } => (text, Vec::new()),
@@ -1438,6 +1443,8 @@ impl Messaging for TeamsAdapter {
                 }
                 (text, atts)
             }
+            // Reactions are not in the Bot Connector REST API (they need
+            // Microsoft Graph + a separate auth scope) — deferred, see roadmap.
             OutboundResponse::Reaction(_)
             | OutboundResponse::RemoveReaction(_)
             | OutboundResponse::Status(_)

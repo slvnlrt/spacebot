@@ -130,6 +130,9 @@ Because `Interaction` is flattened to its `Display` string before the LLM (fact 
 ## Phasing
 - **v2a (easy wins):** outbound Adaptive/Hero cards (`RichMessage.cards`), typing (`Status`), inbound `Media` attachments (personal scope). Each is an additive `respond`/`activity_to_inbound` arm + a test.
 - **v2b:** thread replies (`ThreadReply` + the `;messageid=` conversation-id handling), card-button `Action.Submit` → `Interaction`, outbound reactions.
+
+> **v2b status (2026-06-26):** SHIPPED card-button interactions (outbound `interactive_elements` → Adaptive Card actions; inbound `Action.Submit` `value` → `MessageContent::Interaction`). Plan: `docs/superpowers/plans/2026-06-26-teams-v2b.md`. **Deferred:** thread replies (already satisfied — Teams threads via the conversation id + `reply_to_id`, no code needed) and outbound reactions (not in the Bot Connector REST API; need Microsoft Graph + a separate auth scope — a distinct subsystem). Select menus (`InteractiveElements::Select`) deferred within interactions (buttons cover the high-value cases).
+
 - **v2c (hard):** streaming (the `streaminfo` protocol — personal chat only; map `StreamStart/Chunk/End`, send cumulative text, throttle to 1/s, handle the 2-min cap).
 
 ### Touchpoints
