@@ -106,16 +106,18 @@ This is the only routing change. Everything non-approval flows unchanged. (Placi
 ### [D] Approval resolver — NEW (the security crux)
 ```
 1. parse task_number + decision + expires_at from the interaction.
-2. authz: is message.sender_id ∈ approvers(task)?   ← RBAC. Deny → update card "not authorized" (or ignore), do NOT call the API.
+2. authz: is message.sender_id ∈ approvers(task)?   ← RBAC. Deny → update card "not authorized" (or ignore), do NOT touch the gate.
 3. expiry: now > expires_at → update card "expired", stop.
-4. idempotency: call the gate via update_with_status_transition; only act on the
-   result if previous_status == PendingApproval (this call performed the transition).
-   A later click finds Ready/Backlog → "already resolved by Y", no re-trigger.
-   (Necessary because can_transition allows current==next, so a double /approve returns 200, not an error — store.rs:662-673.)
+4. idempotency: call the store's update_with_status_transition IN-PROCESS and inspect
+   its returned `previous_status`; only act if previous_status == PendingApproval (this
+   call performed the transition). A later click finds Ready/Backlog → "already resolved
+   by Y", no re-trigger.
 5. record the REAL approver identity (sender_id) as approved_by — not a client-supplied value.
 6. update the card (→ [E]) to "Approved/Rejected by <approver> at <T>".
 ```
 Reject = transition `PendingApproval → Backlog` (park; `can_transition` allows `→ Backlog` from any state). Approve = `→ Ready`.
+
+**⚠ C1 (Opus review) — do NOT call `POST /tasks/{n}/approve`.** That endpoint's handler (`approve_task`, `api/tasks.rs`) goes through `store.update`, which **discards** `previous_status` (`store.rs:372-377`: `.map(|result| result.task)`). The idempotency check in step 4 *requires* `previous_status`, which is only surfaced by `store.update_with_status_transition` (`store.rs:379-417`). So the resolver must call `update_with_status_transition` **directly in-process** (the inbound consumer already owns `api_state` → the task store), not the HTTP endpoint. `update_with_status_transition` opens `BEGIN IMMEDIATE` and re-reads status inside the transaction, so two simultaneous clicks serialize: the first sees `previous_status == PendingApproval`, the second sees `Ready` — making "did THIS call perform the transition" decidable atomically per row, and `COALESCE(?, approved_by)` (`store.rs:544`) records the winning approver. (Alternatively, extend `approve_task` to surface `previous_status` — but in-process is simpler and avoids a round-trip.)
 
 ### [E] Card-update capability — NEW (trait method + per-adapter + fallback)
 Add to the `Messaging` trait:
@@ -158,8 +160,8 @@ Per-adapter:
 |---|---|---|---|
 | Render Approve/Reject buttons | ✅ Adaptive Card actions (v2b) | ✅ Block Kit | ✅ components |
 | Inbound click → `Interaction` | ✅ (v2b) | ✅ | ✅ |
-| Proactive send (broadcast) of a card | ⚠ broadcast is Text-only today → extend | ⚠ verify | ⚠ verify |
-| Update the card in place | ⚠ `PUT activities/{id}` — implement (Bot FW supports it) | ✅ `chat.update` (exists) | ✅ `edit_message` (exists) |
+| Proactive send (broadcast) of a card | ⚠ broadcast is Text-only today → extend | ✅ already does `RichMessage{blocks}` (`slack.rs:1159`) | ✅ already does `RichMessage{cards,interactive_elements}` (`discord.rs:432`) |
+| Update the card in place | ⚠ `PUT activities/{id}` — implement (Bot FW supports it) | ✅ `chat.update` (exists, `slack.rs:1106`) | ✅ `edit_message` (exists, `discord.rs:340`) |
 | Stable approver identity | `from.id` (MRI); `aadObjectId` available (O2) | `U…` user id | snowflake |
 
 Every channel can do the full loop; the per-adapter work is small (extend broadcast to cards; implement update). Teams ships first because v2b already built its button round-trip.
@@ -191,6 +193,18 @@ Every channel can do the full loop; the per-adapter work is small (extend broadc
 - **Interceptor placement** must be before coalescing/agent dispatch and must not swallow non-approval interactions (which still flow to the agent as today).
 
 ---
+
+## 8b. Opus design-review revisions (2026-06-27) — must be honored by the plan
+
+Verdict: **Sound-with-changes.** Both self-corrections upheld (Teams `PUT activity` is real; the shared inbound interceptor is the right seam). Beyond C1 (folded into [D]) and the §5 broadcast correction (Slack/Discord already render cards → card-broadcast is **Teams-only** work, making phase 3 nearly free):
+
+- **Interceptor placement (refines [C]).** `resolve_agent_for_message` drops messages via `require_mention` with a `continue` at `main.rs:~2211-2218`, *before* the `message_tx.send` point. An approval click carries no @-mention, so the interceptor must run **above** mention-gating (right after `conversation_id` is known), or clicks in mention-gated channels are silently swallowed.
+- **Identity trust is not uniform (refines §4).** Only Teams validates inbound via JWT (`teams.rs:1576`); Slack/Discord `sender_id` is trusted from the platform's signed webhook envelope, not an independently-verifiable per-user token. State the per-adapter trust basis; do not claim JWT-grade parity off Teams. Promote `aadObjectId` capture (O2) from "fast-follow" — approver lists keyed on opaque `29:…` MRIs are brittle.
+- **`broadcast` default is a silent no-op (I1).** `Messaging::broadcast` defaults to `async { Ok(()) }` (`traits.rs:225`), so an adapter that doesn't override it swallows the card and reports success. The dispatcher must treat the broadcast result as load-bearing, log/alert on failure, and **always** keep the dashboard notification as the fallback. Adapters that cannot broadcast a card should return an error, not `Ok`.
+- **Card id for non-click updates (I3).** The click round-trips the card id (Slack `message_ts`, Discord `component.message.id`, Teams `reply_to_id`/`id`), so click-driven updates need no send-time state — but **expiry sweeps, dashboard-resolution-while-card-live, and cancellation have no click and thus no id**. Either (a) capture the card id at send time (requires `broadcast`/`send_activity` to return the platform id — today they return `()`), or (b) scope expiry to "reject the click when it eventually arrives" rather than proactively updating the un-clicked card. Decide in the plan.
+- **Reject is non-terminal (refines O4 → §8 risk).** `can_transition` allows `Backlog → Ready` and `Done → Ready` (`store.rs:677-678`), so `→ Backlog` reject does **not** permanently block the action — a later `/approve` or re-park→approve can still execute it. A real `Rejected` terminal state is the only way to make rejection final (deferred). Call this out as a security risk, not just a phasing note.
+- **Duplicated trigger (I4).** `maybe_emit_approval_notification` is called from `create_task` (`api/tasks.rs:295`) and `update_task` (`api/tasks.rs:350`), and the emission is *also* duplicated inline in `tools/task_create.rs:161-173`. `PendingApproval` is only entered via those paths (`send_agent_message.rs:244` creates **Ready** tasks, bypassing approval by design). The dispatcher hook must cover all emission sites — consider consolidating them first (DRY) so there's one chokepoint.
+- **Teams serviceUrl precondition (O5/I6).** A Teams proactive send needs the conversation's `serviceUrl`, kept in the per-instance `service_urls` sidecar (`teams.rs:~1590`). Since the task originated from that conversation, the originating instance has it — **but** if `sidecar_path` is `None` (in-memory only) a restart between task-creation and approval loses it, and in a multi-instance deploy a *different* instance may dispatch. Require sidecar persistence as a precondition for the Teams card path; treat "serviceUrl unknown" as the dashboard-fallback case, never a panic.
 
 ## 9. Code seam index (verified, for the eventual implementation plan)
 - Gate: `src/tasks/store.rs:19` (PendingApproval), `:379` (update_with_status_transition + previous_status), `:544` (COALESCE approved_by), `:662-673` (can_transition). `src/api/tasks.rs` approve_task + `maybe_emit_approval_notification` (`:156-172`).
