@@ -27,8 +27,8 @@ The single place for "what's left", with the reason each item is not built yet.
 
 | Item | Status / why deferred | Lands in |
 |---|---|---|
-| **Outbound reactions** (`OutboundResponse::Reaction`) | No-op today. Not in the Bot Connector REST API — needs Microsoft Graph (`ChannelMessage.*`) + a separate auth scope/consent. Distinct subsystem, medium–high effort. | own plan |
-| **Inbound reactions** (`type:"messageReaction"`) | Dropped today (no inbound-reaction `MessageContent` variant). Could map to `Interaction` or stay dropped. | with reactions |
+| **Outbound reactions** (`OutboundResponse::Reaction`) | No-op, and **not achievable as the bot** (verified 2026-06, Microsoft Learn). The Bot Connector REST API has no reaction operation and `messageReaction` is inbound-only. The only setter, Graph `chatMessage: setReaction`, is **delegated-only** — Application permission is "Not supported" in v1.0 **and** beta — so it requires a signed-in user and the reaction is attributed to that user, not the bot. Blocked unless Microsoft adds app-only support. | blocked (platform) |
+| **Inbound reactions** (`type:"messageReaction"`) | **Feasible via the Bot Framework** — Teams delivers `messageReaction` activities (reactions on the bot's own messages); no Graph needed. Deferred only because spacebot has no inbound-reaction `MessageContent` variant, so the adapter drops these activities today. Wiring = add a representation (or map to `Interaction`) + an `activity_to_inbound` arm. | own plan |
 | **Select menus** (`InteractiveElements::Select` → `Input.ChoiceSet`) | Deferred within v2b — buttons cover the high-value cases; ChoiceSet input/submit correlation is better validated against a live client. | v2b follow-up |
 | **Streaming** (`StreamStart/Chunk/End`) | Teams `streaminfo`: personal-chat only, cumulative text, ≤1 req/s, 2-min cap. Low ROI for whole-message replies; hard. May stay deferred. | v2c |
 | **`Action.Execute` / task modules / messaging extensions** | `invoke` needs a synchronous 5s HTTP-body response; our fire-and-forget `respond` can't provide it. | out of scope |
@@ -38,6 +38,8 @@ The single place for "what's left", with the reason each item is not built yet.
 | **Richer approver/DM identity** (`aadObjectId`/UPN) | DM allowlist (and future approver checks) match `activity.from.id` (MRI) today; org-meaningful identities are a v3 enhancement (O2). | v3 |
 | **Cross-adapter hot-reload teardown** (fail-closed on disable) | NOT Teams-specific: removing any adapter's config on hot-reload neither stops the running adapter nor tightens its permissions (Signal/Slack/Teams alike). Raised by CodeRabbit on #607, declined there for parity. A hardening follow-up across **all** adapters. | cross-adapter PR |
 | **Onboarding facilitation** | `spacebot teams-manifest` CLI + a "Download Teams app package" button in the Channels UI. | optional |
+
+> **Outbound-reaction research (2026-06):** [Bot Connector REST API reference](https://learn.microsoft.com/en-us/azure/bot-service/rest-api/bot-framework-rest-connector-api-reference?view=azure-bot-service-4.0) (no reaction op); [Graph `chatMessage: setReaction` v1.0](https://learn.microsoft.com/en-us/graph/api/chatmessage-setreaction?view=graph-rest-1.0) and [beta](https://learn.microsoft.com/en-us/graph/api/chatmessage-setreaction?view=graph-rest-beta) (Application permission "Not supported" in both); [Activity spec](https://github.com/Microsoft/botframework-sdk/blob/main/specs/botframework-activity/botframework-activity.md) (`messageReaction` is an inbound social interaction). Conclusion: bot-initiated reactions are not possible as the app identity.
 
 ## Where v1 stands
 
