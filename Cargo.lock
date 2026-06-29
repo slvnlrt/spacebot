@@ -9817,6 +9817,7 @@ dependencies = [
  "futures",
  "hex",
  "ignore",
+ "image",
  "imap",
  "indoc",
  "jsonwebtoken 9.3.1",
