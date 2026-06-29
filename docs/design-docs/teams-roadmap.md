@@ -15,6 +15,30 @@
 - **DM `"*"` wildcard (Teams)** — **SHIPPED** (commit `c0284293`): `dm_allowed_users = ["*"]` allows any DM sender (mirrors Signal); empty still blocks all. The cross-adapter upstream alignment (Slack/Mattermost/Twitch) is **PR #605** (`spacedriveapp/spacebot`, open).
 - **v1.1 (multi-bot) / v2c / v3** — designed below, not yet built. (v1.1's watcher-parity sub-item is done via v1.2; what remains of v1.1 is the shared-listener multi-bot work. **v2c** = streaming. **v3** approval cards → see the channel-agnostic `docs/design-docs/approval-cards-design.md`.)
 
+## Upstream delivery (spacedriveapp/spacebot)
+
+- **PR #607** — Microsoft Teams channel adapter (backend + `teams-setup.mdx`). **OPEN.** CodeRabbit review addressed (commits `9a94d957`/`104df402`): single-instance routing fix, hot-reload named-instance warning, `dm_allowed_users` doc comment; the "fail-open on disable" finding was declined as cross-adapter parity (tracked in Deferred). `just gate-pr` green (970 tests). Branch `pr/teams-adapter` off `main`.
+- **PR #608** — Teams in the Channels settings UI. **DRAFT**, stacked on #607. When #607 merges: rebase `pr/teams-channels-ui` onto `main`, mark ready (diff becomes UI-only).
+- **PR #605** — `"*"` DM/user allow-all wildcard alignment for Slack/Mattermost/Twitch (Discord/Telegram excluded — numeric id vectors). **OPEN.** Branch `pr/dm-allow-all-wildcard` off `main`.
+
+## Deferred / out-of-scope — tracked backlog
+
+The single place for "what's left", with the reason each item is not built yet.
+
+| Item | Status / why deferred | Lands in |
+|---|---|---|
+| **Outbound reactions** (`OutboundResponse::Reaction`) | No-op today. Not in the Bot Connector REST API — needs Microsoft Graph (`ChannelMessage.*`) + a separate auth scope/consent. Distinct subsystem, medium–high effort. | own plan |
+| **Inbound reactions** (`type:"messageReaction"`) | Dropped today (no inbound-reaction `MessageContent` variant). Could map to `Interaction` or stay dropped. | with reactions |
+| **Select menus** (`InteractiveElements::Select` → `Input.ChoiceSet`) | Deferred within v2b — buttons cover the high-value cases; ChoiceSet input/submit correlation is better validated against a live client. | v2b follow-up |
+| **Streaming** (`StreamStart/Chunk/End`) | Teams `streaminfo`: personal-chat only, cumulative text, ≤1 req/s, 2-min cap. Low ROI for whole-message replies; hard. May stay deferred. | v2c |
+| **`Action.Execute` / task modules / messaging extensions** | `invoke` needs a synchronous 5s HTTP-body response; our fire-and-forget `respond` can't provide it. | out of scope |
+| **Multi-bot** | Single Teams listener today (named `[[messaging.teams.instances]]` are parsed, warned, and NOT started; routing always resolves to `teams`). Needs a shared inbound listener demuxing by JWT `aud`. | v1.1 |
+| **Human-approval Adaptive Cards** | Channel-agnostic design done (`approval-cards-design.md`, Opus-reviewed); not built. Notification→messaging bridge + approver RBAC + `Messaging::update_message`. Decisions O1/O2/O4 pending. | v3 |
+| **Channel-scope inbound files** | Inbound files are personal-scope only; channel files need Microsoft Graph. | out of scope |
+| **Richer approver/DM identity** (`aadObjectId`/UPN) | DM allowlist (and future approver checks) match `activity.from.id` (MRI) today; org-meaningful identities are a v3 enhancement (O2). | v3 |
+| **Cross-adapter hot-reload teardown** (fail-closed on disable) | NOT Teams-specific: removing any adapter's config on hot-reload neither stops the running adapter nor tightens its permissions (Signal/Slack/Teams alike). Raised by CodeRabbit on #607, declined there for parity. A hardening follow-up across **all** adapters. | cross-adapter PR |
+| **Onboarding facilitation** | `spacebot teams-manifest` CLI + a "Download Teams app package" button in the Channels UI. | optional |
+
 ## Where v1 stands
 
 v1 (shipped on `feat/teams-channel`) implements: own axum inbound server (`POST /api/messages` + `/health`), Azure JWT validation (RS256, `iss`/`aud`/`exp` required), `Activity` → `InboundMessage::Text`, `TeamsPermissions` enforcement, outbound `respond`/`broadcast` of **text** with an SSRF-guarded serviceUrl, registration mirroring Slack, `target.rs` routing, @mention detection, `extract_platform_meta`. **One bot per port** (named instances are parsed but deliberately not started — `src/main.rs:3612` warns).
