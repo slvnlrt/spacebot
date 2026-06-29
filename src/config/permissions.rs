@@ -192,6 +192,17 @@ impl SlackPermissions {
             dm_allowed_users,
         }
     }
+
+    /// Whether `user_id` may DM the bot. Fail-closed: an empty allowlist
+    /// blocks all DMs. A `"*"` entry is an explicit allow-all wildcard
+    /// (consistent with the Signal adapter's convention).
+    pub fn dm_user_allowed(&self, user_id: &str) -> bool {
+        !self.dm_allowed_users.is_empty()
+            && self
+                .dm_allowed_users
+                .iter()
+                .any(|u| u == "*" || u == user_id)
+    }
 }
 
 /// Hot-reloadable Telegram permission filters.
@@ -323,6 +334,18 @@ impl TwitchPermissions {
             channel_filter,
             allowed_users,
         }
+    }
+
+    /// Whether `login` may interact with the bot. Fail-open: an empty
+    /// allowlist accepts all users (Twitch's existing semantics). A `"*"`
+    /// entry is an explicit allow-all wildcard; matching is case-insensitive
+    /// (Twitch logins are case-insensitive).
+    pub fn user_allowed(&self, login: &str) -> bool {
+        self.allowed_users.is_empty()
+            || self
+                .allowed_users
+                .iter()
+                .any(|u| u == "*" || u.eq_ignore_ascii_case(login))
     }
 }
 
@@ -529,6 +552,17 @@ impl MattermostPermissions {
             channel_filter,
             dm_allowed_users,
         }
+    }
+
+    /// Whether `user_id` may DM the bot. Fail-closed: an empty allowlist
+    /// blocks all DMs. A `"*"` entry is an explicit allow-all wildcard
+    /// (consistent with the Signal adapter's convention).
+    pub fn dm_user_allowed(&self, user_id: &str) -> bool {
+        !self.dm_allowed_users.is_empty()
+            && self
+                .dm_allowed_users
+                .iter()
+                .any(|u| u == "*" || u == user_id)
     }
 }
 
@@ -834,5 +868,97 @@ mod base64_tests {
         assert!(!is_valid_base64("not@valid!base64"));
         assert!(!is_valid_base64(""));
         assert!(!is_valid_base64("   "));
+    }
+}
+
+#[cfg(test)]
+mod dm_wildcard_tests {
+    use super::*;
+
+    fn slack(users: Vec<&str>) -> SlackPermissions {
+        SlackPermissions {
+            workspace_filter: None,
+            channel_filter: HashMap::new(),
+            dm_allowed_users: users.into_iter().map(String::from).collect(),
+        }
+    }
+
+    fn mattermost(users: Vec<&str>) -> MattermostPermissions {
+        MattermostPermissions {
+            team_filter: None,
+            channel_filter: HashMap::new(),
+            dm_allowed_users: users.into_iter().map(String::from).collect(),
+        }
+    }
+
+    fn twitch(users: Vec<&str>) -> TwitchPermissions {
+        TwitchPermissions {
+            channel_filter: None,
+            allowed_users: users.into_iter().map(String::from).collect(),
+        }
+    }
+
+    // --- Slack: fail-closed DM allowlist ---
+
+    #[test]
+    fn slack_wildcard_allows_any_user() {
+        let p = slack(vec!["*"]);
+        assert!(p.dm_user_allowed("U123"));
+        assert!(p.dm_user_allowed("U-anyone-else"));
+    }
+
+    #[test]
+    fn slack_empty_blocks_all() {
+        assert!(!slack(vec![]).dm_user_allowed("U123"));
+    }
+
+    #[test]
+    fn slack_specific_is_exact_match() {
+        let p = slack(vec!["U123"]);
+        assert!(p.dm_user_allowed("U123"));
+        assert!(!p.dm_user_allowed("U999"));
+    }
+
+    // --- Mattermost: fail-closed DM allowlist (same shape as Slack) ---
+
+    #[test]
+    fn mattermost_wildcard_allows_any_user() {
+        assert!(mattermost(vec!["*"]).dm_user_allowed("user-id-abc"));
+    }
+
+    #[test]
+    fn mattermost_empty_blocks_all() {
+        assert!(!mattermost(vec![]).dm_user_allowed("user-id-abc"));
+    }
+
+    #[test]
+    fn mattermost_specific_is_exact_match() {
+        let p = mattermost(vec!["user-id-abc"]);
+        assert!(p.dm_user_allowed("user-id-abc"));
+        assert!(!p.dm_user_allowed("other-user"));
+    }
+
+    // --- Twitch: fail-open user allowlist, case-insensitive ---
+
+    #[test]
+    fn twitch_empty_allows_all() {
+        assert!(twitch(vec![]).user_allowed("anyone"));
+    }
+
+    #[test]
+    fn twitch_wildcard_allows_all() {
+        // Before this change, ["*"] would have rejected everyone except a
+        // literal "*" login — the footgun this wildcard support removes.
+        let p = twitch(vec!["*"]);
+        assert!(p.user_allowed("SomeStreamer"));
+        assert!(p.user_allowed("another_viewer"));
+    }
+
+    #[test]
+    fn twitch_specific_is_case_insensitive() {
+        let p = twitch(vec!["CoolMod"]);
+        assert!(p.user_allowed("coolmod"));
+        assert!(p.user_allowed("COOLMOD"));
+        assert!(!p.user_allowed("someone_else"));
     }
 }

@@ -238,9 +238,7 @@ impl Messaging for TwitchAdapter {
                             }
 
                         // User filter
-                        if !permissions.allowed_users.is_empty()
-                            && !permissions.allowed_users.iter().any(|u| u.eq_ignore_ascii_case(&privmsg.sender.login))
-                        {
+                        if !permissions.user_allowed(&privmsg.sender.login) {
                             continue;
                         }
 

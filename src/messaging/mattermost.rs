@@ -1142,13 +1142,10 @@ fn build_message_from_post(
     }
 
     // DM filter: if channel_type is "D", enforce dm_allowed_users (fail-closed)
-    if post.channel_type.as_deref() == Some("D") {
-        if context.permissions.dm_allowed_users.is_empty() {
-            return None;
-        }
-        if !context.permissions.dm_allowed_users.contains(&post.user_id) {
-            return None;
-        }
+    if post.channel_type.as_deref() == Some("D")
+        && !context.permissions.dm_user_allowed(&post.user_id)
+    {
+        return None;
     }
 
     // "D" = direct message, "G" = group DM

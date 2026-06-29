@@ -205,7 +205,7 @@ async fn handle_message_event(
             return Ok(());
         }
         if let Some(ref sender_id) = user_id
-            && !perms.dm_allowed_users.contains(sender_id)
+            && !perms.dm_user_allowed(sender_id)
         {
             tracing::debug!(
                 channel_id,
