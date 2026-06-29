@@ -34,12 +34,23 @@ The single place for "what's left", with the reason each item is not built yet.
 | **`Action.Execute` / task modules / messaging extensions** | `invoke` needs a synchronous 5s HTTP-body response; our fire-and-forget `respond` can't provide it. | out of scope |
 | **Multi-bot** | Single Teams listener today (named `[[messaging.teams.instances]]` are parsed, warned, and NOT started; routing always resolves to `teams`). Needs a shared inbound listener demuxing by JWT `aud`. | v1.1 |
 | **Human-approval Adaptive Cards** | Channel-agnostic design done (`approval-cards-design.md`, Opus-reviewed); not built. Notification→messaging bridge + approver RBAC + `Messaging::update_message`. Decisions O1/O2/O4 pending. | v3 |
-| **Channel-scope inbound files** | Inbound files are personal-scope only; channel files need Microsoft Graph. | out of scope |
+| **Channel-scope inbound files** | Inbound files are personal-scope only; channel files need Microsoft Graph. | needs Graph |
+| **Teams conversation history backfill** | Teams does not override `fetch_history`, so the agent only sees messages received after the bot joined (resumes are seeded from spacebot's own store, capped at `history_backfill_count` = 50). Fetching prior chat/channel history needs Microsoft Graph (`GET /chats/{id}/messages`, `GET /teams/{id}/channels/{id}/messages`) — app-permission is protected/metered, or delegated (user context). Unlike Slack/Discord/Mattermost/Email, which backfill from the platform on conversation open. | needs Graph |
 | **Richer approver/DM identity** (`aadObjectId`/UPN) | DM allowlist (and future approver checks) match `activity.from.id` (MRI) today; org-meaningful identities are a v3 enhancement (O2). | v3 |
 | **Cross-adapter hot-reload teardown** (fail-closed on disable) | NOT Teams-specific: removing any adapter's config on hot-reload neither stops the running adapter nor tightens its permissions (Signal/Slack/Teams alike). Raised by CodeRabbit on #607, declined there for parity. A hardening follow-up across **all** adapters. | cross-adapter PR |
 | **Onboarding facilitation** | `spacebot teams-manifest` CLI + a "Download Teams app package" button in the Channels UI. | optional |
 
 > **Outbound-reaction research (2026-06):** [Bot Connector REST API reference](https://learn.microsoft.com/en-us/azure/bot-service/rest-api/bot-framework-rest-connector-api-reference?view=azure-bot-service-4.0) (no reaction op); [Graph `chatMessage: setReaction` v1.0](https://learn.microsoft.com/en-us/graph/api/chatmessage-setreaction?view=graph-rest-1.0) and [beta](https://learn.microsoft.com/en-us/graph/api/chatmessage-setreaction?view=graph-rest-beta) (Application permission "Not supported" in both); [Activity spec](https://github.com/Microsoft/botframework-sdk/blob/main/specs/botframework-activity/botframework-activity.md) (`messageReaction` is an inbound social interaction). Conclusion: bot-initiated reactions are not possible as the app identity.
+
+### Graph backlog (would need a Microsoft Graph module on top of the Bot Framework core)
+
+The Bot Framework is the right conversational core (see "if we had used Graph instead" analysis — Graph lacks push delivery, bot identity, and interactive-card callbacks, and app-permission messaging is protected/metered). A few capabilities are nonetheless **only reachable via Graph**, so they would be added as an optional Graph module (hybrid pattern), each with its own auth (app-permission *protected*/metered, or delegated user token via SSO/OBO):
+
+- **Conversation history backfill** — read prior chat/channel messages to seed a new conversation (today: none for Teams).
+- **Channel-scope inbound files** — files shared in channels (today: personal-scope only).
+- **Reactions** — set/read; note `setReaction` is **delegated-only** (no app-identity path), so a "bot reacts" is not achievable even via Graph — only "a user reacts via our code".
+
+Each is its own plan; none is started.
 
 ## Where v1 stands
 
