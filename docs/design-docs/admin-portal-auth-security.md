@@ -66,6 +66,35 @@ C'est un design **local-first / mono-opérateur** assumé — correct pour un d�
 + firewall restreint aux IP autorisées. ⚠️ vérifier qu'un appel `/api/...` sans header renvoie bien **401**. (Reste
 sans TLS → token en clair : déconseillé sur réseau partagé.)
 
+## ⚠️ Bug applicatif : l'auth-ON casse les chargements natifs du navigateur (vérifié 2026-06-29)
+
+**Constat (app-wide, pas spécifique à une feature) :** quand `auth_token` **est défini**, `api_auth_middleware`
+(`src/api/server.rs:362-367`) exige un header `Authorization: Bearer` sur tout `/api/*` (sauf `/health`). Or ce token
+ne vit que dans le `localStorage` et n'est attaché **que par le client JS `fetch`** (`interface/src/api/client-typed.ts:18`).
+Donc **tout ce que le navigateur charge nativement — sans passer par `fetch` — part sans token et reçoit un 401** :
+
+- **Téléchargements** via `<a href download>` : pièces jointes (`PortalTimeline.tsx:56,122`), bouton de package Teams
+  (carte Channels) ;
+- **Images** via `<img src>` : avatars d'agents (`GeneralEditor.tsx:30`), vignettes de pièces jointes
+  (`PortalTimeline.tsx:42,108`).
+
+Les données / formulaires / mutations (qui passent par `fetch`) continuent de fonctionner. **Effet net en auth-ON :
+images cassées + téléchargements en échec un peu partout dans l'UI, silencieusement.**
+
+**Gravité :** ce n'est **pas une faille de sécu** (échoue *fermé* → 401, aucune fuite) — c'est un **bug
+fonctionnel/UX du mode auth-activée**. Sévérité élevée *pour qui active l'auth sur le web* (typiquement une expo
+publique via cloudflared/reverse-proxy avec auth on), nulle en déploiement par défaut (auth off). Ce n'est introduit
+par aucune feature récente : tous ces points suivent le même pattern bare-`<a>`/`<img>` historique.
+
+**Corrections possibles (app-wide — pas un patch ponctuel par feature) :**
+1. **`fetch` authentifié → `URL.createObjectURL` (blob)** pour télécharger / alimenter les `<img>` : le JS récupère
+   avec le header Bearer puis crée un object URL. Le plus propre, marche partout. À appliquer à *tous* les points.
+2. **Cookie `HttpOnly`** pour le token → le navigateur l'enverrait automatiquement sur `<a>`/`<img>`. ⚠️ mais
+   `server.rs:280` indique que les cookies ont été **désactivés exprès** (anti-CSRF) : rouvre une décision d'archi.
+3. **Token de requête signé court** dans l'URL des ressources → met le token dans les URLs/logs : déconseillé.
+
+→ À traiter dans le **chantier Auth + RBAC** ci-dessous, pas en correctif isolé.
+
 ## Améliorations in-app (roadmap — non planifié)
 
 Si on veut de l'auth admin **native** (au lieu de déléguer au proxy) :
@@ -73,10 +102,13 @@ Si on veut de l'auth admin **native** (au lieu de déléguer au proxy) :
 - autorisation : **RBAC** pour opérateurs (lecture seule / admin / etc.) ;
 - **TLS** natif (ou rester derrière proxy) ;
 - **audit log** des actions admin ;
-- fail-closed : warning/refus si exposé (`0.0.0.0`) sans auth.
+- fail-closed : warning/refus si exposé (`0.0.0.0`) sans auth ;
+- **chargements de ressources authentifiés** (cf. bug ci-dessus) : faire passer downloads + images par `fetch`+blob
+  (ou trancher la question cookie) pour que l'auth-ON ne casse plus l'UI.
 
 C'est une **feature produit séparée**, **orthogonale à la branche mémoire SurrealDB** (ne bloque pas son merge) et
-**distincte du user-scoping des mémoires** (utilisateurs des canaux de chat). À scoper le jour où on décide d'agir.
+**distincte du user-scoping des mémoires** (utilisateurs des canaux de chat). À scoper le jour où on décide d'agir —
+le bug auth-ON ci-dessus est le déclencheur concret qui justifie d'ouvrir ce chantier.
 
 ## Statut
 
