@@ -164,8 +164,13 @@ impl ChannelStore {
             return Ok(Some(channel.clone()));
         }
 
-        // Match against the raw channel ID
-        if let Some(channel) = channels.iter().find(|c| c.id.contains(&name_lower)) {
+        // Match against the channel ID (case-insensitive: Teams conversation ids
+        // contain uppercase chars, so compare the lowercased id against the
+        // already-lowercased query rather than the raw id).
+        if let Some(channel) = channels
+            .iter()
+            .find(|c| c.id.to_lowercase().contains(&name_lower))
+        {
             return Ok(Some(channel.clone()));
         }
 
